@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node.js in TMPS
+TMPS/node_modules
+TMPS/build
+TMPS/dist
+
+# IDE / OS specific
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Environment files (should be passed at runtime)
+env/
+.env*

@@ -1,0 +1,21 @@
+(venv) huzaifah@landevaiser:/lanciere/devstorage/huzaifah/Edu-app/check_db$ python check_mongo.py
+?? TMPS MongoDB Integration Test
+============================================================
+?? Testing MongoDB Connection for TMPS...
+============================================================
+?? Connection: mongodb://connectly:***@192.168.48.201:27017/connectlydb
+?? Auth Source: connectlydb
+?? Summaries Collection: original-1
+?? Results Collection: mock_test_results
+?? Connecting to MongoDB...
+? Connection successful!
+?? Testing 'original-1' collection...
+?? Total summaries with content: 0
+?? No summaries found! Check collection name and data.
+?? Connection closed.
+?? Verifying Application Configuration...
+?? Could not import application config: No module named 'weekend_mocktest'
+   (This is normal if running outside the application directory)
+============================================================
+? FAILURE: MongoDB connection issues detected.
+   Please resolve the connection issues before starting TMPS.

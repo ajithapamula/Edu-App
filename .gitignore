@@ -1,0 +1,41 @@
+# === Python Artifacts ===
+__pycache__/
+
+# === Virtual Environments ===
+venvapp/
+venv/
+certs/
+avenv/
+# === IDEs and Editors ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# === OS Files ===
+.DS_Store
+Thumbs.db
+
+# === FastAPI / Web Projects ===
+*.db
+*.sqlite3
+mock_test.db
+uploads/
+
+audio/
+*.log
+
+# === Static / Compiled / Generated Files ===
+*.mp3
+*.wav
+*.ogg
+*.webm
+
+# === Environment & Credentials ===
+.env
+weekend_mocktest/vector_store/
+*.key
+*.cert
+*.pem
+
+

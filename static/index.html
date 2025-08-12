@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FastAPI Project Launcher</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 3rem;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            max-width: 1200px;
+            width: 90%;
+            backdrop-filter: blur(10px);
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            color: #666;
+            margin-bottom: 3rem;
+            line-height: 1.6;
+        }
+
+        .modules-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .module-card {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            border: none;
+            padding: 2rem;
+            border-radius: 15px;
+            text-decoration: none;
+            color: #333;
+            transition: all 0.3s ease;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08);
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .module-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+            transition: left 0.5s;
+        }
+
+        .module-card:hover::before {
+            left: 100%;
+        }
+
+        .module-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.15);
+        }
+
+        .module-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+
+        .module-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #333;
+        }
+
+        .module-description {
+            font-size: 0.9rem;
+            color: #666;
+            line-height: 1.5;
+        }
+
+        .footer {
+            margin-top: 2rem;
+            padding-top: 2rem;
+            border-top: 1px solid #eee;
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .health-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #4CAF50;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 2rem;
+                margin: 1rem;
+            }
+
+            .modules-grid {
+                grid-template-columns: 1fr;
+            }
+
+            h1 {
+                font-size: 2rem;
+            }
+
+            .module-card {
+                padding: 1.5rem;
+            }
+
+            .module-icon {
+                font-size: 2rem;
+            }
+        }
+
+        @media (max-width: 1024px) and (min-width: 769px) {
+            .modules-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="health-indicator" id="healthIndicator">
+        ● System Online
+    </div>
+
+    <div class="container">
+        <h1>Choose a Module</h1>
+        <p class="subtitle">
+            Welcome to the FastAPI project launcher. Select a module below to access its features.
+        </p>
+
+        <div class="modules-grid">
+            <a href="/daily_standup" class="module-card">
+                <span class="module-icon">🎤</span>
+                <div class="module-title">Daily Standup</div>
+                <div class="module-description">Voice-based testing system with AI-powered questions and real-time evaluation</div>
+            </a>
+
+            <a href="/weekend_mocktest" class="module-card">
+                <span class="module-icon">📝</span>
+                <div class="module-title">Weekend Mock Test</div>
+                <div class="module-description">Comprehensive mock testing platform with adaptive questions for developers and non-developers</div>
+            </a>
+
+            <a href="/weekly_interview" class="module-card">
+                <span class="module-icon">💼</span>
+                <div class="module-title">Weekly Interview</div>
+                <div class="module-description">AI-powered interview system with technical, communication, and HR rounds</div>
+            </a>
+        </div>
+
+        <div class="footer">
+            <p>FastAPI Multi-App Launcher | All modules are running independently</p>
+        </div>
+    </div>
+
+    <script>
+        // Check health status
+        async function checkHealth() {
+            try {
+                const response = await fetch('/healthz');
+                const data = await response.json();
+                const indicator = document.getElementById('healthIndicator');
+                
+                if (data.status === 'ok') {
+                    indicator.style.background = '#4CAF50';
+                    indicator.textContent = '● System Online';
+                } else {
+                    indicator.style.background = '#f44336';
+                    indicator.textContent = '● System Error';
+                }
+            } catch (error) {
+                const indicator = document.getElementById('healthIndicator');
+                indicator.style.background = '#ff9800';
+                indicator.textContent = '● Connection Error';
+            }
+        }
+
+        // Check health on page load
+        checkHealth();
+
+        // Check health every 30 seconds
+        setInterval(checkHealth, 30000);
+
+        // Add click tracking for analytics
+        document.querySelectorAll('.module-card').forEach(card => {
+            card.addEventListener('click', function(e) {
+                const moduleName = this.querySelector('.module-title').textContent;
+                console.log(`Navigating to: ${moduleName}`);
+            });
+        });
+    </script>
+</body>
+</html>
