@@ -20,7 +20,7 @@ class Config:
     MONGO_PASS = os.getenv("MONGO_PASS", "LT@connect25")
     MONGO_HOST = os.getenv("MONGO_HOST", "192.168.48.201:27017")
     MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "ml_notes")  # Updated to correct DB
-    MONGO_AUTH_SOURCE = os.getenv("MONGO_AUTH_SOURCE", "admin")  # Updated to admin
+    MONGO_AUTH_SOURCE = os.getenv("MONGO_AUTH_SOURCE", "connectlydb")  # Updated to admin
     
     @property
     def MONGO_CONNECTION_STRING(self) -> str:
