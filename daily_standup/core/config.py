@@ -38,7 +38,7 @@ class Config:
     MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "ml_notes")
     MONGODB_USERNAME = os.getenv("MONGODB_USERNAME", "connectly")
     MONGODB_PASSWORD = os.getenv("MONGODB_PASSWORD", "LT@connect25")
-    MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "admin")
+    MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "connectlydb")
     
     # =============================================================================
     # DATABASE COLLECTION NAMES
