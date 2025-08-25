@@ -20,15 +20,23 @@ class Config:
     MONGO_PASS = os.getenv("MONGO_PASS", "LT@connect25")
     MONGO_HOST = os.getenv("MONGO_HOST", "192.168.48.201:27017")
     MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "ml_notes")  # Updated to correct DB
-    MONGO_AUTH_SOURCE = os.getenv("MONGO_AUTH_SOURCE", "admin")  # Updated to admin
+    MONGO_AUTH_SOURCE = os.getenv("MONGO_AUTH_SOURCE", "connectlydb")  # Updated to admin
     
-    @property
-    def MONGO_CONNECTION_STRING(self) -> str:
-        encoded_pass = quote_plus(self.MONGO_PASS)
-        return f"mongodb://{self.MONGO_USER}:{encoded_pass}@{self.MONGO_HOST}/admin"
+@property
+def mongodb_connection_string(self) -> str:
+    from urllib.parse import quote_plus
+    username = quote_plus(self.MONGODB_USERNAME)
+    password = quote_plus(self.MONGODB_PASSWORD)
+    # include DB in path and authSource explicitly
+    return (
+        f"mongodb://{username}:{password}"
+        f"@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGODB_DATABASE}"
+        f"?authSource={self.MONGODB_AUTH_SOURCE}"
+    )
+
     
     # MySQL Server (Student data) - Updated with working credentials
-    DB_CONFIG = {
+DB_CONFIG = {
         "HOST": os.getenv("MYSQL_HOST", "192.168.48.201"),
         "PORT": os.getenv("MYSQL_PORT", "3306"),
         "DATABASE": os.getenv("MYSQL_DATABASE", "SuperDB"),
@@ -37,39 +45,39 @@ class Config:
     }
     
     # Collections - Updated with working collection names
-    SUMMARIES_COLLECTION = "summaries"  # Updated to correct collection
-    TEST_RESULTS_COLLECTION = "mock_test_results"
+SUMMARIES_COLLECTION = "summaries"  # Updated to correct collection
+TEST_RESULTS_COLLECTION = "mock_test_results"
     
     # ==================== Content Processing ====================
-    RECENT_SUMMARIES_COUNT = int(os.getenv("RECENT_SUMMARIES_COUNT", "10"))
-    SUMMARY_SLICE_FRACTION = float(os.getenv("SUMMARY_SLICE_FRACTION", "0.4"))
+RECENT_SUMMARIES_COUNT = int(os.getenv("RECENT_SUMMARIES_COUNT", "10"))
+SUMMARY_SLICE_FRACTION = float(os.getenv("SUMMARY_SLICE_FRACTION", "0.4"))
     
     # ==================== Test Configuration ====================
-    QUESTIONS_PER_TEST = int(os.getenv("QUESTIONS_PER_TEST", "10"))
-    DEV_TIME_LIMIT = int(os.getenv("DEV_TIME_LIMIT", "300"))  # 5 minutes
-    NON_DEV_TIME_LIMIT = int(os.getenv("NON_DEV_TIME_LIMIT", "120"))  # 2 minutes
+QUESTIONS_PER_TEST = int(os.getenv("QUESTIONS_PER_TEST", "10"))
+DEV_TIME_LIMIT = int(os.getenv("DEV_TIME_LIMIT", "300"))  # 5 minutes
+NON_DEV_TIME_LIMIT = int(os.getenv("NON_DEV_TIME_LIMIT", "120"))  # 2 minutes
     
     # Cache and session management
-    QUESTION_CACHE_DURATION_HOURS = int(os.getenv("QUESTION_CACHE_DURATION_HOURS", "6"))
-    TEST_SESSION_TIMEOUT = int(os.getenv("TEST_SESSION_TIMEOUT", "3600"))  # 1 hour
+QUESTION_CACHE_DURATION_HOURS = int(os.getenv("QUESTION_CACHE_DURATION_HOURS", "6"))
+TEST_SESSION_TIMEOUT = int(os.getenv("TEST_SESSION_TIMEOUT", "3600"))  # 1 hour
     
     # ==================== AI Service Configuration ====================
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "60"))
-    GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.7"))
-    GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "3000"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "60"))
+GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.7"))
+GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "3000"))
     
     # Generation settings
-    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-    RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
     
     # ==================== Evaluation Configuration ====================
-    EVALUATION_TEMPERATURE = float(os.getenv("EVALUATION_TEMPERATURE", "0.3"))
-    EVALUATION_MAX_TOKENS = int(os.getenv("EVALUATION_MAX_TOKENS", "2000"))
+EVALUATION_TEMPERATURE = float(os.getenv("EVALUATION_TEMPERATURE", "0.3"))
+EVALUATION_MAX_TOKENS = int(os.getenv("EVALUATION_MAX_TOKENS", "2000"))
     
     # ==================== Validation ====================
-    def validate(self) -> dict:
+def validate(self) -> dict:
         """Validate configuration"""
         issues = []
         

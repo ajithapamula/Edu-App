@@ -36,7 +36,7 @@ class Config:
     MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "ml_notes")
     MONGODB_USERNAME = os.getenv("MONGODB_USERNAME", "connectly")
     MONGODB_PASSWORD = os.getenv("MONGODB_PASSWORD", "LT@connect25")
-    MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "admin")
+    MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "connectlydb")
     
     # =============================================================================
     # COLLECTION NAMES
@@ -60,7 +60,7 @@ class Config:
     # =============================================================================
     # INTERVIEW CONFIGURATION - ROUNDS BASED
     # =============================================================================
-    INTERVIEW_DURATION_MINUTES = int(os.getenv("INTERVIEW_DURATION_MINUTES", "45"))  # Total duration
+    INTERVIEW_DURATION_MINUTES = int(os.getenv("INTERVIEW_DURATION_MINUTES", "15"))  # Total duration, default 15
     QUESTIONS_PER_ROUND = int(os.getenv("QUESTIONS_PER_ROUND", "6"))  # Questions per round
     MIN_QUESTIONS_PER_ROUND = int(os.getenv("MIN_QUESTIONS_PER_ROUND", "4"))
     MAX_QUESTIONS_PER_ROUND = int(os.getenv("MAX_QUESTIONS_PER_ROUND", "8"))
@@ -76,9 +76,8 @@ class Config:
     # =============================================================================
     # DYNAMIC TTS CONFIGURATION - NO HARDCODED VOICE
     # =============================================================================
-    # TTS Voice preference (will be dynamically selected if not available)
     TTS_VOICE_PREFERENCE = os.getenv("TTS_VOICE", "en-US-JennyNeural")  # Preferred voice
-    TTS_SPEED = os.getenv("TTS_SPEED", "+25%")  # Same as daily_standup
+    TTS_SPEED = os.getenv("TTS_SPEED", "+10%")  # Same as daily_standup
     TTS_CHUNK_SIZE = int(os.getenv("TTS_CHUNK_SIZE", "30"))  # Same chunking
     
     # Dynamic TTS voice selection strategy
@@ -91,7 +90,7 @@ class Config:
         return self.TTS_VOICE_PREFERENCE
     
     # Audio processing settings
-    MAX_RECORDING_DURATION = int(os.getenv("MAX_RECORDING_DURATION", "25"))  # Same as daily_standup
+    MAX_RECORDING_DURATION = int(os.getenv("MAX_RECORDING_DURATION", "60"))  # Same as daily_standup
     SILENCE_THRESHOLD = int(os.getenv("SILENCE_THRESHOLD", "400"))  # Same threshold
     
     # =============================================================================
@@ -101,13 +100,13 @@ class Config:
     OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.1"))  # Same as daily_standup
     OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "300"))  # Same as daily_standup
     
-    GROQ_MODEL = "distil-whisper-large-v3-en" # Same as daily_standup
+    GROQ_MODEL = "distil-whisper-large-v3-en"  # Same as daily_standup
     GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "30"))
     
     # =============================================================================
     # WEBSOCKET CONFIGURATION - SAME AS DAILY STANDUP
     # =============================================================================
-    WEBSOCKET_TIMEOUT = float(os.getenv("WEBSOCKET_TIMEOUT", "300.0"))  # Same timeout
+    WEBSOCKET_TIMEOUT = float(os.getenv("WEBSOCKET_TIMEOUT", "5.0"))  # Reduced to 5s
     MAX_MESSAGE_SIZE = int(os.getenv("MAX_MESSAGE_SIZE", "16777216"))  # 16MB
     
     # =============================================================================
@@ -115,6 +114,7 @@ class Config:
     # =============================================================================
     SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "3600"))  # 1 hour
     MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
+    IDLE_TIMEOUT_SECONDS = int(os.getenv("IDLE_TIMEOUT_SECONDS", "300"))  # 5 minutes
     
     # =============================================================================
     # PERFORMANCE SETTINGS - SAME AS DAILY STANDUP
@@ -217,7 +217,12 @@ class Config:
         from urllib.parse import quote_plus
         username = quote_plus(self.MONGODB_USERNAME)
         password = quote_plus(self.MONGODB_PASSWORD)
-        return f"mongodb://{username}:{password}@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGODB_AUTH_SOURCE}"
+        # include DB in path and authSource explicitly
+        return (
+            f"mongodb://{username}:{password}"
+            f"@{self.MONGODB_HOST}:{self.MONGODB_PORT}/{self.MONGODB_DATABASE}"
+            f"?authSource={self.MONGODB_AUTH_SOURCE}"
+        )
     
     def get_round_config(self, round_name: str) -> dict:
         """Get configuration for specific interview round"""

@@ -38,7 +38,7 @@ class Config:
     MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "ml_notes")
     MONGODB_USERNAME = os.getenv("MONGODB_USERNAME", "connectly")
     MONGODB_PASSWORD = os.getenv("MONGODB_PASSWORD", "LT@connect25")
-    MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "admin")
+    MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "connectlydb")
     
     # =============================================================================
     # DATABASE COLLECTION NAMES
@@ -46,6 +46,16 @@ class Config:
     SUMMARIES_COLLECTION = os.getenv("SUMMARIES_COLLECTION", "summaries")  # From your check_mongo.py
     RESULTS_COLLECTION = os.getenv("RESULTS_COLLECTION", "daily_standup_results")
     
+  
+    # =============================================================================
+    # AWS CONFIGURATION
+    # =============================================================================
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+    AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+    AWS_SUMMARY_BUCKET = os.getenv("AWS_SUMMARY_BUCKET", "your-summary-bucket-name")
+
+
     # =============================================================================
     # TTS CONFIGURATION
     # =============================================================================
@@ -58,15 +68,15 @@ class Config:
     # CONVERSATION FLOW CONFIGURATION
     # =============================================================================
     GREETING_EXCHANGES = 2  # Number of greeting exchanges before technical questions
-    SUMMARY_CHUNKS = 8  # Default number of summary chunks to create
+    SUMMARY_CHUNKS = 3  # Default number of summary chunks to create
     
     # =============================================================================
     # DYNAMIC QUESTIONING CONFIGURATION
     # =============================================================================
-    TOTAL_QUESTIONS = 20  # Baseline hint for ratio calculation
+    TOTAL_QUESTIONS = 10  # Baseline hint for ratio calculation
     MIN_QUESTIONS_PER_CONCEPT = 1  # Minimum questions per concept
     MAX_QUESTIONS_PER_CONCEPT = 4  # Maximum questions per concept for balance
-    ESTIMATED_SECONDS_PER_QUESTION = 180  # 3 minutes, for UI timer estimation
+    ESTIMATED_SECONDS_PER_QUESTION = 120  # 3 minutes, for UI timer estimation
     BASE_QUESTIONS_PER_CHUNK = 3  # Base questions per summary chunk
     
     # =============================================================================
