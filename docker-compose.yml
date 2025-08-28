@@ -8,7 +8,7 @@ services:
     build: .
     ports:
       - "8070:8070"
-      - "5173:5173"
+      - "5179:5179"
     # The env_file path is updated to match the location from setup.sh
     env_file:
       - ./env/.env

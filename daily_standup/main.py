@@ -1,3 +1,4 @@
+
 """
 Ultra-fast, real database daily standup backend with optimized performance
 NO DUMMY DATA - Real connections only
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 class UltraFastSessionManager:
     def __init__(self):
         self.active_sessions: Dict[str, SessionData] = {}
+        self.last_activity: Dict[str, float] = {}
         self.db_manager = DatabaseManager(shared_clients)
         self.audio_processor = OptimizedAudioProcessor(shared_clients)
         self.tts_processor = UltraFastTTSProcessor()
@@ -101,6 +103,7 @@ class UltraFastSessionManager:
             session_data.summary_manager = fragment_manager
             
             self.active_sessions[session_id] = session_data
+            self.last_activity[session_id] = time.time()
             logger.info(f"? Real session created {session_id} for {session_data.student_name} "
                        f"with {len(session_data.fragment_keys)} fragments")
             
@@ -113,11 +116,13 @@ class UltraFastSessionManager:
     async def remove_session(self, session_id: str):
         """Fast session removal"""
         if session_id in self.active_sessions:
+            if session_id in self.last_activity:
+                del self.last_activity[session_id]
             del self.active_sessions[session_id]
             logger.info(f"??? Removed session {session_id}")
     
     async def process_audio_ultra_fast(self, session_id: str, audio_data: bytes):
-        """Ultra-fast audio processing pipeline - optimized for speed"""
+        """Ultra-fast audio processing pipeline - optimized for speed with dynamic response"""
         session_data = self.active_sessions.get(session_id)
         if not session_data or not session_data.is_active:
             logger.warning(f"?? Inactive session: {session_id}")
@@ -130,7 +135,7 @@ class UltraFastSessionManager:
             audio_size = len(audio_data)
             logger.info(f"?? Session {session_id}: Received {audio_size} bytes of audio data")
             
-            # More lenient audio size check with better error handling
+            # Lenient audio size check with better error handling
             if audio_size < 100:  # Very small chunks
                 logger.warning(f"?? Very small audio chunk ({audio_size} bytes) - likely silence or noise")
                 await self._send_quick_message(session_data, {
@@ -146,38 +151,13 @@ class UltraFastSessionManager:
             transcript, quality = await self.audio_processor.transcribe_audio_fast(audio_data)
             
             if not transcript or len(transcript.strip()) < 2:
-                # Dynamic clarification request
-                clarification_context = {
-                    'clarification_attempts': getattr(session_data, 'clarification_attempts', 0),
-                    'audio_quality': quality,
-                    'audio_size': audio_size
-                }
-                session_data.clarification_attempts = clarification_context['clarification_attempts'] + 1
-                
-                # More specific clarification based on audio size
-                if audio_size < 500:
-                    clarification_message = "I received a very short audio clip. Please try speaking for a bit longer."
-                elif quality < 0.3:
-                    clarification_message = "The audio wasn't very clear. Could you please speak a bit louder and clearer?"
-                else:
-                    clarification_prompt = prompts.dynamic_clarification_request(clarification_context)
-                    loop = asyncio.get_event_loop()
-                    clarification_message = await loop.run_in_executor(
-                        shared_clients.executor,
-                        self.conversation_manager._sync_openai_call,
-                        clarification_prompt
-                    )
-                
-                await self._send_quick_message(session_data, {
-                    "type": "clarification",
-                    "text": clarification_message,
-                    "status": session_data.current_stage.value
-                })
+                logger.info(f"?? Session {session_id}: No meaningful transcription - continuing to listen")
+                # Do not move to next question automatically; wait for user input
                 return
             
             logger.info(f"?? Session {session_id}: User said: '{transcript}' (quality: {quality:.2f})")
             
-            # Generate AI response immediately - single call optimization
+            # Generate dynamic AI response based on user input
             ai_response = await self.conversation_manager.generate_fast_response(session_data, transcript)
             
             # Add exchange to session with concept tracking
@@ -186,7 +166,7 @@ class UltraFastSessionManager:
             
             session_data.add_exchange(ai_response, transcript, quality, concept, is_followup)
             
-            # Update fragment manager with the answer
+            # Update fragment manager with the answer if relevant
             if session_data.summary_manager:
                 session_data.summary_manager.add_answer(transcript)
             
@@ -198,6 +178,9 @@ class UltraFastSessionManager:
             
             processing_time = time.time() - start_time
             logger.info(f"? Total processing time: {processing_time:.2f}s")
+            
+            # Update last activity after meaningful processing
+            self.update_last_activity(session_id)
             
         except Exception as e:
             logger.error(f"? Audio processing error: {e}")
@@ -215,7 +198,7 @@ class UltraFastSessionManager:
                 "text": error_message,
                 "status": "error"
             })
-    
+
     async def _update_session_state_fast(self, session_data: SessionData):
         """Ultra-fast session state updates with fragment logic"""
         if session_data.current_stage == SessionStage.GREETING:
@@ -232,9 +215,8 @@ class UltraFastSessionManager:
                 
                 # Generate evaluation and save session in background
                 asyncio.create_task(self._finalize_session_fast(session_data))
-    
     async def _finalize_session_fast(self, session_data: SessionData):
-        """Fast session finalization with real database save"""
+        """Fast session finalization with real database save and proper thank you message"""
         try:
             # Generate evaluation
             evaluation, score = await self.conversation_manager.generate_fast_evaluation(session_data)
@@ -243,9 +225,15 @@ class UltraFastSessionManager:
             save_success = await self.db_manager.save_session_result_fast(session_data, evaluation, score)
             
             if not save_success:
-                logger.error(f"? Failed to save session {session_data.session_id}")
+                logger.error(f"❌ Failed to save session {session_data.session_id}")
             
-            completion_message = f"Great job! Your standup session is complete. You scored {score}/10. Thank you!"
+            # Create a personalized completion message
+            completion_message = (
+                f"Thank you for participating in today's standup session, {session_data.student_name}! "
+                f"Your session is now complete. You scored {score}/10. "
+                f"I appreciate the time you spent sharing your progress and plans with me. "
+                f"Keep up the great work, and I look forward to your next standup!"
+            )
             
             await self._send_quick_message(session_data, {
                 "type": "conversation_end",
@@ -268,13 +256,68 @@ class UltraFastSessionManager:
             await self._send_quick_message(session_data, {"type": "audio_end", "status": "complete"})
             
             session_data.is_active = False
-            logger.info(f"? Session {session_data.session_id} finalized and saved")
+            logger.info(f"✅ Session {session_data.session_id} finalized and saved with thank you message")
             
         except Exception as e:
-            logger.error(f"? Fast session finalization error: {e}")
+            logger.error(f"❌ Fast session finalization error: {e}")
             # Still mark session as complete even if save failed
             session_data.is_active = False
-    
+
+    async def end_session(self, session_data: SessionData, reason: str):
+        """Send a personalized thank you message and end the session"""
+        try:
+            student_name = session_data.student_name
+            closing_messages = {
+                "time_limit": (
+                    f"Thank you for participating in today's standup session, {student_name}! "
+                    f"We've reached the {config.INTERVIEW_DURATION_MINUTES}-minute limit. "
+                    "Great effort—let's continue tomorrow!"
+                ),
+                "complete": (
+                    f"Thank you for participating in today's standup session, {student_name}! "
+                    f"You've completed all questions. Great job, and I look forward to your next session!"
+                ),
+                "idle_timeout": (
+                    f"Thank you for participating, {student_name}. It looks like you stepped away. "
+                    "No worries, we'll wrap up here. See you next time!"
+                ),
+                "manual_stop": (
+                    f"Thank you for participating, {student_name}! Thanks for your time today. "
+                    "Good work!"
+                )
+            }
+            closing = closing_messages.get(reason, f"Thank you for participating, {student_name}!")
+            if session_data.websocket and session_data.is_active:
+                await self._send_quick_message(session_data, {
+                    "type": "conversation_end",
+                    "text": closing,
+                    "status": reason
+                })
+                async for audio_chunk in self.tts_processor.generate_ultra_fast_stream(closing):
+                    if audio_chunk:
+                        await self._send_quick_message(session_data, {
+                            "type": "audio_chunk",
+                            "audio": audio_chunk.hex(),
+                            "status": reason
+                        })
+                await self._send_quick_message(session_data, {"type": "audio_end", "status": reason})
+            else:
+                logger.warning(f"?? WebSocket closed or session inactive for {session_data.session_id}")
+            session_data.is_active = False
+            logger.info(f"✅ Session {session_data.session_id} ended with reason: {reason}")
+        except Exception as e:
+            logger.error(f"❌ Error ending session: {e}")
+            session_data.is_active = False
+    async def _enforce_session_timeout(self, session_data: SessionData, websocket: WebSocket):
+        """Check session duration and end with thank you message at 15 minutes"""
+        while session_data.is_active:
+            await asyncio.sleep(5)
+            elapsed = time.time() - session_data.created_at
+            if elapsed >= config.INTERVIEW_DURATION_MINUTES * 60:
+                logger.info(f"⏹️ Session {session_data.session_id} reached {config.INTERVIEW_DURATION_MINUTES} minutes. Sending thank you.")
+                await self.end_session(session_data, "time_limit")
+                break
+                    
     async def _send_response_with_ultra_fast_audio(self, session_data: SessionData, text: str):
         """Send response with ultra-fast audio streaming"""
         try:
@@ -371,6 +414,27 @@ class UltraFastSessionManager:
             logger.error(f"? Legacy audio processing error: {e}")
             raise Exception(f"Legacy audio processing failed: {e}")
 
+    # Helper method to update last activity
+    def update_last_activity(self, session_id: str):
+        if session_id in self.active_sessions:
+            self.last_activity[session_id] = time.time()
+
+    # Timeout enforcement method
+    async def _enforce_session_timeout(self, session_data: SessionData, websocket: WebSocket):
+        while session_data.is_active:
+            await asyncio.sleep(5)  # Check every 5 seconds
+            elapsed = time.time() - session_data.created_at
+            logger.info(f"⏰ Session {session_data.session_id} elapsed: {elapsed:.1f}s / {config.INTERVIEW_DURATION_MINUTES * 60}s")
+            if elapsed >= config.INTERVIEW_DURATION_MINUTES * 60:
+                logger.info(f"⏹️ Session {session_data.session_id} reached {config.INTERVIEW_DURATION_MINUTES} minutes. Ending automatically.")
+                session_data.is_active = False
+                await websocket.send_text(json.dumps({
+                    "type": "interview_stopped",
+                    "text": f"Interview ended after {config.INTERVIEW_DURATION_MINUTES} minutes",
+                    "status": "time_limit"
+                }))
+                break
+
 # =============================================================================
 # FASTAPI APPLICATION - NO DUMMY DATA
 # =============================================================================
@@ -444,7 +508,9 @@ async def start_standup_session_fast():
         
         session_data = await session_manager.create_session_fast()
         
-        greeting = "Hello! Welcome to your daily standup. How are you doing today?"
+        # Calculate number of questions (3 per fragment)
+        num_questions = len(session_data.fragment_keys) * 3 if session_data.fragment_keys else 0
+        greeting = f"Hello {session_data.student_name}! Welcome to your daily standup. This session has {num_questions} questions and will end in 15 minutes. How can I assist you today?"
         
         logger.info(f"? Real session created: {session_data.test_id}")
         
@@ -463,6 +529,53 @@ async def start_standup_session_fast():
     except Exception as e:
         logger.error(f"? Error starting session: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to start session: {str(e)}")
+    
+async def end_session_realistic(self, session_data: SessionData, reason: str):
+        """End session with a realistic closing message based on reason"""
+        try:
+            if reason == "time_limit":
+                closing = (
+                    f"Alright {session_data.student_name}, we’ve reached the end of today’s "
+                    f"standup. You did well keeping within the {config.INTERVIEW_DURATION_MINUTES} "
+                    "minutes. Great effort—let’s continue building on this tomorrow!"
+                )
+            elif reason == "idle_timeout":
+                closing = (
+                    f"It looks like you stepped away, {session_data.student_name}. "
+                    "No worries, we’ll wrap up here. Remember to check back later if you’d like to continue."
+                )
+            elif reason == "manual_stop":
+                closing = (
+                    f"Thanks for your time today, {session_data.student_name}. "
+                    "We’ll stop the interview here. Good work!"
+                )
+            else:
+                closing = (
+                    f"That’s a wrap, {session_data.student_name}. "
+                    "Thanks for participating in your standup today."
+                )
+
+            await self._send_quick_message(session_data, {
+                "type": "conversation_end",
+                "text": closing,
+                "status": reason
+            })
+
+            async for audio_chunk in self.tts_processor.generate_ultra_fast_stream(closing):
+                if audio_chunk:
+                    await self._send_quick_message(session_data, {
+                        "type": "audio_chunk",
+                        "audio": audio_chunk.hex(),
+                        "status": reason
+                    })
+
+            await self._send_quick_message(session_data, {"type": "audio_end", "status": reason})
+            session_data.is_active = False
+            logger.info(f"✅ Realistic session ending for {session_data.session_id} with reason: {reason}")
+
+        except Exception as e:
+            logger.error(f"❌ Error during realistic session ending: {e}")
+            session_data.is_active = False
 
 @app.post("/api/record-respond")
 async def record_and_respond_fast(
@@ -570,7 +683,6 @@ async def get_standup_summary_fast(test_id: str):
 
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint_ultra_fast(websocket: WebSocket, session_id: str):
-    """Ultra-fast WebSocket endpoint with real data"""
     await websocket.accept()
     
     try:
@@ -587,16 +699,17 @@ async def websocket_endpoint_ultra_fast(websocket: WebSocket, session_id: str):
             return
         
         session_data.websocket = websocket
-        
+        timeout_task = asyncio.create_task(session_manager._enforce_session_timeout(session_data, websocket))
+
         # Send initial greeting with ultra-fast audio
-        greeting = f"Hello {session_data.student_name}! Welcome to your daily standup. How are you doing today?"
+        num_questions = len(session_data.fragment_keys) * 3 if session_data.fragment_keys else 0
+        greeting = f"Hello {session_data.student_name}! Welcome to your daily standup. This session has {num_questions} questions and will end in 15 minutes. How can I assist you today?"
         await websocket.send_text(json.dumps({
             "type": "ai_response",
             "text": greeting,
             "status": "greeting"
         }))
         
-        # Generate and stream greeting audio with minimal delay
         async for audio_chunk in session_manager.tts_processor.generate_ultra_fast_stream(greeting):
             if audio_chunk:
                 await websocket.send_text(json.dumps({
@@ -612,6 +725,26 @@ async def websocket_endpoint_ultra_fast(websocket: WebSocket, session_id: str):
         
         # Keep connection alive and handle messages
         while session_data.is_active:
+            logger.info(f"⏰ Session {session_id} elapsed: {(time.time() - session_data.created_at):.1f}s / {config.INTERVIEW_DURATION_MINUTES * 60}s")
+            if time.time() - session_data.created_at >= config.INTERVIEW_DURATION_MINUTES * 60:
+                logger.info(f"⏹️ Session {session_id} reached {config.INTERVIEW_DURATION_MINUTES} minutes. Ending automatically.")
+                await websocket.send_text(json.dumps({
+                    "type": "interview_stopped",
+                    "text": f"Interview ended after {config.INTERVIEW_DURATION_MINUTES} minutes",
+                    "status": "time_limit"
+                }))
+                break
+
+            last_active = session_manager.last_activity.get(session_id, session_data.created_at)
+            if time.time() - last_active >= config.IDLE_TIMEOUT_SECONDS:
+                logger.info(f"⏹️ Session {session_id} idle timeout reached. Ending session.")
+                await websocket.send_text(json.dumps({
+                    "type": "interview_idle_timeout",
+                    "text": "Session idle for too long—no response detected. Ending interview.",
+                    "status": "idle_timeout"
+                }))
+                break
+
             try:
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=config.WEBSOCKET_TIMEOUT)
                 message = json.loads(data)
@@ -621,13 +754,35 @@ async def websocket_endpoint_ultra_fast(websocket: WebSocket, session_id: str):
                     asyncio.create_task(
                         session_manager.process_audio_ultra_fast(session_id, audio_data)
                     )
-                
+                    # Update last_activity will be handled in process_audio_ultra_fast
+
                 elif message.get("type") == "ping":
                     await websocket.send_text(json.dumps({"type": "pong"}))
+                    session_manager.update_last_activity(session_id)
                 
+                elif message.get("type") == "manual_stop":
+                    session_data.is_active = False
+                    await websocket.send_text(json.dumps({
+                        "type": "interview_stopped",
+                        "status": "stopped"
+                    }))
+                    break
+
+                elif message.get("type") == "next_question":
+                    if session_data.summary_manager and session_data.summary_manager.has_next_question():
+                        next_question = session_data.summary_manager.get_next_question()
+                        await session_manager._send_response_with_ultra_fast_audio(session_data, next_question.text)
+                    else:
+                        await session_manager._finalize_session_fast(session_data)
+
             except asyncio.TimeoutError:
-                logger.info(f"? WebSocket timeout: {session_id}")
-                break
+                logger.warning(f"⏲️ Timeout after {config.WEBSOCKET_TIMEOUT}s for session {session_id}. Client may be slow or disconnected.")
+                await websocket.send_text(json.dumps({
+                    "type": "timeout",
+                    "text": "No response received - please send audio or request the next question",
+                    "status": "timeout"
+                }))
+                continue
             except WebSocketDisconnect:
                 logger.info(f"?? WebSocket disconnected: {session_id}")
                 break
@@ -643,6 +798,8 @@ async def websocket_endpoint_ultra_fast(websocket: WebSocket, session_id: str):
     except Exception as e:
         logger.error(f"? WebSocket endpoint error: {e}")
     finally:
+        if 'timeout_task' in locals():
+            timeout_task.cancel()
         await session_manager.remove_session(session_id)
 
 @app.get("/download_results/{session_id}")

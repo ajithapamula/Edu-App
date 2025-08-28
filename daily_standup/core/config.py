@@ -46,7 +46,6 @@ class Config:
     SUMMARIES_COLLECTION = os.getenv("SUMMARIES_COLLECTION", "summaries")  # From your check_mongo.py
     RESULTS_COLLECTION = os.getenv("RESULTS_COLLECTION", "daily_standup_results")
     
-  
     # =============================================================================
     # AWS CONFIGURATION
     # =============================================================================
@@ -54,7 +53,6 @@ class Config:
     AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
     AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
     AWS_SUMMARY_BUCKET = os.getenv("AWS_SUMMARY_BUCKET", "your-summary-bucket-name")
-
 
     # =============================================================================
     # TTS CONFIGURATION
@@ -99,7 +97,13 @@ class Config:
     # =============================================================================
     APP_TITLE = "Ultra-Fast Daily Standup System"
     APP_VERSION = "2.0.0"
-    WEBSOCKET_TIMEOUT = 300.0
+    
+    # =============================================================================
+    # TIMEOUT SETTINGS
+    # =============================================================================
+    INTERVIEW_DURATION_MINUTES = int(os.getenv("INTERVIEW_DURATION_MINUTES", "15"))  # Default to 15 minutes
+    IDLE_TIMEOUT_SECONDS = int(os.getenv("IDLE_TIMEOUT_SECONDS", "300"))  # Default to 5 minutes
+    WEBSOCKET_TIMEOUT = float(os.getenv("WEBSOCKET_TIMEOUT", "5.0"))  # Default to 5 seconds (overriding previous 300.0)
     
     # =============================================================================
     # PERFORMANCE SETTINGS

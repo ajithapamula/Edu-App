@@ -90,7 +90,7 @@ RUN mkdir -p daily_standup/audio daily_standup/temp daily_standup/reports weekly
 
 # Expose the ports the application will run on
 EXPOSE 8070
-EXPOSE 5173
+EXPOSE 5179
 
 # Command to run the application.
 # Assumes your FastAPI app instance is named 'app' in a file named 'main.py'.

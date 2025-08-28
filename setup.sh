@@ -66,9 +66,9 @@ generate_certs() {
 generate_certs "./certs"
 generate_certs "./TMPS/certs"
 
-# === 7. Check if ports 8070 and 5173 are available ===
-echo "?? Checking ports 8070 and 5173..."
-for port in 8070 5173; do
+# === 7. Check if ports 8070 and 5179 are available ===
+echo "?? Checking ports 8070 and 5179..."
+for port in 8070 5179; do
   if lsof -i:$port >/dev/null 2>&1; then
     echo "?? Port $port is already in use."
   else
