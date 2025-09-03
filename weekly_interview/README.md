@@ -85,7 +85,7 @@ The Mock Interview Module is an **AI-powered, real-time interview simulation sys
 ### **Phase 2: Real-Time Interview Execution**
 ```
 4. WebSocket Connection Establishment
-   └── ws://192.168.48.201:8070/weekly_interview/ws/{sessionId}
+   └── ws://192.168.48.201:8090/weekly_interview/ws/{sessionId}
        └── Backend processes 7-day summaries into fragments
        └── AI generates personalized greeting question
        └── Streams greeting audio to frontend
@@ -289,8 +289,8 @@ TTS_SPEED=+25%
 
 #### **Frontend (environment variables)**
 ```bash
-VITE_API_BASE_URL=https://192.168.48.201:8070
-VITE_ASSESSMENT_API_URL=https://192.168.48.201:8070
+VITE_API_BASE_URL=https://192.168.48.201:8090
+VITE_ASSESSMENT_API_URL=https://192.168.48.201:8090
 ```
 
 ### **2. Installation & Startup**
@@ -303,7 +303,7 @@ pip install -r requirements.txt
 # Start with SSL (production)
 python app.py
 
-# Access at: https://192.168.48.201:8070
+# Access at: https://192.168.48.201:8090
 ```
 
 #### **Frontend (Any Platform)**
@@ -320,7 +320,7 @@ npm start
 
 The system is designed for **cross-platform network access**:
 
-- **Backend**: Runs on Linux server (192.168.48.201:8070)
+- **Backend**: Runs on Linux server (192.168.48.201:8090)
 - **Frontend**: Can be accessed from any device on the network
 - **WebSocket**: Supports both WS (HTTP) and WSS (HTTPS) protocols
 - **CORS**: Configured for cross-origin requests
@@ -495,7 +495,7 @@ The architecture follows the **"Daily Standup" pattern** because:
 #### **WebSocket Connection Failures**
 ```bash
 # Check backend health
-curl https://192.168.48.201:8070/weekly_interview/health
+curl https://192.168.48.201:8090/weekly_interview/health
 
 # Verify network connectivity
 ping 192.168.48.201

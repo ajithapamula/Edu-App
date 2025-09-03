@@ -15,6 +15,18 @@ from __future__ import annotations
 
 from typing import List, Dict, Any
 from .config import config
+# ---- Reusable boundary policy appended to Daily Standup prompts ----
+BOUNDARY_POLICY = f"""
+BOUNDARIES:
+- Stay strictly on the CURRENT project/work topics in this conversation.
+- If the user goes off-topic: give one brief, courteous redirect (≤ {getattr(config, 'REDIRECT_MAX_WORDS', 18)} words) and then ask ONE on-topic question.
+- If the user uses vulgar/abusive language: do not repeat it; issue a short warning and restate the topic.
+- After {getattr(config, 'MAX_VULGAR_STRIKES', 2)} warnings for vulgar language, end politely.
+- Never generate sexual or hateful content. Tone is {getattr(config, 'BOUNDARY_TONE', 'calm, brief, professional')}.
+""".strip()
+
+def _append_boundaries(block: str) -> str:
+    return f"{block.rstrip()}\n\n{BOUNDARY_POLICY}"
 
 # =============================================================================
 # DAILY STANDUP PROMPTS  (back-compat: `Prompts`, instance `prompts`)
@@ -37,16 +49,19 @@ Think like you're genuinely interested:
 - What problems or solutions interest you?
 
 Give me topics separated by '###CHUNK###' only."""
-
     @staticmethod
     def base_questions_prompt(chunk_content: str) -> str:
-        return f"""You just heard about this work from your teammate:
+        core = f"""You just heard about this work from your teammate:
 
 {chunk_content}
 
 You're genuinely curious and want to know more. Ask {config.BASE_QUESTIONS_PER_CHUNK} questions that show real interest.
 
-BE CREATIVE - don't use boring standard questions. Make each question unique and natural. Think about what you'd really want to know if this was your friend's project.
+RULES:
+- Only ask questions directly related to THIS project/work
+- Do NOT ask personal or unrelated questions
+- Be natural and professional, not poetic
+- Vary the style so questions don't sound repetitive
 
 Mix different types:
 - Some about the technical details
@@ -54,11 +69,12 @@ Mix different types:
 - Some about what they learned
 - Some about what's coming next
 
-Just give numbered questions. Be original."""
+FORMAT: Just give numbered questions, each unique and natural."""
+        return _append_boundaries(core)
 
     @staticmethod
     def followup_analysis_prompt(chunk_content: str, user_response: str) -> str:
-        return f"""You asked about: "{chunk_content[:100]}..."
+        core = f"""You asked about: "{chunk_content[:100]}..."
 
 They replied: "{user_response}"
 
@@ -72,6 +88,7 @@ Be creative with follow-ups. Don't use standard boring questions. Think about wh
 FORMAT:
 FOLLOWUP: [Your creative question]
 FOLLOWUP: [Another creative one if needed]"""
+        return _append_boundaries(core)
 
     @staticmethod
     def dynamic_greeting_response(user_input: str, greeting_count: int, context: Dict = None) -> str:
@@ -100,7 +117,7 @@ Every response should sound different. Be original."""
 
     @staticmethod
     def dynamic_technical_response(context_text: str, user_input: str, next_question: str, session_state: Dict = None) -> str:
-        return f"""You're having a good work chat. Here's what happened:
+        core = f"""You're having a good work chat. Here's what happened:
 
 {context_text}
 
@@ -117,12 +134,14 @@ BE ORIGINAL:
 - Keep it short (max 20 words)
 
 Make each transition unique. Think like a real curious colleague."""
+        return _append_boundaries(core)
+
 
     @staticmethod
     def dynamic_followup_response(current_concept_title: str, concept_content: str, 
-                                 history: str, previous_question: str, user_response: str,
-                                 current_question_number: int, questions_for_concept: int) -> str:
-        return f"""You're a friendly team lead having standup chat with your team member. Keep it normal and conversational.
+                             history: str, previous_question: str, user_response: str,
+                             current_question_number: int, questions_for_concept: int) -> str:
+        core = f"""You're a friendly team lead having standup chat with your team member. Keep it normal and conversational.
 
 **Topic**: {current_concept_title}
 **They said**: "{user_response}"
@@ -152,10 +171,11 @@ CONCEPT: [{current_concept_title}]
 QUESTION: [Your normal, short response with next question - max 20 words]
 
 Keep it simple, natural, and conversational. No weird creative phrases."""
+        return _append_boundaries(core)
 
     @staticmethod
     def dynamic_concept_transition(user_response: str, next_question: str, progress_info: Dict) -> str:
-        return f"""You're moving to a new topic in your chat.
+        core = f"""You're moving to a new topic in your chat.
 
 **They said**: "{user_response}"
 **New topic**: "{progress_info.get('current_concept', 'next thing')}"
@@ -171,10 +191,11 @@ Think about:
 Make it feel like a real conversation where you're genuinely moving from one interesting topic to another.
 
 Max 20 words. Be original every time."""
+        return _append_boundaries(core)
 
     @staticmethod
     def dynamic_fragment_evaluation(concepts_covered: List[str], conversation_exchanges: List[Dict],
-                                    session_stats: Dict) -> str:
+                                session_stats: Dict) -> str:
         concepts_text = "\n".join([f"- {concept}" for concept in concepts_covered])
 
         conversation_summary = []
@@ -185,67 +206,71 @@ Max 20 words. Be original every time."""
             )
         conversation_text = "\n".join(conversation_summary)
 
-        return f"""You're a team lead writing feedback for your team member after a good standup chat.
+        core = f"""You're a team lead writing feedback for your team member after a good standup chat.
+        Use ONLY the provided conversation; do not invent details not present here.
 
-**THEIR PERFORMANCE:**
-- Topics covered: {session_stats['concepts_covered']}/{session_stats['total_concepts']} ({session_stats['coverage_percentage']}%)
-- Main questions: {session_stats['main_questions']}
-- Follow-ups: {session_stats['followup_questions']}
-- Time: {session_stats['duration_minutes']} minutes
+        **THEIR PERFORMANCE:**
+        - Topics covered: {session_stats['concepts_covered']}/{session_stats['total_concepts']} ({session_stats['coverage_percentage']}%)
+        - Main questions: {session_stats['main_questions']}
+        - Follow-ups: {session_stats['followup_questions']}
+        - Time: {session_stats['duration_minutes']} minutes
 
-**TOPICS THEY TALKED ABOUT:**
-{concepts_text}
+        **TOPICS THEY TALKED ABOUT:**
+        {concepts_text}
 
-**SAMPLE CONVERSATION:**
-{conversation_text}
+        **SAMPLE CONVERSATION:**
+        {conversation_text}
 
-**WRITE CREATIVE FEEDBACK**: Don't use boring template language. Write like you actually care about helping them grow.
+        **WRITE CREATIVE FEEDBACK**: Don't use boring template language. Write like you actually care about helping them grow.
 
-Cover these areas creatively:
-1. **Coverage**: How well they covered different topics
-2. **Communication**: How clearly they explained things
-3. **Strengths**: What they did really well (be specific)
-4. **Growth areas**: What they can improve (be helpful)
-5. **Overall**: Your honest assessment
+        Cover these areas creatively:
+        1. **Coverage**: How well they covered different topics
+        2. **Communication**: How clearly they explained things
+        3. **Strengths**: What they did really well (be specific)
+        4. **Growth areas**: What they can improve (be helpful)
+        5. **Overall**: Your honest assessment
 
-**STYLE**:
-- Write like a real manager who cares
-- Use simple English
-- Be encouraging but honest
-- Make it personal, not generic
-- Keep under 250 words
+        **STYLE**:
+        - Write like a real manager who cares
+        - Use simple English
+        - Be encouraging but honest
+        - Make it personal, not generic
+        - Keep under 250 words
 
-End with: Score: X/10
+        End with: Score: X/10
+        Be creative and genuine in your feedback."""
+        return _append_boundaries(core)
 
-Be creative and genuine in your feedback."""
 
     @staticmethod
     def dynamic_session_completion(conversation_summary: Dict, user_final_response: str = None) -> str:
         topics_discussed = conversation_summary.get('topics_covered', [])
         total_exchanges = conversation_summary.get('total_exchanges', 0)
 
-        return f"""You're ending a good standup chat with your teammate.
+        core = f"""You're ending a good standup chat with your teammate.
 
-**CHAT SUMMARY:**
-- Talked about: {len(topics_discussed)} different topics
-- Total questions: {total_exchanges}
-- Their final words: "{user_final_response}"
+    **CHAT SUMMARY:**
+    - Talked about: {len(topics_discussed)} different topics
+    - Total questions: {total_exchanges}
+    - Their final words: "{user_final_response}"
 
-**BE CREATIVE**: End this naturally like a real conversation. Don't use boring standard endings.
+    **BE CREATIVE**: End this naturally like a real conversation. Don't use boring standard endings.
 
-Think about:
-- What you learned about their work
-- How the conversation went
-- How you'd really thank a teammate
+    Think about:
+    - What you learned about their work
+    - How the conversation went
+    - How you'd really thank a teammate
 
-Make it genuine and different each time. Sound like you actually enjoyed the chat.
+    Make it genuine and different each time. Sound like you actually enjoyed the chat.
 
-Max 25 words. Be original."""
+    Max 25 words. Be original."""
+        return _append_boundaries(core)
+
 
     @staticmethod
     def dynamic_clarification_request(context: Dict) -> str:
         attempts = context.get('clarification_attempts', 0)
-        return f"""You need them to speak more clearly.
+        core = f"""You need them to speak more clearly.
 
 **SITUATION**: You've asked for clarity {attempts} times already.
 
@@ -258,10 +283,11 @@ Make it:
 - Understanding and patient
 
 One creative sentence. Make it feel real."""
+        return _append_boundaries(core)
 
     @staticmethod
     def dynamic_conclusion_response(user_input: str, session_context: Dict) -> str:
-        return f"""They just said: "{user_input}"
+        core = f"""They just said: "{user_input}"
 
 You're wrapping up the chat about their work.
 
@@ -274,7 +300,54 @@ Make it:
 - Unique and genuine
 
 Max 20 words. Be original every time."""
+        return _append_boundaries(core)
+    @staticmethod
+    def boundary_offtopic_prompt(topic: str, subtask: str = "") -> str:
+        ask = f"What progress since yesterday on {subtask or topic}?"
+        core = f"User is off-topic. Give ONE brief redirect (≤ {getattr(config, 'REDIRECT_MAX_WORDS', 18)} words) and then ask: {ask}"
+        return _append_boundaries(core)
 
+    @staticmethod
+    def boundary_vulgar_prompt(topic: str) -> str:
+        core = f"User used inappropriate language. Give ONE short warning and restate the topic: {topic}. Do not repeat the language."
+        return _append_boundaries(core)
+
+    @staticmethod
+    def off_topic_redirect(topic: str, subtask: str = "") -> str:
+        if subtask:
+            return f"Let’s keep this about {topic}. What’s the status of {subtask}?"
+        return f"Let’s keep this about {topic}. What progress did you make since yesterday?"
+
+    @staticmethod
+    def off_topic_firm(topic: str, subtask: str = "") -> str:
+        if subtask:
+            return f"We need to stay on {topic}. What blockers are you facing on {subtask}?"
+        return f"We need to stay on {topic}. Any blockers or progress since yesterday?"
+
+    @staticmethod
+    def off_topic_move_on(next_topic: str) -> str:
+        return f"I’ll move to the next item: {next_topic}. What changed since last update?"
+
+    @staticmethod
+    def vulgar_warning_1(topic: str) -> str:
+        return f"Let’s keep language respectful. Can you summarize your update on {topic}?"
+
+    @staticmethod
+    def vulgar_warning_2(topic: str) -> str:
+        return f"This needs to stay respectful. Last chance—please share your update on {topic}."
+
+    @staticmethod
+    def end_due_to_vulgarity() -> str:
+        return "I’m ending this standup due to repeated inappropriate language. We can resume when it’s respectful."
+
+    @staticmethod
+    def refuse_nsfw_and_redirect(topic: str) -> str:
+        return f"I can’t discuss that. Let’s focus on your {topic} update: progress, blockers, next steps?"
+
+    @staticmethod
+    def harassment_block_and_redirect(topic: str) -> str:
+        return f"That language isn’t okay here. Please share your concrete update on {topic}—progress, blockers, next steps."
+    
 # Backward compatibility aliases for daily_standup:
 Prompts = DailyStandupPrompts
 prompts = DailyStandupPrompts()

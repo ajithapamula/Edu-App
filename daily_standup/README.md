@@ -233,7 +233,7 @@ SQL_SERVER=your_host
 ```bash
 cd App/
 python app.py  # Starts parent app with all submodules
-# Access: http://your_ip:8070/daily_standup/start_test
+# Access: http://your_ip:8090/daily_standup/start_test
 ```
 
 ### **API Endpoints:**

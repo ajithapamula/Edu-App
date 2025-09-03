@@ -35,6 +35,22 @@ class Config:
     TEMP_DIR = CURRENT_DIR / "temp"
     REPORTS_DIR = CURRENT_DIR / "reports"
 
+    MAX_REDIRECTS_OFFTOPIC = 3
+    REDIRECT_MAX_WORDS = 18
+    MAX_VULGAR_STRIKES = 2
+    BOUNDARY_TONE = "calm, brief, professional"
+
+    SAFETY_SYSTEM_PREAMBLE = """
+    You are a professional standup facilitator.
+    Stay strictly on project/work topics.
+    If the user goes off-topic: give a brief redirect (≤ 18 words) and ask one on-topic question.
+    If the user uses vulgar/abusive language: do NOT repeat it; issue a short warning and restate the topic.
+    After two warnings, end politely. Never generate sexual or hateful content. Tone: calm, brief, professional.
+    """.strip()
+
+    MAX_REDIRECTS_OFFTOPIC = 3
+    MAX_VULGAR_STRIKES = 2
+    REDIRECT_MAX_WORDS = 18
     # =========================================================================
     # MYSQL CONFIG (shared across apps)
     # =========================================================================
@@ -76,10 +92,6 @@ class Config:
     def MONGO_CONNECTION_STRING(self) -> str:
         encoded_pass = quote_plus(self.MONGO_PASS)
         return f"mongodb://{self.MONGO_USER}:{encoded_pass}@{self.MONGO_HOST}/{self.MONGO_AUTH_SOURCE}"
-    @property
-    def GROQ_MODEL(self) -> str:
-    # Old code expects GROQ_MODEL; map to the new unified name
-       return getattr(self, "GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo")    
 
     @property
     def mongodb_connection_string(self) -> str:
@@ -183,7 +195,7 @@ class Config:
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.1"))
     OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "300"))
-    
+
     GROQ_TRANSCRIPTION_MODEL = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo")
     GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "60"))
     GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.7"))

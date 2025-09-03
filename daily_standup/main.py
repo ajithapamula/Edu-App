@@ -61,7 +61,7 @@ class UltraFastSessionManager:
             summary_task = asyncio.create_task(self.db_manager.get_summary_fast())
             student_id, first_name, last_name, session_key = await student_info_task
             summary = await summary_task
-
+        
             if not summary or len(summary.strip()) < 50:
                 raise Exception("Invalid summary retrieved from database")
             if not first_name or not last_name:
@@ -78,6 +78,12 @@ class UltraFastSessionManager:
                 current_stage=SessionStage.GREETING,
                 websocket=websocket,
             )
+            SESSION_MAX_SECONDS = getattr(config, "SESSION_MAX_SECONDS", 15 * 60)  # default 15 minutes
+            SESSION_SOFT_CUTOFF_SECONDS = getattr(config, "SESSION_SOFT_CUTOFF_SECONDS", 10)  # last 10 seconds
+            now_ts = time.time()
+            session_data.end_time = now_ts + SESSION_MAX_SECONDS
+            session_data.soft_cutoff_time = session_data.end_time - SESSION_SOFT_CUTOFF_SECONDS
+            session_data.awaiting_user = False  # Track if we’re waiting for user’s final reply
 
             fragment_manager = SummaryManager(shared_clients, session_data)
             if not fragment_manager.initialize_fragments(summary):
@@ -91,6 +97,120 @@ class UltraFastSessionManager:
         except Exception as e:
             logger.error("Failed to create session: %s", e)
             raise Exception(f"Session creation failed: {e}")
+        
+
+    async def _end_due_to_time(self, session_data: SessionData):
+    # ---- helper: safely extract topics without relying on get_all_topics ----
+        def _extract_topics(sd: SessionData):
+            topics = []
+            sm = getattr(sd, "summary_manager", None)
+            if not sm:
+                return topics
+
+        # Try fragments dict with titles
+            fk = getattr(sd, "fragment_keys", None)
+            frags = getattr(sm, "fragments", None)
+
+            if fk and isinstance(frags, dict):
+                for k in fk:
+                    frag = frags.get(k)
+                    if isinstance(frag, dict):
+                        t = frag.get("title") or frag.get("heading") or frag.get("name")
+                        if t:
+                            topics.append(t)
+                if topics:
+                    return topics
+
+            # Try list of fragments
+            if isinstance(frags, list):
+                for frag in frags:
+                    if isinstance(frag, dict):
+                        t = frag.get("title") or frag.get("heading") or frag.get("name")
+                        if t:
+                            topics.append(t)
+                if topics:
+                    return topics
+
+            # Fallback: use fragment keys themselves
+            if fk:
+                return [str(k) for k in fk]
+
+            return topics
+
+        try:
+        # Build the summary structure expected by your prompt
+            topics = _extract_topics(session_data)
+            conv_log = getattr(session_data, "conversation_log", []) or []
+            conversation_summary = {
+                "topics_covered": topics,
+                "total_exchanges": len(conv_log),
+            }
+            user_final_response = (
+                conv_log[-1].get("user_response") if conv_log and isinstance(conv_log[-1], dict) else None
+            )
+
+            # 🔹 Use your prompt to create a dynamic, non-hardcoded ending
+            closing_prompt = prompts.dynamic_session_completion(conversation_summary, user_final_response)
+
+        #    Reuse your existing sync OpenAI call via executor (no new API required)
+            loop = asyncio.get_event_loop()
+            closing_text = await loop.run_in_executor(
+                shared_clients.executor,
+                self.conversation_manager._sync_openai_call,
+                closing_prompt,
+            )
+
+            # Robust fallback just in case
+            if not closing_text or not str(closing_text).strip():
+                closing_text = f"Thanks {session_data.student_name}. We’ll end the session here."
+
+            # Notify UI (and enable “start new session” on frontend)
+            await self._send_quick_message(session_data, {
+                "type": "conversation_end",
+                "text": closing_text,
+                "status": "complete",
+                "enable_new_session": True
+            })
+
+            # Stream TTS of the dynamic ending
+            try:
+                async for audio_chunk in self.tts_processor.generate_ultra_fast_stream(closing_text):
+                    if audio_chunk:
+                        await self._send_quick_message(session_data, {
+                            "type": "audio_chunk",
+                            "audio": audio_chunk.hex(),
+                            "status": "complete",
+                        })
+                await self._send_quick_message(session_data, {"type": "audio_end", "status": "complete"})
+            except Exception as e:
+                logger.error("TTS closing stream error: %s", e)
+
+        except Exception as e:
+         # If anything goes wrong, still end gracefully
+            logger.error("Closing generation error: %s", e)
+            fallback_text = f"Thanks {session_data.student_name}. This session will now end."
+            await self._send_quick_message(session_data, {
+                "type": "conversation_end",
+                "text": fallback_text,
+                "status": "complete",
+                "enable_new_session": True
+            })
+            try:
+                async for audio_chunk in self.tts_processor.generate_ultra_fast_stream(fallback_text):
+                    if audio_chunk:
+                        await self._send_quick_message(session_data, {
+                            "type": "audio_chunk",
+                            "audio": audio_chunk.hex(),
+                            "status": "complete",
+                        })
+                await self._send_quick_message(session_data, {"type": "audio_end", "status": "complete"})
+            except Exception as e2:
+                logger.error("TTS fallback closing stream error: %s", e2)
+
+        # Mark inactive and clean up
+        session_data.is_active = False
+        await self.remove_session(session_data.session_id)
+
 
     async def remove_session(self, session_id: str):
         if session_id in self.active_sessions:
@@ -105,15 +225,22 @@ class UltraFastSessionManager:
 
         start_time = time.time()
         try:
+        # 🔹 HARD EXPIRY
+            now_ts = time.time()
+            if hasattr(session_data, "end_time") and now_ts >= session_data.end_time:
+                await self._end_due_to_time(session_data)
+                return
+        # 🔹 END HARD EXPIRY
+
             audio_size = len(audio_data)
             logger.info("Session %s: received %d bytes of audio", session_id, audio_size)
 
             if audio_size < 100:
                 await self._send_quick_message(session_data, {
-                    "type": "clarification",
-                    "text": "I didn't hear anything clear. Could you please speak a bit louder?",
-                    "status": session_data.current_stage.value,
-                })
+                "type": "clarification",
+                "text": "I didn't hear anything clear. Could you please speak a bit louder?",
+                "status": session_data.current_stage.value,
+            })
                 return
 
             transcript, quality = await self.audio_processor.transcribe_audio_fast(audio_data)
@@ -147,6 +274,27 @@ class UltraFastSessionManager:
 
             logger.info("Session %s: transcript='%s' quality=%.2f", session_id, transcript, quality)
 
+        # 🔹 SOFT CUTOFF
+            now_ts = time.time()
+            soft_cutoff = getattr(session_data, "soft_cutoff_time", None)
+            end_time = getattr(session_data, "end_time", None)
+            if soft_cutoff and end_time and now_ts >= soft_cutoff:
+                if getattr(session_data, "awaiting_user", False):
+                    concept = session_data.current_concept if session_data.current_concept else "unknown"
+                    is_followup = getattr(session_data, '_last_question_followup', False)
+                    session_data.add_exchange("[FINAL_QUESTION_AWAITED_USER]", transcript, quality, concept, is_followup)
+                    if session_data.summary_manager:
+                        session_data.summary_manager.add_answer(transcript)
+                    await self._end_due_to_time(session_data)
+                    return
+                else:
+                    await self._end_due_to_time(session_data)
+                    return
+        # 🔹 END SOFT CUTOFF
+
+        # 🔹 We just received a user reply -> no longer awaiting
+            session_data.awaiting_user = False
+
             ai_response = await self.conversation_manager.generate_fast_response(session_data, transcript)
 
             concept = session_data.current_concept if session_data.current_concept else "unknown"
@@ -158,6 +306,12 @@ class UltraFastSessionManager:
 
             await self._update_session_state_fast(session_data)
             await self._send_response_with_ultra_fast_audio(session_data, ai_response)
+
+        # 🔹 After sending our (likely) question, await the user's reply if not in soft cutoff
+            now_ts = time.time()
+            soft_cutoff = getattr(session_data, "soft_cutoff_time", None)
+            if session_data.current_stage == SessionStage.TECHNICAL and (not soft_cutoff or now_ts < soft_cutoff):
+                session_data.awaiting_user = True
 
             processing_time = time.time() - start_time
             logger.info("Total processing time: %.2fs", processing_time)

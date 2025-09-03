@@ -105,12 +105,12 @@ choco install ffmpeg
 **Run the app**
 
 ```bash
-uvicorn main:app --host 127.0.0.1 --port 8070 --reload
+uvicorn main:app --host 127.0.0.1 --port 8090 --reload
 nginx -p C:\tools\nginx-1.29.0 -c conf\nginx.conf
 
 ```
 
-Open browser: [http://localhost:8070](http://localhost:8070)
+Open browser: [http://localhost:8090](http://localhost:8090)
 
 ---
 
@@ -132,7 +132,7 @@ GROQ_API_KEY=your_groq_key
 docker-compose up --build
 ```
 
-Open: [http://localhost:8070](http://localhost:8070)
+Open: [http://localhost:8090](http://localhost:8090)
 
 ---
 
@@ -147,7 +147,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt \
  && pip install torch==2.6.0+cu118 torchvision==0.21.0+cu118 torchaudio==2.6.0+cu118 --index-url https://download.pytorch.org/whl/cu118
 COPY . .
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8070"] || ["python", "main.py"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8090"] || ["python", "main.py"]
 
 ```
 
@@ -159,7 +159,7 @@ services:
   interview_app:
     build: .
     ports:
-      - "8070:8070"
+      - "8090:8090"
     env_file:
       - .env
     depends_on:
@@ -227,7 +227,7 @@ volumes:
 | ------------------ | ----------------------------------------------- | ------------------------------------------- |
 | Mic not working    | Check Windows > Settings > Privacy > Microphone |                                             |
 | `ffmpeg not found` | Add to PATH or use `choco install ffmpeg`       |                                             |
-| Port 8070 busy     | Use \`netstat -ano                              | findstr :8070`then`taskkill /PID <pid> /F\` |
+| Port 8090 busy     | Use \`netstat -ano                              | findstr :8090`then`taskkill /PID <pid> /F\` |
 | API error          | Check `.env` values are set properly            |                                             |
 
 ---
