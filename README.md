@@ -85,7 +85,7 @@ A comprehensive AI-powered platform featuring voice-based interviews, mock tests
 ### ? One-Step Script-Based Setup (Recommended)
 
 ```bash
-git clone https://github.com/Sa1f27/Edu-app.git
+git clone https://github.com/ajithapamula/Edu-app.git
 cd Edu-app
 
 sudo apt install dos2unix
