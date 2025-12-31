@@ -18,118 +18,146 @@ class PromptTemplates:
     
     @staticmethod
     def _dev_batch_prompt(context: str, question_count: int) -> str:
-        """Developer questions generation prompt"""
-        return f"""Generate {question_count} high-quality programming questions based on the provided context. Create practical, challenging questions that test real development skills and problem-solving abilities.
+        """Developer interview questions generation prompt"""
+        aptitude_count = int(question_count * 0.3)
+        theory_count = int(question_count * 0.3)
+        coding_count = question_count - aptitude_count - theory_count
 
-CONTEXT:
-{context}
+        return f"""
+    You are conducting a REAL developer technical interview for an MNC-level company.
 
-REQUIREMENTS:
-- Generate exactly {question_count} questions numbered sequentially
-- Mix question types: 40% practical coding, 30% system design, 30% debugging/optimization
-- Progressive difficulty: start easier, increase complexity
-- Each question must be complete and standalone
-- Include clear requirements, constraints, and expected outcomes
-- Base questions on concepts and technologies mentioned in the context
-- Make questions realistic and industry-relevant
+    Generate EXACTLY {question_count} questions based on the provided WEEKLY developer summaries.
 
-FORMAT each question exactly as shown:
-=== QUESTION 1 ===
-## Title: [Clear, descriptive title]
-## Difficulty: [Easy/Medium/Hard]
-## Type: [Practical/Algorithm/System Design/Debugging]
-## Question:
-[Complete question with detailed requirements, constraints, input/output examples, and any code snippets needed. Include specific technical requirements and success criteria.]
+    CONTEXT (Weekly Developer Summaries):
+    {context}
 
-=== QUESTION 2 ===
-## Title: [Clear, descriptive title]
-## Difficulty: [Easy/Medium/Hard]
-## Type: [Practical/Algorithm/System Design/Debugging]
-## Question:
-[Complete question with detailed requirements...]
+    MANDATORY QUESTION DISTRIBUTION (STRICT):
+    - Exactly {aptitude_count} Aptitude / Logical problem-solving questions
+    - Exactly {theory_count} Theory / Conceptual understanding questions
+    - Exactly {coding_count} Coding questions
 
-Continue this exact pattern for all {question_count} questions.
+    TIME CONSTRAINTS:
+    - Coding questions must be solvable in ~5 minutes
+    - Aptitude questions: short, logic-based, fast to answer
+    - Theory questions: concept clarity, not memorization
+    - Total test duration ≈ 1 hour
 
-IMPORTANT: 
-- Each question should test different aspects of development
-- Include code examples where relevant
-- Specify performance requirements when applicable
-- Make questions challenging but solvable by a competent developer
-- Ensure questions relate to the provided context
+    QUESTION QUALITY RULES:
+    - Questions must reflect REAL interview standards (not academic)
+    - Avoid trivia or definition-only questions
+    - Use only technologies, concepts, and tools mentioned in the context
+    - Progressive difficulty is MANDATORY
+    - Each question must be complete and standalone
 
-Generate all {question_count} questions now:"""
+    CODING QUESTION RULES (VERY IMPORTANT):
+    - Single-function or small logic problems only
+    - No frameworks or project setup
+    - No multi-file systems
+    - Clearly specify:
+    - Input
+    - Output
+    - Constraints
+    - Language-agnostic unless context requires a specific language
+    - Focus on problem-solving, not boilerplate
+
+    FORMAT (STRICT — DO NOT CHANGE):
+
+    === QUESTION 1 ===
+    ## Title: [Short, clear title]
+    ## Difficulty: [Easy / Medium / Hard]
+    ## Type: [Aptitude / Theory / Coding]
+    ## Question:
+    [Complete question description]
+
+    === QUESTION 2 ===
+    ## Title: ...
+    ## Difficulty: ...
+    ## Type: ...
+    ## Question:
+    ...
+
+    Continue this EXACT format for all {question_count} questions.
+
+    IMPORTANT RULES (NO EXCEPTIONS):
+    - Do NOT include answers
+    - Do NOT include hints or explanations
+    - Do NOT repeat questions
+    - Do NOT mention percentages or distribution in output
+    - Coding questions MUST be concise and time-bound
+    - Ensure the distribution EXACTLY matches the counts above
+
+    Generate all {question_count} questions now.
+    """
 
     @staticmethod
     def _non_dev_batch_prompt(context: str, question_count: int) -> str:
-        """Non-developer questions generation prompt"""
-        return f"""Generate {question_count} high-quality multiple-choice questions based on the provided context. Focus on conceptual understanding, analytical thinking, and practical application of technical concepts for non-technical professionals.
+        """Non-developer MCQ-only interview questions generation prompt"""
+        return f"""
+    You are conducting a REAL non-developer interview (QA / BA / Analyst / Functional roles).
+    Generate EXACTLY {question_count} high-quality MULTIPLE-CHOICE QUESTIONS (MCQs)
+    based strictly on the provided weekly summaries.
 
-CONTEXT:
-{context}
+    CONTEXT (Weekly Summaries from MongoDB):
+    {context}
 
-REQUIREMENTS:
-- Generate exactly {question_count} questions numbered sequentially
-- Each question must have exactly 4 options (A, B, C, D) with only 1 correct answer
-- Mix question types: 40% conceptual understanding, 30% analytical reasoning, 30% practical application
-- Progressive difficulty: start with fundamental concepts, advance to complex analysis
-- Create sophisticated distractors based on common misconceptions
-- Test deep understanding rather than memorization
-- Base questions on concepts and scenarios from the provided context
+    MANDATORY RULES (NO EXCEPTIONS):
+    - ALL questions MUST be MCQs
+    - EACH question MUST have exactly 4 options (A, B, C, D)
+    - ONLY ONE option must be correct
+    - NO descriptive answers
+    - NO coding questions
+    - NO open-ended questions
 
-FORMAT each question exactly as shown:
-=== QUESTION 1 ===
-## Title: [Clear, descriptive title]
-## Difficulty: [Easy/Medium/Hard]
-## Type: [Conceptual/Analytical/Applied]
-## Question:
-[Clear, specific question that tests understanding of concepts from the context. Include scenario or case study if relevant.]
-## Options:
-A) [First option - could be correct or plausible distractor]
-B) [Second option - could be correct or plausible distractor]
-C) [Third option - could be correct or plausible distractor]
-D) [Fourth option - could be correct or plausible distractor]
+    QUESTION DISTRIBUTION:
+    - Aptitude / Logical reasoning → ~30%
+    - Theory / Conceptual understanding → ~40%
+    - Process / Scenario-based decision making → ~30%
 
-=== QUESTION 2 ===
-## Title: [Clear, descriptive title]
-## Difficulty: [Easy/Medium/Hard]
-## Type: [Conceptual/Analytical/Applied]
-## Question:
-[Clear question testing different concept...]
-## Options:
-A) [Option A]
-B) [Option B]
-C) [Option C]
-D) [Option D]
+    QUESTION GUIDELINES:
+    - Questions must reflect real workplace understanding
+    - Prefer “best choice” questions over factual recall
+    - Distractors must be realistic and commonly mistaken options
+    - Avoid guessable or trivial questions
+    - Use concepts mentioned in the context only
 
-Continue this exact pattern for all {question_count} questions.
+    FORMAT (STRICT — DO NOT CHANGE):
 
-IMPORTANT:
-- Only one option should be clearly correct for each question
-- Distractors should be plausible but clearly wrong to someone who understands the concept
-- Questions should test understanding, not just recall
-- Relate all questions to concepts mentioned in the provided context
-- Avoid trick questions or ambiguous wording
+    === QUESTION 1 ===
+    ## Title: [Short, clear title]
+    ## Difficulty: [Easy / Medium / Hard]
+    ## Type: [Aptitude / Theory / Process]
+    ## Question:
+    [Clear and precise MCQ question]
+    ## Options:
+    A) [Option A]
+    B) [Option B]
+    C) [Option C]
+    D) [Option D]
 
-Generate all {question_count} questions now:"""
+    === QUESTION 2 ===
+    ## Title: ...
+    ## Difficulty: ...
+    ## Type: ...
+    ## Question:
+    ...
+    ## Options:
+    A) ...
+    B) ...
+    C) ...
+    D) ...
 
-    @staticmethod
-    def create_evaluation_prompt(user_type: str, qa_pairs: List[Dict[str, Any]]) -> str:
-        """Create prompt for evaluating test answers"""
-        
-        # Format QA pairs for evaluation
-        qa_text = []
-        for i, qa in enumerate(qa_pairs, 1):
-            question = qa['question'][:300] + "..." if len(qa['question']) > 300 else qa['question']
-            answer = qa['answer'][:200] + "..." if len(qa['answer']) > 200 else qa['answer']
-            qa_text.append(f"QUESTION {i}:\n{question}\n\nSTUDENT ANSWER:\n{answer}")
-        
-        qa_content = "\n\n" + "="*50 + "\n\n".join(qa_text)
-        
-        if user_type == "dev":
-            return PromptTemplates._dev_evaluation_prompt(qa_content, len(qa_pairs))
-        else:
-            return PromptTemplates._non_dev_evaluation_prompt(qa_content, len(qa_pairs))
-    
+    Continue this EXACT format for all {question_count} questions.
+
+    IMPORTANT:
+    - Do NOT mention summaries, MongoDB, or context source
+    - Do NOT add explanations
+    - Do NOT reveal the correct answer
+    - Keep language professional and interview-appropriate
+    - Maintain progressive difficulty
+
+    Generate all {question_count} MCQ questions now.
+    """
+
     @staticmethod
     def _dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
         """Developer answers evaluation prompt"""
@@ -200,6 +228,25 @@ Provide comprehensive analysis covering:
 - Assessment of technical awareness
 
 Score each of the {question_count} questions and provide specific feedback. Focus on understanding rather than memorization."""
+
+
+    @staticmethod
+    def create_evaluation_prompt(user_type: str, qa_pairs: List[Dict[str, Any]]) -> str:
+        question_count = len(qa_pairs)
+
+        formatted = []
+        for i, qa in enumerate(qa_pairs, 1):
+            q = qa.get("question", "")
+            a = qa.get("answer", "")
+            formatted.append(f"QUESTION {i}:\n{q}\n\nANSWER:\n{a}")
+
+        qa_content = "\n\n".join(formatted)
+
+        if user_type == "dev":
+            return PromptTemplates._dev_evaluation_prompt(qa_content, question_count)
+        else:
+            return PromptTemplates._non_dev_evaluation_prompt(qa_content, question_count)
+
 
     @staticmethod
     def optimize_context_prompt(context: str) -> str:
@@ -274,6 +321,7 @@ class PromptValidator:
         
         return validation
     
+
     @staticmethod
     def validate_evaluation_response(response: str, expected_count: int) -> Dict[str, Any]:
         """Validate evaluation response"""

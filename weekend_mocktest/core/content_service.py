@@ -8,272 +8,222 @@ from .database import get_db_manager
 
 logger = logging.getLogger(__name__)
 
+
 class ContentService:
-    """Service for processing summaries and creating context for questions"""
-    
+    """
+    Service for processing MongoDB summaries and generating
+    developer / non-developer specific context for mock tests.
+    """
+
+    DEV_KEYWORDS = {
+        "python", "java", "javascript", "typescript",
+        "api", "backend", "frontend", "fullstack",
+        "database", "sql", "nosql",
+        "algorithm", "data structure",
+        "code", "coding",
+        "architecture", "system design", "microservice",
+        "performance", "optimization",
+        "deployment", "ci/cd",
+        "framework", "fastapi", "django", "spring",
+        "react", "node", "angular"
+    }
+
+    NON_DEV_KEYWORDS = {
+        "testing", "qa", "manual testing", "automation testing",
+        "sdlc", "agile", "scrum", "kanban",
+        "requirement", "requirement gathering",
+        "analysis", "business analysis",
+        "process", "workflow",
+        "defect", "bug",
+        "test case", "test plan",
+        "documentation", "reporting",
+        "sap", "crm", "erp"
+    }
+
     def __init__(self):
         self.db_manager = get_db_manager()
-        logger.info("📚 Content service initialized")
-    
+        logger.info("📚 ContentService initialized")
+
+    # ======================================================
+    # PUBLIC
+    # ======================================================
     def get_context_for_questions(self, user_type: str = "dev") -> str:
-        """Generate context from MongoDB summaries for question generation"""
+        """
+        Build AI context from weekly MongoDB summaries based on interview type.
+        """
         try:
-            logger.info(f"🔍 Generating context for {user_type} questions")
-            
-            # Fetch recent summaries
-            summaries = self.db_manager.get_recent_summaries(config.RECENT_SUMMARIES_COUNT)
-            
+            logger.info(f"🔍 Building context for user_type={user_type}")
+
+            summaries = self.db_manager.get_recent_summaries(
+                config.RECENT_SUMMARIES_COUNT
+            )
+
             if not summaries:
-                raise Exception("No summaries available in database")
-            
-            logger.info(f"📊 Processing {len(summaries)} summaries")
-            
-            # Process summaries into context
-            context_parts = []
-            for i, summary_doc in enumerate(summaries, 1):
-                processed_content = self._process_summary_for_context(summary_doc)
-                
-                if processed_content and len(processed_content.strip()) > 50:
-                    doc_id = str(summary_doc.get("_id", f"doc_{i}"))[:8]
-                    context_parts.append(f"Summary {i} (ID: {doc_id}): {processed_content}")
-            
-            if not context_parts:
-                raise Exception("No valid content extracted from summaries")
-            
-            # Create final context
-            combined_context = "\n\n".join(context_parts)
-            
-            # Add context prefix based on user type
-            if user_type == "dev":
-                context_prefix = "Technical Development Context (from recent project summaries):\n\n"
-            else:
-                context_prefix = "Technology Concepts and Analysis Context (from recent summaries):\n\n"
-            
-            final_context = context_prefix + combined_context
-            
-            # Validate context length
-            if len(final_context) < 300:
-                raise Exception(f"Context too short: {len(final_context)} chars, need at least 300")
-            
-            # Log sample for verification
-            sample = final_context[:200] + "..." if len(final_context) > 200 else final_context
-            logger.info(f"✅ Context generated: {len(final_context)} chars")
-            logger.debug(f"Sample: {sample}")
-            
+                raise Exception("No summaries found in MongoDB")
+
+            context_blocks = []
+
+            for idx, doc in enumerate(summaries, 1):
+                summary_text = doc.get("summary", "")
+                if not summary_text or len(summary_text) < 120:
+                    continue
+
+                relevance_score = self._score_relevance(summary_text, user_type)
+                if relevance_score <= 0:
+                    continue
+
+                processed = self._process_summary(summary_text)
+                if not processed or len(processed) < 80:
+                    continue
+
+                doc_id = str(doc.get("_id", f"doc_{idx}"))[:8]
+                context_blocks.append(
+                    f"Summary {idx} (ID: {doc_id}, relevance={relevance_score}): {processed}"
+                )
+
+            if not context_blocks:
+                raise Exception("No relevant summaries after filtering")
+
+            prefix = (
+                "Developer Interview Context (coding, systems, architecture):\n\n"
+                if user_type == "dev"
+                else "Non-Developer Interview Context (process, testing, analysis):\n\n"
+            )
+
+            final_context = prefix + "\n\n".join(context_blocks)
+
+            if len(final_context) < 400:
+                raise Exception("Generated context too short")
+
+            logger.info(f"✅ Context generated ({len(final_context)} chars)")
             return final_context
-            
+
         except Exception as e:
             logger.error(f"❌ Context generation failed: {e}")
-            raise Exception(f"Context generation failed: {e}")
-    
-    def _process_summary_for_context(self, summary_doc: Dict[str, Any]) -> str:
-        """Process individual summary into usable context"""
-        try:
-            summary_text = summary_doc.get("summary", "")
-            if not summary_text or len(summary_text) < 100:
-                return ""
-            
-            # Extract bullet points if available
-            bullet_points = self._extract_bullet_points(summary_text)
-            
-            if bullet_points:
-                # Use bullet points for structured content
-                selected_points = self._select_relevant_points(bullet_points)
-                content = ". ".join(selected_points)
-            else:
-                # Use full text if no bullet points found
-                content = summary_text
-            
-            # Apply slicing for variety and performance
-            sliced_content = self._slice_content_smartly(content)
-            
-            return sliced_content
-            
-        except Exception as e:
-            logger.warning(f"Failed to process summary: {e}")
-            return ""
-    
-    def _extract_bullet_points(self, text: str) -> List[str]:
-        """Extract numbered bullet points from text"""
-        try:
-            # Patterns for different bullet formats
-            patterns = [
-                r'^\d+[\.\)]\s+(.+?)(?=^\d+[\.\)]|\Z)',  # 1. or 1)
-                r'^[-*•]\s+(.+?)(?=^[-*•]|\Z)',          # - or * or •
-                r'^[A-Z][\.\)]\s+(.+?)(?=^[A-Z][\.\)]|\Z)'  # A. or A)
-            ]
-            
-            bullet_points = []
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, text, re.MULTILINE | re.DOTALL)
-                if matches:
-                    # Clean and filter points
-                    points = [point.strip().replace('\n', ' ') for point in matches]
-                    points = [point for point in points if len(point) > 30]  # Filter short points
-                    if points:
-                        bullet_points = points
-                        break
-            
-            logger.debug(f"Extracted {len(bullet_points)} bullet points")
-            return bullet_points
-            
-        except Exception as e:
-            logger.warning(f"Bullet point extraction failed: {e}")
-            return []
-    
-    def _select_relevant_points(self, bullet_points: List[str]) -> List[str]:
-        """Select most relevant bullet points"""
-        if not bullet_points:
-            return []
-        
-        # Calculate how many points to select
-        total_points = len(bullet_points)
-        points_to_select = max(1, int(total_points * config.SUMMARY_SLICE_FRACTION))
-        points_to_select = min(points_to_select, 8)  # Cap at 8 points
-        
-        if points_to_select >= total_points:
-            return bullet_points
-        
-        # Score points by technical relevance
-        scored_points = []
-        technical_keywords = [
-            'development', 'programming', 'algorithm', 'database', 'system',
-            'api', 'framework', 'implementation', 'optimization', 'architecture',
-            'security', 'performance', 'testing', 'deployment', 'integration',
-            'analysis', 'solution', 'technology', 'process', 'methodology'
-        ]
-        
-        for point in bullet_points:
-            score = sum(1 for keyword in technical_keywords if keyword.lower() in point.lower())
-            score += len(point) // 100  # Longer points get slight bonus
-            scored_points.append((point, score))
-        
-        # Sort by score and select top points
-        scored_points.sort(key=lambda x: x[1], reverse=True)
-        selected = [point for point, _ in scored_points[:points_to_select]]
-        
-        # If we have fewer high-scoring points, randomly fill the rest
-        if len(selected) < points_to_select:
-            remaining = [point for point, _ in scored_points[len(selected):]]
-            additional_count = points_to_select - len(selected)
-            selected.extend(random.sample(remaining, min(additional_count, len(remaining))))
-        
-        return selected
-    
-    def _slice_content_smartly(self, content: str) -> str:
-        """Apply smart slicing to content while maintaining readability"""
-        if not content:
-            return ""
-        
-        target_length = int(len(content) * config.SUMMARY_SLICE_FRACTION)
-        target_length = max(target_length, 100)  # Minimum length
-        target_length = min(target_length, len(content))  # Don't exceed original
-        
-        if target_length >= len(content):
-            return content
-        
-        # Try to find good slice boundaries
-        sentences = re.split(r'[.!?]+', content)
-        if len(sentences) > 1:
-            # Select sentences that fit within target length
-            selected_sentences = []
-            current_length = 0
-            
-            # Start from a random position for variety
-            start_idx = random.randint(0, max(0, len(sentences) - 3))
-            
-            for i in range(start_idx, len(sentences)):
-                sentence = sentences[i].strip()
-                if sentence and current_length + len(sentence) <= target_length:
-                    selected_sentences.append(sentence)
-                    current_length += len(sentence)
-                elif selected_sentences:  # Have at least one sentence
-                    break
-            
-            if selected_sentences:
-                return '. '.join(selected_sentences) + '.'
-        
-        # Fallback: simple character slicing with word boundary
-        if target_length < len(content):
-            # Find word boundary near target
-            slice_pos = content.rfind(' ', 0, target_length)
-            if slice_pos > target_length * 0.8:  # If word boundary is close enough
-                return content[:slice_pos] + '...'
-        
-        return content[:target_length] + '...'
-    
+            raise
+
     def validate_context_quality(self, context: str) -> Dict[str, Any]:
-        """Validate generated context quality"""
+        """
+        Quality check (kept for compatibility with existing test_service.py).
+        Does NOT block unless extremely weak.
+        """
         try:
-            # Basic metrics
-            word_count = len(context.split())
-            char_count = len(context)
-            line_count = len(context.split('\n'))
-            
-            # Technical content indicators
-            technical_terms = [
-                'development', 'programming', 'algorithm', 'system', 'api',
-                'database', 'framework', 'implementation', 'architecture',
-                'security', 'performance', 'analysis', 'process', 'method'
-            ]
-            
-            technical_score = sum(1 for term in technical_terms 
-                                 if term.lower() in context.lower())
-            
-            # Quality scoring
-            quality_factors = []
-            
-            # Length factor
-            if char_count >= 1000:
-                quality_factors.append(0.4)
-            elif char_count >= 500:
-                quality_factors.append(0.3)
+            char_count = len(context or "")
+            word_count = len((context or "").split())
+            summary_count = (context or "").count("Summary ")
+
+            # Simple “signal” check
+            dev_hits = sum(1 for k in self.DEV_KEYWORDS if k in (context or "").lower())
+            nondev_hits = sum(1 for k in self.NON_DEV_KEYWORDS if k in (context or "").lower())
+
+            # Score
+            score = 0.0
+            if char_count >= 1200:
+                score += 0.4
+            elif char_count >= 600:
+                score += 0.25
             else:
-                quality_factors.append(0.1)
-            
-            # Content diversity (number of summaries)
-            summary_count = context.count("Summary ")
-            if summary_count >= 7:
-                quality_factors.append(0.3)
-            elif summary_count >= 5:
-                quality_factors.append(0.2)
+                score += 0.1
+
+            if summary_count >= 6:
+                score += 0.3
+            elif summary_count >= 4:
+                score += 0.2
             else:
-                quality_factors.append(0.1)
-            
-            # Technical relevance
-            if technical_score >= 8:
-                quality_factors.append(0.3)
-            elif technical_score >= 5:
-                quality_factors.append(0.2)
+                score += 0.1
+
+            if (dev_hits + nondev_hits) >= 8:
+                score += 0.3
+            elif (dev_hits + nondev_hits) >= 4:
+                score += 0.2
             else:
-                quality_factors.append(0.1)
-            
-            overall_score = sum(quality_factors)
-            
+                score += 0.1
+
             return {
                 "char_count": char_count,
                 "word_count": word_count,
                 "summary_count": summary_count,
-                "technical_score": technical_score,
-                "quality_score": overall_score,
-                "is_high_quality": overall_score >= 0.7,
-                "data_source": "live_mongodb"
-            }
-            
-        except Exception as e:
-            logger.error(f"Context validation failed: {e}")
-            return {
-                "error": str(e),
-                "is_high_quality": False,
-                "data_source": "unknown"
+                "keyword_hits": {"dev": dev_hits, "non_dev": nondev_hits},
+                "quality_score": score,
+                "is_high_quality": score >= 0.65,
+                "data_source": "live_mongodb",
             }
 
-# Singleton instance
+        except Exception as e:
+            logger.error(f"Context validation failed: {e}")
+            return {"is_high_quality": False, "error": str(e), "data_source": "unknown"}
+
+    # ======================================================
+    # INTERNAL HELPERS
+    # ======================================================
+    def _score_relevance(self, text: str, user_type: str) -> int:
+        text_l = text.lower()
+        score = 0.0
+
+        if user_type == "dev":
+            for kw in self.DEV_KEYWORDS:
+                if kw in text_l:
+                    score += 1
+        else:
+            for kw in self.NON_DEV_KEYWORDS:
+                if kw in text_l:
+                    score += 1
+            # Penalize heavy coding summaries for non-dev
+            for kw in self.DEV_KEYWORDS:
+                if kw in text_l:
+                    score -= 0.5
+
+        return max(0, int(score))
+
+    def _process_summary(self, text: str) -> str:
+        bullets = self._extract_bullets(text)
+        if bullets:
+            selected = self._select_points(bullets)
+            content = ". ".join(selected)
+        else:
+            content = text
+        return self._slice_content(content)
+
+    def _extract_bullets(self, text: str) -> List[str]:
+        patterns = [
+            r'^\d+[\.\)]\s+(.+?)(?=^\d+[\.\)]|\Z)',
+            r'^[-*•]\s+(.+?)(?=^[-*•]|\Z)',
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.MULTILINE | re.DOTALL)
+            cleaned = [
+                m.strip().replace("\n", " ")
+                for m in matches
+                if len(m.strip()) > 30
+            ]
+            if cleaned:
+                return cleaned
+        return []
+
+    def _select_points(self, points: List[str]) -> List[str]:
+        if not points:
+            return []
+        target = min(8, max(2, int(len(points) * config.SUMMARY_SLICE_FRACTION)))
+        scored = [(p, len(p)) for p in points]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [p for p, _ in scored[:target]]
+
+    def _slice_content(self, content: str) -> str:
+        if not content:
+            return ""
+        max_len = max(150, int(len(content) * config.SUMMARY_SLICE_FRACTION))
+        if len(content) <= max_len:
+            return content
+        cut = content.rfind(" ", 0, max_len)
+        if cut < 0:
+            cut = max_len
+        return content[:cut] + "..."
+
+
 _content_service = None
 
 def get_content_service() -> ContentService:
-    """Get content service singleton"""
     global _content_service
     if _content_service is None:
         _content_service = ContentService()
