@@ -2,12 +2,316 @@
 from typing import List, Dict, Any
 from .config import config
 
+
 class PromptTemplates:
-    """Optimized prompt templates for AI question generation and evaluation"""
+    """
+    Optimized prompt templates for AI question generation and evaluation.
+    
+    Supports:
+    - Question bank population with diverse questions
+    - Developer exam: aptitude, theory, coding
+    - Non-developer exam: MCQ only
+    - Evaluation with detailed feedback
+    """
+
+    # ================================================================
+    # QUESTION BANK GENERATION (NEW)
+    # ================================================================
     
     @staticmethod
-    def create_batch_questions_prompt(user_type: str, context: str, question_count: int = None) -> str:
-        """Create prompt for batch question generation"""
+    def create_bank_generation_prompt(user_type: str, question_type: str,
+                                      context: str, count: int) -> str:
+        """Create prompt for generating questions for the question bank"""
+        
+        if user_type == "dev":
+            if question_type == "aptitude":
+                return PromptTemplates._dev_aptitude_bank_prompt(context, count)
+            elif question_type == "theory":
+                return PromptTemplates._dev_theory_bank_prompt(context, count)
+            elif question_type == "coding":
+                return PromptTemplates._dev_coding_bank_prompt(context, count)
+        else:
+            return PromptTemplates._non_dev_mcq_bank_prompt(context, count)
+        
+        raise ValueError(f"Unknown question type: {question_type}")
+    
+    @staticmethod
+    def _dev_aptitude_bank_prompt(context: str, count: int) -> str:
+        """Generate aptitude/logical reasoning questions for developer bank"""
+        return f"""You are creating a QUESTION BANK for a developer assessment platform.
+
+Generate EXACTLY {count} UNIQUE aptitude and logical reasoning questions.
+These questions test problem-solving ability relevant to a developer's work.
+
+WEEKLY LEARNING CONTEXT:
+{context}
+
+IMPORTANT: Create questions that relate to the technologies, concepts, and scenarios 
+mentioned in the weekly summaries above. The questions should feel relevant to what 
+developers are learning.
+
+QUESTION TYPES TO INCLUDE:
+1. Logic puzzles using programming concepts (e.g., "If function A calls B, and B calls C...")
+2. Data structure reasoning (e.g., "Given a list of tasks with dependencies...")
+3. Algorithm complexity comparison without code
+4. System design logic (e.g., "If server X can handle 100 requests...")
+5. Pattern recognition with tech scenarios
+6. Resource allocation problems
+7. Time estimation for development tasks
+8. Debugging logic (finding errors through reasoning)
+
+EXAMPLE QUESTION STYLES:
+- "A development team has 3 sprints. Sprint 1 completes 40% of features, Sprint 2 completes 35% more..."
+- "If a cache hit ratio is 80% and each cache miss costs 50ms, while hits cost 5ms..."
+- "A deployment pipeline has 4 stages. If stage 1 fails 10% of the time..."
+
+DIFFICULTY DISTRIBUTION:
+- Easy: ~30% (straightforward calculations)
+- Medium: ~50% (multi-step reasoning)
+- Hard: ~20% (complex scenarios)
+
+FORMAT (STRICT):
+
+=== QUESTION 1 ===
+## Title: [Descriptive title related to tech/dev context]
+## Difficulty: [Easy/Medium/Hard]
+## Type: aptitude
+## Tags: [logic, pattern, math, analysis, tech-relevant-tag]
+## Question:
+[Clear question with all data needed to solve. Make it relevant to developer context.]
+
+=== QUESTION 2 ===
+...
+
+CRITICAL RULES:
+1. Questions MUST relate to the weekly learning topics when possible
+2. Use developer/tech scenarios (sprints, deployments, servers, databases, APIs)
+3. Solvable in 2 minutes - no coding required
+4. Each question completely unique
+5. Include all numbers/data needed to solve
+
+Generate all {count} context-relevant aptitude questions now:"""
+
+    @staticmethod
+    def _dev_theory_bank_prompt(context: str, count: int) -> str:
+        """Generate theory/conceptual questions for developer bank"""
+        return f"""You are creating a QUESTION BANK for a developer assessment platform.
+
+Generate EXACTLY {count} UNIQUE theory and conceptual understanding questions.
+These questions test technical knowledge and understanding.
+
+CONTEXT (Weekly Developer Summaries):
+{context}
+
+QUESTION REQUIREMENTS:
+- Software engineering concepts
+- System design principles
+- Architecture patterns
+- Best practices and conventions
+- Technology comparisons
+- Debugging strategies
+- Performance optimization concepts
+- Security principles
+- Database concepts
+- API design principles
+
+DIFFICULTY DISTRIBUTION:
+- Easy: ~30% (fundamental concepts)
+- Medium: ~50% (applied understanding)
+- Hard: ~20% (deep technical analysis)
+
+CRITICAL RULES:
+1. Each question MUST be completely unique
+2. Questions should require explanation, not just one-word answers
+3. Questions should be answerable in 2 minutes
+4. Base questions on concepts from the context
+5. Include "why" and "how" questions, not just "what"
+
+FORMAT (STRICT):
+
+=== QUESTION 1 ===
+## Title: [Descriptive title]
+## Difficulty: [Easy/Medium/Hard]
+## Type: theory
+## Tags: [architecture, design, security, database, api]
+## Question:
+[Clear question that requires conceptual understanding to answer]
+
+=== QUESTION 2 ===
+## Title: ...
+## Difficulty: ...
+## Type: theory
+## Tags: ...
+## Question:
+...
+
+Continue for all {count} questions.
+
+IMPORTANT:
+- Do NOT include answers
+- Questions should test understanding, not memorization
+- Vary topics significantly across questions
+- Include scenario-based questions
+- Make questions practical and relevant
+
+Generate all {count} theory questions now:"""
+
+    @staticmethod
+    def _dev_coding_bank_prompt(context: str, count: int) -> str:
+        """Generate coding questions for developer bank"""
+        return f"""You are creating a QUESTION BANK for a developer assessment platform.
+
+Generate EXACTLY {count} UNIQUE coding challenge questions.
+These questions test actual programming and problem-solving skills.
+
+CONTEXT (Weekly Developer Summaries):
+{context}
+
+QUESTION REQUIREMENTS:
+- Single-function problems (no multi-file setups)
+- Clear input/output specifications
+- Specific constraints mentioned
+- Solvable in 5 minutes
+- Language-agnostic (unless context specifies)
+
+QUESTION CATEGORIES:
+- Array/string manipulation
+- Data structure operations
+- Algorithm implementation
+- Logic problems
+- Pattern-based coding
+- Utility function creation
+- Bug fixing (provide buggy code to fix)
+- Code optimization
+
+DIFFICULTY DISTRIBUTION:
+- Easy: ~20% (straightforward implementation)
+- Medium: ~60% (requires algorithmic thinking)
+- Hard: ~20% (optimization or complex logic)
+
+CRITICAL RULES:
+1. Each question MUST be completely unique
+2. Clearly specify: Input format, Output format, Constraints
+3. Provide at least 2 example test cases
+4. No framework-specific questions
+5. No database or API questions (pure logic)
+
+FORMAT (STRICT):
+
+=== QUESTION 1 ===
+## Title: [Descriptive function name or problem name]
+## Difficulty: [Easy/Medium/Hard]
+## Type: coding
+## Tags: [array, string, algorithm, optimization]
+## Question:
+[Problem description]
+
+**Input:**
+[Describe input format and types]
+
+**Output:**
+[Describe expected output format]
+
+**Constraints:**
+[List any constraints like array size, value ranges]
+
+**Examples:**
+Input: [example input]
+Output: [example output]
+
+Input: [another example]
+Output: [another output]
+
+=== QUESTION 2 ===
+## Title: ...
+...
+
+Continue for all {count} questions.
+
+IMPORTANT:
+- Do NOT include solutions
+- Make problems interesting and practical
+- Vary the data structures and algorithms tested
+- Include edge cases in examples
+- Questions should be solvable in 5 minutes by a competent developer
+
+Generate all {count} coding questions now:"""
+
+    @staticmethod
+    def _non_dev_mcq_bank_prompt(context: str, count: int) -> str:
+        """Generate MCQ questions for non-developer bank - BASED ON SUMMARIES"""
+        return f"""You are creating a QUESTION BANK for a non-developer assessment platform.
+
+Generate EXACTLY {count} UNIQUE Multiple Choice Questions (MCQs).
+
+⚠️ CRITICAL: Questions MUST be based on the weekly summaries provided below!
+Read the summaries carefully and create questions that test what was actually taught.
+
+═══════════════════════════════════════════════════════════════
+WEEKLY LEARNING SUMMARIES (BASE YOUR QUESTIONS ON THESE):
+═══════════════════════════════════════════════════════════════
+{context}
+═══════════════════════════════════════════════════════════════
+
+INSTRUCTIONS:
+1. READ the summaries above carefully
+2. IDENTIFY specific topics, tools, concepts mentioned
+3. CREATE questions that test understanding of THOSE topics
+4. DO NOT create generic questions - they must relate to the summaries
+
+QUESTION TOPICS (extract from summaries):
+- Testing concepts mentioned in summaries
+- SDLC phases discussed in summaries  
+- Tools and technologies mentioned (JIRA, etc.)
+- Processes and workflows covered
+- Business analysis concepts taught
+- Any specific examples or scenarios from summaries
+
+DIFFICULTY DISTRIBUTION:
+- Easy: ~30% (direct recall from summaries)
+- Medium: ~50% (application of concepts)
+- Hard: ~20% (analysis/scenario-based)
+
+FORMAT (STRICT):
+
+=== QUESTION 1 ===
+## Title: [Title related to summary content]
+## Difficulty: [Easy/Medium/Hard]
+## Type: mcq
+## Tags: [relevant tags from summaries]
+## Source: [Which summary/topic this relates to]
+## Question:
+[Question based on summary content]
+## Options:
+A) [Option A]
+B) [Option B]
+C) [Option C]
+D) [Option D]
+## Correct: [A/B/C/D]
+
+=== QUESTION 2 ===
+...
+
+Continue for all {count} questions.
+
+RULES:
+1. Each question MUST have exactly 4 options
+2. ONLY ONE correct answer per question
+3. Questions MUST relate to the weekly summaries provided above
+4. Include the correct answer (## Correct: X)
+5. Vary topics across different summaries
+6. DO NOT create generic questions - ONLY use content from summaries
+
+Generate all {count} MCQ questions now:"""
+
+    # ================================================================
+    # LEGACY: BATCH QUESTIONS PROMPT
+    # ================================================================
+    
+    @staticmethod
+    def create_batch_questions_prompt(user_type: str, context: str, 
+                                      question_count: int = None) -> str:
+        """Create prompt for batch question generation (legacy)"""
         if question_count is None:
             question_count = config.QUESTIONS_PER_TEST
         
@@ -19,273 +323,390 @@ class PromptTemplates:
     @staticmethod
     def _dev_batch_prompt(context: str, question_count: int) -> str:
         """Developer interview questions generation prompt"""
-        aptitude_count = int(question_count * 0.3)
-        theory_count = int(question_count * 0.3)
-        coding_count = question_count - aptitude_count - theory_count
+        aptitude_count = config.DEV_APTITUDE_COUNT
+        theory_count = config.DEV_THEORY_COUNT
+        coding_count = config.DEV_CODING_COUNT
+        total = aptitude_count + theory_count + coding_count
 
-        return f"""
-    You are conducting a REAL developer technical interview for an MNC-level company.
+        return f"""You are conducting a REAL developer technical interview.
 
-    Generate EXACTLY {question_count} questions based on the provided WEEKLY developer summaries.
+Generate EXACTLY {total} questions based on the provided weekly summaries.
 
-    CONTEXT (Weekly Developer Summaries):
-    {context}
+CONTEXT (Weekly Developer Summaries):
+{context}
 
-    MANDATORY QUESTION DISTRIBUTION (STRICT):
-    - Exactly {aptitude_count} Aptitude / Logical problem-solving questions
-    - Exactly {theory_count} Theory / Conceptual understanding questions
-    - Exactly {coding_count} Coding questions
+MANDATORY QUESTION DISTRIBUTION (STRICT):
+- Exactly {aptitude_count} Aptitude / Logical problem-solving questions
+- Exactly {theory_count} Theory / Conceptual understanding questions
+- Exactly {coding_count} Coding questions (5 minutes each)
 
-    TIME CONSTRAINTS:
-    - Coding questions must be solvable in ~5 minutes
-    - Aptitude questions: short, logic-based, fast to answer
-    - Theory questions: concept clarity, not memorization
-    - Total test duration ≈ 1 hour
+TIME CONSTRAINTS:
+- Total exam: {config.EXAM_TOTAL_MINUTES} minutes
+- Aptitude: {config.APTITUDE_TIME_PER_Q} min/question
+- Theory: {config.THEORY_TIME_PER_Q} min/question
+- Coding: {config.CODING_TIME_PER_Q} min/question
 
-    QUESTION QUALITY RULES:
-    - Questions must reflect REAL interview standards (not academic)
-    - Avoid trivia or definition-only questions
-    - Use only technologies, concepts, and tools mentioned in the context
-    - Progressive difficulty is MANDATORY
-    - Each question must be complete and standalone
+QUESTION QUALITY RULES:
+- REAL interview standards (not academic)
+- Progressive difficulty
+- Each question must be standalone
 
-    CODING QUESTION RULES (VERY IMPORTANT):
-    - Single-function or small logic problems only
-    - No frameworks or project setup
-    - No multi-file systems
-    - Clearly specify:
-    - Input
-    - Output
-    - Constraints
-    - Language-agnostic unless context requires a specific language
-    - Focus on problem-solving, not boilerplate
+CODING QUESTION RULES:
+- Single-function problems
+- Clear input/output/constraints
+- Include 2 examples
+- Solvable in 5 minutes
 
-    FORMAT (STRICT — DO NOT CHANGE):
+FORMAT (STRICT):
 
-    === QUESTION 1 ===
-    ## Title: [Short, clear title]
-    ## Difficulty: [Easy / Medium / Hard]
-    ## Type: [Aptitude / Theory / Coding]
-    ## Question:
-    [Complete question description]
+=== QUESTION 1 ===
+## Title: [Title]
+## Difficulty: [Easy/Medium/Hard]
+## Type: [Aptitude/Theory/Coding]
+## Question:
+[Complete question]
 
-    === QUESTION 2 ===
-    ## Title: ...
-    ## Difficulty: ...
-    ## Type: ...
-    ## Question:
-    ...
+Continue for all {total} questions.
 
-    Continue this EXACT format for all {question_count} questions.
-
-    IMPORTANT RULES (NO EXCEPTIONS):
-    - Do NOT include answers
-    - Do NOT include hints or explanations
-    - Do NOT repeat questions
-    - Do NOT mention percentages or distribution in output
-    - Coding questions MUST be concise and time-bound
-    - Ensure the distribution EXACTLY matches the counts above
-
-    Generate all {question_count} questions now.
-    """
+Generate all questions now:"""
 
     @staticmethod
     def _non_dev_batch_prompt(context: str, question_count: int) -> str:
-        """Non-developer MCQ-only interview questions generation prompt"""
-        return f"""
-    You are conducting a REAL non-developer interview (QA / BA / Analyst / Functional roles).
-    Generate EXACTLY {question_count} high-quality MULTIPLE-CHOICE QUESTIONS (MCQs)
-    based strictly on the provided weekly summaries.
+        """Non-developer MCQ generation prompt"""
+        return f"""Generate EXACTLY {question_count} MCQs for non-developer assessment.
 
-    CONTEXT (Weekly Summaries from MongoDB):
-    {context}
+CONTEXT:
+{context}
 
-    MANDATORY RULES (NO EXCEPTIONS):
-    - ALL questions MUST be MCQs
-    - EACH question MUST have exactly 4 options (A, B, C, D)
-    - ONLY ONE option must be correct
-    - NO descriptive answers
-    - NO coding questions
-    - NO open-ended questions
+RULES:
+- ALL questions must be MCQs with 4 options (A, B, C, D)
+- Only ONE correct answer
+- Mix: Testing (30%), SDLC (30%), Analysis (40%)
 
-    QUESTION DISTRIBUTION:
-    - Aptitude / Logical reasoning → ~30%
-    - Theory / Conceptual understanding → ~40%
-    - Process / Scenario-based decision making → ~30%
+FORMAT:
 
-    QUESTION GUIDELINES:
-    - Questions must reflect real workplace understanding
-    - Prefer “best choice” questions over factual recall
-    - Distractors must be realistic and commonly mistaken options
-    - Avoid guessable or trivial questions
-    - Use concepts mentioned in the context only
+=== QUESTION 1 ===
+## Title: [Title]
+## Difficulty: [Easy/Medium/Hard]
+## Type: [Aptitude/Theory/Process]
+## Question:
+[MCQ question]
+## Options:
+A) [Option]
+B) [Option]
+C) [Option]
+D) [Option]
 
-    FORMAT (STRICT — DO NOT CHANGE):
+Continue for all {question_count} questions.
 
-    === QUESTION 1 ===
-    ## Title: [Short, clear title]
-    ## Difficulty: [Easy / Medium / Hard]
-    ## Type: [Aptitude / Theory / Process]
-    ## Question:
-    [Clear and precise MCQ question]
-    ## Options:
-    A) [Option A]
-    B) [Option B]
-    C) [Option C]
-    D) [Option D]
+Generate now:"""
 
-    === QUESTION 2 ===
-    ## Title: ...
-    ## Difficulty: ...
-    ## Type: ...
-    ## Question:
-    ...
-    ## Options:
-    A) ...
-    B) ...
-    C) ...
-    D) ...
-
-    Continue this EXACT format for all {question_count} questions.
-
-    IMPORTANT:
-    - Do NOT mention summaries, MongoDB, or context source
-    - Do NOT add explanations
-    - Do NOT reveal the correct answer
-    - Keep language professional and interview-appropriate
-    - Maintain progressive difficulty
-
-    Generate all {question_count} MCQ questions now.
-    """
-
+    # ================================================================
+    # SECTION-WISE EVALUATION PROMPTS (NEW)
+    # ================================================================
+    
     @staticmethod
-    def _dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
-        """Developer answers evaluation prompt"""
-        return f"""Evaluate this developer assessment comprehensively. Analyze code quality, problem-solving approach, technical accuracy, and software engineering best practices.
+    def create_section_evaluation_prompt(section_type: str, 
+                                         qa_pairs: List[Dict[str, Any]]) -> str:
+        """Create evaluation prompt for specific section type"""
+        
+        question_count = len(qa_pairs)
+        
+        # Format Q&A pairs - CLEARLY label user's answer
+        formatted = []
+        for i, qa in enumerate(qa_pairs, 1):
+            q = qa.get("question", "")
+            a = qa.get("answer", "")
+            # Make it VERY clear what the user wrote
+            formatted.append(f"""
+════════════════════════════════════════
+QUESTION {i}:
+════════════════════════════════════════
+{q}
 
-ASSESSMENT CONTENT:
+┌──────────────────────────────────────┐
+│ USER'S SUBMITTED ANSWER:             │
+└──────────────────────────────────────┘
+{a if a.strip() else "[USER LEFT THIS BLANK - SCORE 0]"}
+""")
+        
+        qa_content = "\n".join(formatted)
+        
+        if section_type == "aptitude":
+            return PromptTemplates._aptitude_evaluation_prompt(qa_content, question_count)
+        elif section_type == "theory":
+            return PromptTemplates._theory_evaluation_prompt(qa_content, question_count)
+        elif section_type == "coding":
+            return PromptTemplates._coding_evaluation_prompt(qa_content, question_count)
+        else:
+            return PromptTemplates._general_evaluation_prompt(qa_content, question_count)
+    
+    @staticmethod
+    def _aptitude_evaluation_prompt(qa_content: str, question_count: int) -> str:
+        """Evaluation prompt for APTITUDE section - with correct answers"""
+        return f"""You are a STRICT evaluator. Evaluate the user's submitted answers.
+
+⚠️ CRITICAL: Evaluate what the USER wrote, NOT generate your own answers first.
+
 {qa_content}
 
-EVALUATION CRITERIA:
-- Code correctness and functionality (30%)
-- Algorithm efficiency and optimization (25%)
-- Code readability and structure (20%)
-- Best practices and conventions (15%)
-- Problem-solving approach and explanation (10%)
+═══════════════════════════════════════════════════════════════
+EVALUATION TASK
+═══════════════════════════════════════════════════════════════
 
-INSTRUCTIONS:
-1. Score each question as 1 (acceptable/correct) or 0 (unacceptable/incorrect)
-2. Be strict but fair - partial credit should round to 1 if approach is sound
-3. Consider: Does the answer demonstrate competent programming skills?
-4. Evaluate explanations and reasoning, not just code
-5. Look for understanding of time/space complexity where relevant
+For EACH question:
+1. Calculate the CORRECT answer
+2. Compare with USER'S answer
+3. Score: 1 if correct (or very close), 0 if wrong
 
-REQUIRED OUTPUT FORMAT:
-SCORES: [1,0,1,1,0]
-FEEDBACK: [Question 1: Detailed feedback|Question 2: Detailed feedback|Question 3: Detailed feedback|Question 4: Detailed feedback|Question 5: Detailed feedback]
+OUTPUT FORMAT:
 
-DETAILED ANALYSIS:
-Provide comprehensive analysis covering:
-- Overall programming competency level
-- Strengths observed in coding approach
-- Areas needing improvement
-- Specific technical recommendations
-- Assessment of problem-solving methodology
+SCORES: [{','.join(['0 or 1'] * question_count)}]
 
-Score each of the {question_count} questions and provide detailed feedback. Be thorough and constructive."""
+DETAILED FEEDBACK:
+
+------- Question 1 -------
+📝 Question: [Brief question summary]
+✅ Correct Answer: [The correct answer with brief explanation]
+👤 User's Answer: [What user wrote]
+📊 Score: [0 or 1]
+💡 Explanation: [Why correct/incorrect, how to solve]
+
+------- Question 2 -------
+📝 Question: [Brief question summary]
+✅ Correct Answer: [The correct answer]
+👤 User's Answer: [What user wrote]
+📊 Score: [0 or 1]
+💡 Explanation: [Why correct/incorrect]
+
+(Continue for all {question_count} questions)
+
+═══════════════════════════════════════════════════════════════
+SECTION SUMMARY
+═══════════════════════════════════════════════════════════════
+📈 Total Score: X/{question_count}
+🎯 Percentage: X%
+💪 Strengths: [What user did well]
+📚 Areas to Improve: [Topics to study]
+🔑 Key Concepts: [Important formulas/methods to remember]
+
+Evaluate now:"""
 
     @staticmethod
-    def _non_dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
-        """Non-developer answers evaluation prompt"""
-        return f"""Evaluate this non-developer assessment comprehensively. Focus on conceptual understanding, analytical reasoning, and practical knowledge application.
+    def _theory_evaluation_prompt(qa_content: str, question_count: int) -> str:
+        """Evaluation prompt for THEORY section - with correct answers"""
+        return f"""You are a STRICT evaluator. Evaluate the user's submitted answers.
 
-ASSESSMENT CONTENT:
+⚠️ CRITICAL: Evaluate what the USER wrote, check if they covered key concepts.
+
 {qa_content}
 
-EVALUATION CRITERIA:
-- Conceptual accuracy and understanding (40%)
-- Analytical reasoning quality (30%)
-- Practical application knowledge (20%)
-- Communication and explanation clarity (10%)
+═══════════════════════════════════════════════════════════════
+EVALUATION TASK
+═══════════════════════════════════════════════════════════════
 
-INSTRUCTIONS:
-1. Score each question as 1 (correct) or 0 (incorrect)
-2. For multiple choice: only exact correct answers get 1 point
-3. Evaluate understanding demonstrated in any explanations provided
-4. Consider partial understanding but be consistent with scoring
-5. Look for evidence of genuine comprehension vs. guessing
+For EACH question:
+1. Identify KEY POINTS a correct answer should have
+2. Check if USER's answer covers those points
+3. Score: 1 if demonstrates understanding, 0 if wrong/incomplete
 
-REQUIRED OUTPUT FORMAT:
-SCORES: [1,0,1,1,0]
-FEEDBACK: [Question 1: Clear feedback on answer|Question 2: Clear feedback on answer|Question 3: Clear feedback on answer|Question 4: Clear feedback on answer|Question 5: Clear feedback on answer]
+OUTPUT FORMAT:
 
-DETAILED ANALYSIS:
-Provide comprehensive analysis covering:
-- Overall conceptual understanding level
-- Analytical thinking capabilities
-- Knowledge gaps identified
-- Recommendations for further learning
-- Assessment of technical awareness
+SCORES: [{','.join(['0 or 1'] * question_count)}]
 
-Score each of the {question_count} questions and provide specific feedback. Focus on understanding rather than memorization."""
+DETAILED FEEDBACK:
 
+------- Question 1 -------
+📝 Question: [Brief question summary]
+✅ Expected Answer: [Complete correct answer with key points]
+👤 User's Answer: [Summary of what user wrote]
+📊 Score: [0 or 1]
+💡 Feedback: [What was right/wrong, missing points]
 
+------- Question 2 -------
+📝 Question: [Brief question summary]
+✅ Expected Answer: [Complete correct answer]
+👤 User's Answer: [Summary of what user wrote]
+📊 Score: [0 or 1]
+💡 Feedback: [What was right/wrong]
+
+(Continue for all {question_count} questions)
+
+═══════════════════════════════════════════════════════════════
+SECTION SUMMARY
+═══════════════════════════════════════════════════════════════
+📈 Total Score: X/{question_count}
+🎯 Percentage: X%
+💪 Topics Understood: [List topics user knows well]
+📚 Topics to Study: [List topics user needs to review]
+🔑 Key Concepts: [Important definitions/concepts to remember]
+
+Evaluate now:"""
+
+    @staticmethod
+    def _coding_evaluation_prompt(qa_content: str, question_count: int) -> str:
+        """Evaluation prompt for CODING section - with correct answers"""
+        return f"""You are a STRICT evaluator. Evaluate the user's submitted code.
+
+⚠️ CRITICAL: Check if USER's code would actually work correctly.
+
+{qa_content}
+
+═══════════════════════════════════════════════════════════════
+EVALUATION TASK
+═══════════════════════════════════════════════════════════════
+
+For EACH question:
+1. Understand what the problem requires
+2. Check if USER's code solves it correctly
+3. Score: 1 if code would work (or minor bugs), 0 if wrong logic
+
+OUTPUT FORMAT:
+
+SCORES: [{','.join(['0 or 1'] * question_count)}]
+
+DETAILED FEEDBACK:
+
+------- Question 1 -------
+📝 Problem: [Brief problem description]
+✅ Correct Approach: [Explain the right algorithm/approach]
+✅ Sample Solution:
+```
+[Provide a correct code solution]
+```
+👤 User's Code: [Summary of user's approach]
+📊 Score: [0 or 1]
+💡 Feedback: [What was right/wrong, bugs found, improvements]
+
+------- Question 2 -------
+📝 Problem: [Brief problem description]
+✅ Correct Approach: [Explain the right algorithm]
+✅ Sample Solution:
+```
+[Provide a correct code solution]
+```
+👤 User's Code: [Summary of user's approach]
+📊 Score: [0 or 1]
+💡 Feedback: [What was right/wrong]
+
+(Continue for all {question_count} questions)
+
+═══════════════════════════════════════════════════════════════
+SECTION SUMMARY
+═══════════════════════════════════════════════════════════════
+📈 Total Score: X/{question_count}
+🎯 Percentage: X%
+💪 Coding Strengths: [What user did well]
+📚 Areas to Improve: [Concepts to practice]
+🔑 Tips: [Coding tips and best practices]
+
+Evaluate now:"""
+
+    @staticmethod
+    def _general_evaluation_prompt(qa_content: str, question_count: int) -> str:
+        """General evaluation prompt fallback"""
+        return f"""Evaluate these assessment answers.
+
+QUESTIONS & ANSWERS:
+{qa_content}
+
+SCORING: 1 = Correct/Acceptable, 0 = Incorrect
+
+OUTPUT FORMAT:
+SCORES: [{','.join(['0 or 1'] * question_count)}]
+
+FEEDBACK:
+Q1: [Feedback]
+Q2: [Feedback]
+...
+
+Evaluate all {question_count} questions:"""
+
+    # ================================================================
+    # EVALUATION PROMPTS (EXISTING)
+    # ================================================================
+    
     @staticmethod
     def create_evaluation_prompt(user_type: str, qa_pairs: List[Dict[str, Any]]) -> str:
+        """Create evaluation prompt for submitted answers"""
         question_count = len(qa_pairs)
 
         formatted = []
         for i, qa in enumerate(qa_pairs, 1):
             q = qa.get("question", "")
             a = qa.get("answer", "")
-            formatted.append(f"QUESTION {i}:\n{q}\n\nANSWER:\n{a}")
+            q_type = qa.get("question_type", "unknown")
+            formatted.append(f"QUESTION {i} [{q_type.upper()}]:\n{q}\n\nANSWER:\n{a}")
 
-        qa_content = "\n\n".join(formatted)
+        qa_content = "\n\n---\n\n".join(formatted)
 
         if user_type == "dev":
             return PromptTemplates._dev_evaluation_prompt(qa_content, question_count)
         else:
             return PromptTemplates._non_dev_evaluation_prompt(qa_content, question_count)
 
+    @staticmethod
+    def _dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
+        """Developer answers evaluation prompt"""
+        return f"""Evaluate this developer assessment comprehensively.
+
+ASSESSMENT CONTENT:
+{qa_content}
+
+EVALUATION BY QUESTION TYPE:
+- APTITUDE: Logical reasoning, problem-solving approach (30%)
+- THEORY: Conceptual accuracy, depth of understanding (30%)
+- CODING: Correctness, efficiency, code quality (40%)
+
+SCORING RULES:
+- 1 = Acceptable/Correct (demonstrates competency)
+- 0 = Unacceptable/Incorrect
+
+REQUIRED OUTPUT FORMAT:
+SCORES: [{','.join(['0 or 1'] * question_count)}]
+FEEDBACK: [Q1 feedback|Q2 feedback|Q3 feedback|...]
+
+DETAILED ANALYSIS:
+- Section-wise performance
+- Strengths observed
+- Areas for improvement
+- Overall assessment
+
+Evaluate all {question_count} questions:"""
 
     @staticmethod
-    def optimize_context_prompt(context: str) -> str:
-        """Optimize context for better question generation"""
-        return f"""Analyze and enhance this technical content to make it optimal for generating high-quality assessment questions.
+    def _non_dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
+        """Non-developer answers evaluation prompt"""
+        return f"""Evaluate this non-developer MCQ assessment.
 
-ORIGINAL CONTEXT:
-{context}
+ASSESSMENT CONTENT:
+{qa_content}
 
-ENHANCEMENT REQUIREMENTS:
-- Identify key technical concepts and learning objectives
-- Extract practical scenarios and real-world applications
-- Highlight different difficulty levels of concepts
-- Organize information for question generation
-- Ensure context supports both conceptual and practical questions
+SCORING:
+- 1 = Correct answer selected
+- 0 = Incorrect answer
 
-ENHANCED CONTEXT FORMAT:
-## Key Concepts:
-[List main technical concepts]
+REQUIRED OUTPUT FORMAT:
+SCORES: [{','.join(['0 or 1'] * question_count)}]
+FEEDBACK: [Q1 feedback|Q2 feedback|Q3 feedback|...]
 
-## Practical Applications:
-[Real-world scenarios and use cases]
+DETAILED ANALYSIS:
+- Overall understanding level
+- Knowledge gaps identified
+- Recommendations
 
-## Difficulty Progression:
-- Beginner: [Fundamental concepts]
-- Intermediate: [Applied knowledge]
-- Advanced: [Complex analysis and synthesis]
+Evaluate all {question_count} questions:"""
 
-## Question Opportunities:
-[Specific areas suitable for different question types]
-
-Provide the enhanced context optimized for question generation:"""
 
 class PromptValidator:
     """Validation utilities for prompts and responses"""
     
     @staticmethod
-    def validate_question_response(response: str, user_type: str, expected_count: int) -> Dict[str, Any]:
+    def validate_question_response(response: str, user_type: str, 
+                                   expected_count: int) -> Dict[str, Any]:
         """Validate question generation response"""
+        import re
+        
         validation = {
             "valid": True,
             "issues": [],
@@ -293,38 +714,31 @@ class PromptValidator:
             "format_correct": True
         }
         
-        # Count questions
         question_markers = response.count("=== QUESTION")
         validation["question_count"] = question_markers
         
-        if question_markers != expected_count:
+        if question_markers < expected_count:
             validation["valid"] = False
-            validation["issues"].append(f"Expected {expected_count} questions, found {question_markers}")
+            validation["issues"].append(
+                f"Expected {expected_count} questions, found {question_markers}"
+            )
         
-        # Check required sections
         required_sections = ["## Title:", "## Difficulty:", "## Type:", "## Question:"]
         if user_type == "non_dev":
             required_sections.append("## Options:")
         
         for section in required_sections:
-            if response.count(section) < expected_count:
-                validation["valid"] = False
-                validation["issues"].append(f"Missing {section} sections")
-        
-        # Check format consistency
-        if user_type == "non_dev":
-            option_patterns = [f"{letter})" for letter in "ABCD"]
-            for pattern in option_patterns:
-                if response.count(pattern) < expected_count:
-                    validation["format_correct"] = False
-                    validation["issues"].append(f"Inconsistent option format: {pattern}")
+            count = response.count(section)
+            if count < expected_count:
+                validation["issues"].append(f"Missing {section} ({count}/{expected_count})")
         
         return validation
     
-
     @staticmethod
     def validate_evaluation_response(response: str, expected_count: int) -> Dict[str, Any]:
         """Validate evaluation response"""
+        import re
+        
         validation = {
             "valid": True,
             "issues": [],
@@ -333,11 +747,8 @@ class PromptValidator:
             "score_count": 0
         }
         
-        # Check for scores
         if "SCORES:" in response:
             validation["has_scores"] = True
-            # Extract and count scores
-            import re
             score_match = re.search(r'SCORES:\s*\[(.*?)\]', response)
             if score_match:
                 scores = score_match.group(1).split(',')
@@ -345,16 +756,16 @@ class PromptValidator:
                 
                 if validation["score_count"] != expected_count:
                     validation["valid"] = False
-                    validation["issues"].append(f"Expected {expected_count} scores, found {validation['score_count']}")
+                    validation["issues"].append(
+                        f"Expected {expected_count} scores, found {validation['score_count']}"
+                    )
         else:
             validation["valid"] = False
             validation["issues"].append("Missing SCORES section")
         
-        # Check for feedback
         if "FEEDBACK:" in response:
             validation["has_feedback"] = True
         else:
-            validation["valid"] = False
-            validation["issues"].append("Missing FEEDBACK section")
+            validation["issues"].append("Missing FEEDBACK section (non-critical)")
         
         return validation

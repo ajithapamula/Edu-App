@@ -10,13 +10,22 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+
 class MemoryManager:
-    """Streamlined memory management for active tests"""
+    """
+    Streamlined memory management for active tests.
+    
+    Features:
+    - Active test session management
+    - Answer storage
+    - Question caching (legacy)
+    - Automatic cleanup
+    """
     
     def __init__(self):
-        self.tests = {}  # Active test sessions
-        self.answers = {}  # Test answers
-        self.question_cache = {}  # Generated questions cache
+        self.tests = {}           # Active test sessions
+        self.answers = {}         # Test answers
+        self.question_cache = {}  # Generated questions cache (legacy)
         self._cleanup_thread = None
         self._start_cleanup_thread()
     
@@ -76,27 +85,55 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"Cleanup failed: {e}")
     
-    def create_test(self, user_type: str, questions: List[Dict[str, Any]]) -> str:
-        """Create new test session"""
+    def create_test(self, user_type: str, questions: List[Dict[str, Any]], 
+                   student_id: int = None) -> str:
+        """
+        Create new test session.
+        
+        Args:
+            user_type: 'dev' or 'non_dev'
+            questions: List of question dictionaries
+            student_id: Optional student ID
+        
+        Returns:
+            Unique test ID
+        """
         test_id = str(uuid.uuid4())
+        
+        # Calculate section breakdowns
+        sections = {"aptitude": 0, "theory": 0, "coding": 0, "mcq": 0}
+        for q in questions:
+            q_type = q.get("question_type", "theory")
+            if q_type in sections:
+                sections[q_type] += 1
         
         self.tests[test_id] = {
             "user_type": user_type,
+            "student_id": student_id,
             "total_questions": len(questions),
             "current_question": 1,
             "questions": questions,
+            "sections": {k: v for k, v in sections.items() if v > 0},
             "created_at": time.time(),
             "started_at": time.time()
         }
         
         self.answers[test_id] = []
         
-        logger.info(f"📝 Test created: {test_id} ({len(questions)} questions)")
+        logger.info(f"📝 Test created: {test_id} ({len(questions)} questions, sections: {sections})")
         return test_id
     
     def get_test(self, test_id: str) -> Optional[Dict[str, Any]]:
-        """Get test data"""
+        """Get test data by ID"""
         return self.tests.get(test_id)
+    
+    def update_test(self, test_id: str, updates: Dict[str, Any]) -> bool:
+        """Update test data"""
+        if test_id not in self.tests:
+            return False
+        
+        self.tests[test_id].update(updates)
+        return True
     
     def get_current_question(self, test_id: str) -> Optional[Dict[str, Any]]:
         """Get current question for test"""
@@ -115,13 +152,26 @@ class MemoryManager:
                 "question_html": question_data["question"],
                 "options": question_data.get("options"),
                 "difficulty": question_data.get("difficulty", "Medium"),
-                "type": question_data.get("type", "General")
+                "type": question_data.get("question_type", "General"),
+                "question_id": question_data.get("question_id", "")
             }
         
         return None
     
-    def submit_answer(self, test_id: str, question_number: int, answer: str) -> bool:
-        """Submit answer for test question"""
+    def submit_answer(self, test_id: str, question_number: int, answer: str,
+                     time_taken: int = None) -> bool:
+        """
+        Submit answer for test question.
+        
+        Args:
+            test_id: Test session ID
+            question_number: Question number (1-indexed)
+            answer: User's answer
+            time_taken: Optional time taken in seconds
+        
+        Returns:
+            True if successful
+        """
         test = self.tests.get(test_id)
         if not test or question_number != test["current_question"]:
             return False
@@ -130,13 +180,16 @@ class MemoryManager:
         if 1 <= question_number <= len(questions):
             question_data = questions[question_number - 1]
             
-            # Store answer
+            # Store answer with metadata
             answer_data = {
                 "question_number": question_number,
+                "question_id": question_data.get("question_id", ""),
+                "question_type": question_data.get("question_type", "unknown"),
                 "question": question_data["question"],
                 "answer": answer,
                 "options": question_data.get("options", []),
-                "submitted_at": time.time()
+                "submitted_at": time.time(),
+                "time_taken": time_taken
             }
             
             self.answers[test_id].append(answer_data)
@@ -144,7 +197,7 @@ class MemoryManager:
             # Move to next question
             test["current_question"] += 1
             
-            logger.info(f"✅ Answer submitted: {test_id} Q{question_number}")
+            logger.info(f"✅ Answer submitted: {test_id} Q{question_number} ({question_data.get('question_type', 'unknown')})")
             return True
         
         return False
@@ -161,8 +214,28 @@ class MemoryManager:
         """Get all answers for test"""
         return self.answers.get(test_id, [])
     
+    def get_answers_by_section(self, test_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        """Get answers organized by question type/section"""
+        answers = self.answers.get(test_id, [])
+        
+        sections = {
+            "aptitude": [],
+            "theory": [],
+            "coding": [],
+            "mcq": []
+        }
+        
+        for answer in answers:
+            q_type = answer.get("question_type", "theory")
+            if q_type in sections:
+                sections[q_type].append(answer)
+            else:
+                sections["theory"].append(answer)
+        
+        return {k: v for k, v in sections.items() if v}
+    
     def cache_questions(self, cache_key: str, questions: List[Dict[str, Any]]):
-        """Cache generated questions"""
+        """Cache generated questions (legacy support)"""
         self.question_cache[cache_key] = {
             "questions": questions,
             "created_at": time.time()
@@ -170,7 +243,7 @@ class MemoryManager:
         logger.info(f"💾 Questions cached: {cache_key}")
     
     def get_cached_questions(self, cache_key: str) -> Optional[List[Dict[str, Any]]]:
-        """Get cached questions if not expired"""
+        """Get cached questions if not expired (legacy support)"""
         cache_data = self.question_cache.get(cache_key)
         if not cache_data:
             return None
@@ -199,6 +272,26 @@ class MemoryManager:
             "total_answers": sum(len(answers) for answers in self.answers.values()),
             "cleanup_thread_alive": self._cleanup_thread.is_alive() if self._cleanup_thread else False
         }
+    
+    def get_test_progress(self, test_id: str) -> Optional[Dict[str, Any]]:
+        """Get test progress information"""
+        test = self.tests.get(test_id)
+        if not test:
+            return None
+        
+        answers = self.answers.get(test_id, [])
+        
+        return {
+            "test_id": test_id,
+            "user_type": test["user_type"],
+            "current_question": test["current_question"],
+            "total_questions": test["total_questions"],
+            "questions_answered": len(answers),
+            "sections": test.get("sections", {}),
+            "elapsed_time": time.time() - test["started_at"],
+            "is_complete": test["current_question"] > test["total_questions"]
+        }
+
 
 class ValidationUtils:
     """Utility functions for data validation"""
@@ -232,7 +325,7 @@ class ValidationUtils:
         if not answer or not answer.strip():
             return False
         
-        # All non-empty answers are valid for both types
+        # All non-empty answers are valid
         return len(answer.strip()) > 0
     
     @staticmethod
@@ -241,14 +334,22 @@ class ValidationUtils:
         if not input_str:
             return ""
         
-        # Basic sanitization
         sanitized = input_str.strip()
         
-        # Limit length
         if len(sanitized) > max_length:
             sanitized = sanitized[:max_length]
         
         return sanitized
+    
+    @staticmethod
+    def validate_student_id(student_id: Any) -> bool:
+        """Validate student ID"""
+        try:
+            sid = int(student_id)
+            return sid > 0
+        except (ValueError, TypeError):
+            return False
+
 
 class DateTimeUtils:
     """Utility functions for date/time operations"""
@@ -273,6 +374,12 @@ class DateTimeUtils:
         return datetime.now().strftime("%Y-%m-%d")
     
     @staticmethod
+    def get_week_key() -> str:
+        """Get week identifier for question bank batches"""
+        now = datetime.now()
+        return f"{now.year}-W{now.isocalendar()[1]}"
+    
+    @staticmethod
     def is_same_day(timestamp1: float, timestamp2: float) -> bool:
         """Check if two timestamps are on the same day"""
         try:
@@ -281,14 +388,27 @@ class DateTimeUtils:
             return dt1.date() == dt2.date()
         except (ValueError, OSError):
             return False
+    
+    @staticmethod
+    def seconds_to_hms(seconds: int) -> str:
+        """Convert seconds to HH:MM:SS format"""
+        hours, remainder = divmod(int(seconds), 3600)
+        minutes, secs = divmod(remainder, 60)
+        
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
+
 
 # Global instances
 memory_manager = MemoryManager()
+
 
 # Helper functions
 def generate_test_id() -> str:
     """Generate unique test ID"""
     return str(uuid.uuid4())
+
 
 def validate_request_data(test_id: str, question_number: int, answer: str, 
                          user_type: str, total_questions: int) -> List[str]:
@@ -308,6 +428,7 @@ def validate_request_data(test_id: str, question_number: int, answer: str,
         errors.append("Invalid user type")
     
     return errors
+
 
 def cleanup_all():
     """Clean up all resources"""

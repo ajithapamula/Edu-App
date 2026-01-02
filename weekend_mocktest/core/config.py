@@ -1,3 +1,4 @@
+# weekend_mocktest/core/config.py
 import os
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -8,9 +9,11 @@ load_dotenv()
 class Config:
     """
     Central configuration for the Weekend Mock Test system.
+    
     Supports:
-    - Weekly AI-based exams
+    - Weekly AI-based exams (1 hour)
     - Developer & Non-developer tracks
+    - Question Bank for large-scale non-repetition
     - MongoDB summaries
     - Groq LLM evaluation
     """
@@ -19,8 +22,8 @@ class Config:
     # API CONFIGURATION
     # ============================================================
     API_TITLE = "Mock Test API"
-    API_DESCRIPTION = "AI-powered weekly mock testing system"
-    API_VERSION = "6.1.0-weekly-exam"
+    API_DESCRIPTION = "AI-powered weekly mock testing system with question bank"
+    API_VERSION = "7.0.0-question-bank"
 
     # ============================================================
     # MONGODB CONFIGURATION (PRIMARY DATA SOURCE)
@@ -39,6 +42,8 @@ class Config:
     # MongoDB collections
     SUMMARIES_COLLECTION = "summaries"
     TEST_RESULTS_COLLECTION = "mock_test_results"
+    QUESTION_BANK_COLLECTION = "question_bank"
+    STUDENT_QUESTION_HISTORY_COLLECTION = "student_question_history"
 
     # ============================================================
     # MYSQL CONFIGURATION (STUDENT METADATA)
@@ -54,39 +59,102 @@ class Config:
     # ============================================================
     # WEEKLY CONTENT SETTINGS
     # ============================================================
-    # How many days of summaries to consider as "weekly"
     WEEKLY_CONTEXT_DAYS = int(os.getenv("WEEKLY_CONTEXT_DAYS", "7"))
-
-    # How many summaries max to process
     RECENT_SUMMARIES_COUNT = int(os.getenv("RECENT_SUMMARIES_COUNT", "10"))
-
-    # Slice fraction for long summaries
     SUMMARY_SLICE_FRACTION = float(os.getenv("SUMMARY_SLICE_FRACTION", "0.4"))
 
     # ============================================================
-    # EXAM STRUCTURE (1 HOUR WEEKLY EXAM)
+    # DEVELOPER EXAM STRUCTURE
+    # 10 Aptitude + 10 Theory + 5 Coding = 25 questions
+    # Total time: ~62 minutes (1 hour 2 minutes)
     # ============================================================
-    EXAM_TOTAL_MINUTES = int(os.getenv("EXAM_TOTAL_MINUTES", "60"))
+    EXAM_TOTAL_MINUTES = int(os.getenv("EXAM_TOTAL_MINUTES", "62"))
 
-    # ---- Developer exam split (must total 100) ----
-    DEV_APTITUDE_PERCENT = int(os.getenv("DEV_APTITUDE_PERCENT", "30"))
-    DEV_THEORY_PERCENT   = int(os.getenv("DEV_THEORY_PERCENT", "30"))
-    DEV_CODING_PERCENT   = int(os.getenv("DEV_CODING_PERCENT", "40"))
+    # ---- Fixed question counts ----
+    DEV_APTITUDE_COUNT_FIXED = int(os.getenv("DEV_APTITUDE_COUNT", "10"))   # 10 aptitude
+    DEV_THEORY_COUNT_FIXED = int(os.getenv("DEV_THEORY_COUNT", "10"))       # 10 theory
+    DEV_CODING_COUNT_FIXED = int(os.getenv("DEV_CODING_COUNT", "5"))        # 5 coding
 
-    # ---- Time per question (minutes) ----
-    APTITUDE_Q_MIN = int(os.getenv("APTITUDE_Q_MIN", "2"))     # Logical / reasoning
-    THEORY_Q_MIN   = int(os.getenv("THEORY_Q_MIN", "2"))       # Conceptual
-    CODING_Q_MIN   = int(os.getenv("CODING_Q_MIN", "10"))      # Coding tasks
+    # ---- Time per question (in minutes) ----
+    APTITUDE_TIME_PER_Q = int(os.getenv("APTITUDE_TIME_PER_Q", "2"))      # 2 min per aptitude
+    THEORY_TIME_PER_Q = int(os.getenv("THEORY_TIME_PER_Q", "2"))          # 2 min per theory
+    CODING_TIME_PER_Q = int(os.getenv("CODING_TIME_PER_Q", "4"))          # 4 min per coding
+
+    # ---- Non-developer settings (kept for backward compatibility) ----
+    NON_DEV_TIME_PER_Q = int(os.getenv("NON_DEV_TIME_PER_Q", "1"))        # 1 min per MCQ
+    NON_DEV_TOTAL_QUESTIONS = int(os.getenv("NON_DEV_TOTAL_QUESTIONS", "30"))  # 30 MCQs
+
+    # ---- Percentage (kept for backward compatibility) ----
+    DEV_APTITUDE_PERCENT = int(os.getenv("DEV_APTITUDE_PERCENT", "40"))   # 40%
+    DEV_THEORY_PERCENT = int(os.getenv("DEV_THEORY_PERCENT", "40"))       # 40%
+    DEV_CODING_PERCENT = int(os.getenv("DEV_CODING_PERCENT", "20"))       # 20%
 
     # ============================================================
-    # TEST RUNTIME LIMITS
+    # QUESTION COUNTS (FIXED VALUES)
+    # ============================================================
+    @property
+    def DEV_APTITUDE_MINUTES(self) -> int:
+        """Minutes allocated for aptitude section"""
+        return self.DEV_APTITUDE_COUNT_FIXED * self.APTITUDE_TIME_PER_Q
+    
+    @property
+    def DEV_THEORY_MINUTES(self) -> int:
+        """Minutes allocated for theory section"""
+        return self.DEV_THEORY_COUNT_FIXED * self.THEORY_TIME_PER_Q
+    
+    @property
+    def DEV_CODING_MINUTES(self) -> int:
+        """Minutes allocated for coding section"""
+        return self.DEV_CODING_COUNT_FIXED * self.CODING_TIME_PER_Q
+    
+    @property
+    def DEV_APTITUDE_COUNT(self) -> int:
+        """Number of aptitude questions - FIXED at 10"""
+        return self.DEV_APTITUDE_COUNT_FIXED
+    
+    @property
+    def DEV_THEORY_COUNT(self) -> int:
+        """Number of theory questions - FIXED at 10"""
+        return self.DEV_THEORY_COUNT_FIXED
+    
+    @property
+    def DEV_CODING_COUNT(self) -> int:
+        """Number of coding questions - FIXED at 5"""
+        return self.DEV_CODING_COUNT_FIXED
+    
+    @property
+    def DEV_TOTAL_QUESTIONS(self) -> int:
+        """Total developer questions: 10 + 10 + 5 = 25"""
+        return self.DEV_APTITUDE_COUNT + self.DEV_THEORY_COUNT + self.DEV_CODING_COUNT
+
+    # ============================================================
+    # QUESTION BANK SETTINGS (LARGE SCALE)
+    # ============================================================
+    # Minimum questions to maintain in bank per category
+    MIN_BANK_APTITUDE = int(os.getenv("MIN_BANK_APTITUDE", "100"))
+    MIN_BANK_THEORY = int(os.getenv("MIN_BANK_THEORY", "100"))
+    MIN_BANK_CODING = int(os.getenv("MIN_BANK_CODING", "50"))
+    MIN_BANK_NON_DEV = int(os.getenv("MIN_BANK_NON_DEV", "150"))
+
+    # Questions to generate per batch
+    BATCH_SIZE_APTITUDE = int(os.getenv("BATCH_SIZE_APTITUDE", "20"))
+    BATCH_SIZE_THEORY = int(os.getenv("BATCH_SIZE_THEORY", "20"))
+    BATCH_SIZE_CODING = int(os.getenv("BATCH_SIZE_CODING", "10"))
+    BATCH_SIZE_NON_DEV = int(os.getenv("BATCH_SIZE_NON_DEV", "30"))
+
+    # Question expiry (days) - after this, questions can be shown again
+    QUESTION_EXPIRY_DAYS = int(os.getenv("QUESTION_EXPIRY_DAYS", "30"))
+
+    # Maximum times a question can be used before retirement
+    QUESTION_MAX_USAGE = int(os.getenv("QUESTION_MAX_USAGE", "500"))
+
+    # ============================================================
+    # LEGACY SETTINGS (BACKWARD COMPATIBILITY)
     # ============================================================
     QUESTIONS_PER_TEST = int(os.getenv("QUESTIONS_PER_TEST", "10"))
-
-    DEV_TIME_LIMIT = int(os.getenv("DEV_TIME_LIMIT", "300"))       # per question fallback
-    NON_DEV_TIME_LIMIT = int(os.getenv("NON_DEV_TIME_LIMIT", "120"))
-
-    TEST_SESSION_TIMEOUT = int(os.getenv("TEST_SESSION_TIMEOUT", "3600"))  # 1 hour
+    DEV_TIME_LIMIT = int(os.getenv("DEV_TIME_LIMIT", "300"))
+    NON_DEV_TIME_LIMIT = int(os.getenv("NON_DEV_TIME_LIMIT", "60"))
+    TEST_SESSION_TIMEOUT = int(os.getenv("TEST_SESSION_TIMEOUT", "3600"))
     QUESTION_CACHE_DURATION_HOURS = int(os.getenv("QUESTION_CACHE_DURATION_HOURS", "6"))
 
     # ============================================================
@@ -95,12 +163,8 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
     GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "60"))
-
-    # Generation parameters
     GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.7"))
-    GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "3000"))
-
-    # Retry handling
+    GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "4000"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
     RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
 
@@ -125,23 +189,57 @@ class Config:
         if self.EXAM_TOTAL_MINUTES <= 0:
             issues.append("EXAM_TOTAL_MINUTES must be > 0")
 
-        if (
-            self.DEV_APTITUDE_PERCENT
-            + self.DEV_THEORY_PERCENT
-            + self.DEV_CODING_PERCENT
-        ) != 100:
+        if (self.DEV_APTITUDE_PERCENT + self.DEV_THEORY_PERCENT + self.DEV_CODING_PERCENT) != 100:
             issues.append("DEV exam percentages must total 100")
 
         if not (0.1 <= self.SUMMARY_SLICE_FRACTION <= 1.0):
             issues.append("SUMMARY_SLICE_FRACTION must be between 0.1 and 1.0")
 
-        if self.QUESTIONS_PER_TEST < 1 or self.QUESTIONS_PER_TEST > 50:
-            issues.append("QUESTIONS_PER_TEST must be between 1 and 50")
-
         return {
             "valid": len(issues) == 0,
             "issues": issues
         }
+
+    def get_exam_structure(self, user_type: str = "dev") -> dict:
+        """Get exam structure summary for given user type"""
+        if user_type == "dev":
+            return {
+                "total_time_minutes": self.EXAM_TOTAL_MINUTES,
+                "sections": {
+                    "aptitude": {
+                        "percentage": self.DEV_APTITUDE_PERCENT,
+                        "minutes": self.DEV_APTITUDE_MINUTES,
+                        "question_count": self.DEV_APTITUDE_COUNT,
+                        "time_per_question_sec": self.APTITUDE_TIME_PER_Q * 60
+                    },
+                    "theory": {
+                        "percentage": self.DEV_THEORY_PERCENT,
+                        "minutes": self.DEV_THEORY_MINUTES,
+                        "question_count": self.DEV_THEORY_COUNT,
+                        "time_per_question_sec": self.THEORY_TIME_PER_Q * 60
+                    },
+                    "coding": {
+                        "percentage": self.DEV_CODING_PERCENT,
+                        "minutes": self.DEV_CODING_MINUTES,
+                        "question_count": self.DEV_CODING_COUNT,
+                        "time_per_question_sec": self.CODING_TIME_PER_Q * 60
+                    }
+                },
+                "total_questions": self.DEV_TOTAL_QUESTIONS
+            }
+        else:
+            return {
+                "total_time_minutes": self.NON_DEV_TOTAL_QUESTIONS * self.NON_DEV_TIME_PER_Q,
+                "sections": {
+                    "mcq": {
+                        "percentage": 100,
+                        "minutes": self.NON_DEV_TOTAL_QUESTIONS * self.NON_DEV_TIME_PER_Q,
+                        "question_count": self.NON_DEV_TOTAL_QUESTIONS,
+                        "time_per_question_sec": self.NON_DEV_TIME_PER_Q * 60
+                    }
+                },
+                "total_questions": self.NON_DEV_TOTAL_QUESTIONS
+            }
 
 # ============================================================
 # GLOBAL CONFIG INSTANCE
@@ -152,3 +250,8 @@ config = Config()
 _validation = config.validate()
 if not _validation["valid"]:
     raise ValueError(f"Configuration invalid: {_validation['issues']}")
+
+# Log exam structure on startup
+import logging
+logger = logging.getLogger(__name__)
+logger.info(f"📊 Developer Exam: {config.DEV_APTITUDE_COUNT} aptitude + {config.DEV_THEORY_COUNT} theory + {config.DEV_CODING_COUNT} coding = {config.DEV_TOTAL_QUESTIONS} questions in {config.EXAM_TOTAL_MINUTES} min")
