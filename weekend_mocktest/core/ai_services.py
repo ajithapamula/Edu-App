@@ -67,6 +67,11 @@ class AIService:
             List of structured question dictionaries
         """
         logger.info(f"🏭 Generating {count} {question_type} questions for bank ({user_type})")
+        logger.info(f"📚 Context length: {len(context)} chars")
+        
+        # Log context preview to verify correct content is being sent
+        context_preview = context[:1000].replace('\n', ' ')
+        logger.info(f"📄 Context preview: {context_preview}...")
         
         try:
             # Create specialized prompt
@@ -74,15 +79,37 @@ class AIService:
                 user_type, question_type, context, count
             )
             
+            # Log prompt preview to verify it includes the context
+            prompt_preview = prompt[:500].replace('\n', ' ')
+            logger.info(f"📝 Prompt preview: {prompt_preview}...")
+            
             # Generate with higher token limit for batches
             max_tokens = self._calculate_tokens_for_batch(question_type, count)
             
-            response = self._call_llm_with_retries(prompt, max_tokens)
+            # Use system prompt for MCQ to force content-based generation
+            system_prompt = None
+            if question_type == "mcq":
+                system_prompt = """You are an exam question generator. You MUST create questions ONLY from the content provided by the user. 
+
+STRICT RULES:
+1. Read the user's content carefully
+2. Create questions ONLY about topics mentioned in that content
+3. DO NOT use your general knowledge
+4. DO NOT create questions about topics not in the content
+5. If content mentions specific terms like T-codes, numbers, or names - ask about those exact things
+
+If you create questions about topics NOT in the provided content, you have FAILED the task."""
+            
+            response = self._call_llm_with_retries(prompt, max_tokens, system_prompt=system_prompt)
+            
+            # Debug: Log first 2000 chars of response
+            logger.info(f"📝 LLM Response preview ({len(response)} chars): {response[:2000]}...")
             
             # Parse questions with type info
             questions = self._parse_bank_questions(response, user_type, question_type)
             
             if not questions:
+                logger.error(f"❌ No questions parsed. Full response:\n{response}")
                 raise Exception(f"No valid {question_type} questions generated")
             
             logger.info(f"✅ Generated {len(questions)} {question_type} questions")
@@ -134,14 +161,14 @@ class AIService:
     def _calculate_tokens_for_batch(self, question_type: str, count: int) -> int:
         """Calculate appropriate token limit based on question type and count"""
         base_tokens = {
-            "aptitude": 300,
-            "theory": 400,
-            "coding": 600,
-            "mcq": 350
+            "aptitude": 350,
+            "theory": 450,
+            "coding": 700,
+            "mcq": 450  # Increased for complete MCQ questions
         }
         
-        per_question = base_tokens.get(question_type, 400)
-        return min(per_question * count + 500, 8000)  # Cap at 8000
+        per_question = base_tokens.get(question_type, 450)
+        return min(per_question * count + 1000, 12000)  # Increased cap to 12000
     
     def _parse_bank_questions(self, response: str, user_type: str,
                               question_type: str) -> List[Dict[str, Any]]:
@@ -181,6 +208,7 @@ class AIService:
             "question_type": question_type,
             "question": "",
             "options": None,
+            "correct_answer": None,
             "tags": []
         }
         
@@ -196,39 +224,68 @@ class AIService:
                 if diff in ["Easy", "Medium", "Hard"]:
                     question_data["difficulty"] = diff
             elif line.startswith("## Type:"):
-                # Override type if specified
                 t = line.replace("## Type:", "").strip().lower()
-                if t in ["aptitude", "theory", "coding"]:
+                if t in ["aptitude", "theory", "coding", "mcq"]:
                     question_data["question_type"] = t
             elif line.startswith("## Tags:"):
                 tags_str = line.replace("## Tags:", "").strip()
                 question_data["tags"] = [t.strip() for t in tags_str.split(",") if t.strip()]
+            elif line.startswith("## Source:"):
+                question_data["source"] = line.replace("## Source:", "").strip()
+            elif line.startswith("## Correct:"):
+                correct = line.replace("## Correct:", "").strip().upper()
+                if correct in ["A", "B", "C", "D"]:
+                    question_data["correct_answer"] = correct
             elif line.startswith("## Question:"):
                 current_section = "question"
+                # Check if question text is on same line
+                inline_q = line.replace("## Question:", "").strip()
+                if inline_q:
+                    question_lines.append(inline_q)
             elif line.startswith("## Options:"):
                 current_section = "options"
             elif current_section == "question":
-                if not line.startswith("##"):
+                # Continue reading question lines until we hit another section
+                if not line.startswith("##") and not re.match(r'^[A-D]\)', line):
                     question_lines.append(line)
-            elif current_section == "options":
+            elif current_section == "options" or re.match(r'^[A-D]\)', line):
+                # Parse options
+                current_section = "options"
                 if re.match(r'^[A-D]\)', line):
                     option_text = line[3:].strip()
                     if option_text:
                         options.append(option_text)
+            # Also handle options without ## Options: header
+            elif not current_section and re.match(r'^[A-D]\)', line):
+                current_section = "options"
+                option_text = line[3:].strip()
+                if option_text:
+                    options.append(option_text)
         
         question_data["question"] = "\n".join(question_lines).strip()
         
         # Add options for MCQ types
         if user_type == "non_dev" or question_type == "mcq":
-            question_data["options"] = options if len(options) == 4 else None
+            # Accept 3-4 options
+            if len(options) >= 3:
+                question_data["options"] = options[:4]  # Take max 4
+            else:
+                question_data["options"] = None
+                
+            # Map correct answer index
+            if question_data["correct_answer"] and question_data["options"]:
+                answer_map = {"A": 0, "B": 1, "C": 2, "D": 3}
+                idx = answer_map.get(question_data["correct_answer"], 0)
+                if idx < len(question_data["options"]):
+                    question_data["correct_option_text"] = question_data["options"][idx]
         
-        # Validation
-        min_length = 30 if question_type == "aptitude" else 50
+        # Validation - be more lenient for MCQs
+        min_length = 15 if question_type in ["aptitude", "mcq"] else 40
         if not question_data["question"] or len(question_data["question"]) < min_length:
             raise Exception(f"Question too short ({len(question_data['question'])} chars)")
         
         if (user_type == "non_dev" or question_type == "mcq") and not question_data["options"]:
-            raise Exception("MCQ missing options")
+            raise Exception("MCQ missing options (need at least 3)")
         
         return question_data
 
@@ -403,12 +460,19 @@ Section Breakdown:
     # ================================================================
     
     def _call_llm_with_retries(self, prompt: str, max_tokens: int, 
-                              temperature: float = None) -> str:
-        """Call LLM with retry logic"""
+                              temperature: float = None,
+                              system_prompt: str = None) -> str:
+        """Call LLM with retry logic and optional system prompt"""
         if temperature is None:
             temperature = config.GROQ_TEMPERATURE
         
         last_error = None
+        
+        # Build messages
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         
         for attempt in range(config.MAX_RETRIES):
             try:
@@ -416,7 +480,7 @@ Section Breakdown:
                 
                 completion = self.client.chat.completions.create(
                     model=config.GROQ_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
                     temperature=temperature,
                     max_completion_tokens=max_tokens
                 )

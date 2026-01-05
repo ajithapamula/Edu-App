@@ -314,17 +314,21 @@ Focus areas for MCQ questions:
         return topics[:10]  # Return top 10 topics
 
     def _process_summary(self, text: str) -> str:
-        """Process summary text for optimal context"""
-        # Try to extract structured content
-        bullets = self._extract_bullets(text)
+        """Process summary text - KEEP FULL CONTENT for question generation"""
+        # Don't truncate! AI needs the full content to generate proper questions
+        # Just clean up whitespace
+        cleaned = re.sub(r'\s+', ' ', text).strip()
         
-        if bullets:
-            selected = self._select_points(bullets)
-            content = ". ".join(selected)
-        else:
-            content = text
+        # Limit to reasonable size but keep most content (10000 chars = ~2000 words)
+        max_len = 10000
+        if len(cleaned) > max_len:
+            # Cut at sentence boundary
+            cut = cleaned.rfind('. ', 0, max_len)
+            if cut < 0:
+                cut = max_len
+            return cleaned[:cut + 1]
         
-        return self._slice_content(content)
+        return cleaned
 
     def _extract_bullets(self, text: str) -> List[str]:
         """Extract bullet points from text"""

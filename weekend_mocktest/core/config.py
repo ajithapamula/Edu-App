@@ -61,7 +61,7 @@ class Config:
     # ============================================================
     WEEKLY_CONTEXT_DAYS = int(os.getenv("WEEKLY_CONTEXT_DAYS", "7"))
     RECENT_SUMMARIES_COUNT = int(os.getenv("RECENT_SUMMARIES_COUNT", "10"))
-    SUMMARY_SLICE_FRACTION = float(os.getenv("SUMMARY_SLICE_FRACTION", "0.4"))
+    SUMMARY_SLICE_FRACTION = float(os.getenv("SUMMARY_SLICE_FRACTION", "1.0"))  # Keep full content
 
     # ============================================================
     # DEVELOPER EXAM STRUCTURE
@@ -80,9 +80,16 @@ class Config:
     THEORY_TIME_PER_Q = int(os.getenv("THEORY_TIME_PER_Q", "2"))          # 2 min per theory
     CODING_TIME_PER_Q = int(os.getenv("CODING_TIME_PER_Q", "4"))          # 4 min per coding
 
-    # ---- Non-developer settings (kept for backward compatibility) ----
-    NON_DEV_TIME_PER_Q = int(os.getenv("NON_DEV_TIME_PER_Q", "1"))        # 1 min per MCQ
-    NON_DEV_TOTAL_QUESTIONS = int(os.getenv("NON_DEV_TOTAL_QUESTIONS", "30"))  # 30 MCQs
+    # ============================================================
+    # NON-DEVELOPER EXAM STRUCTURE
+    # 10 Aptitude (10 min) + 20 MCQ (35 min) = 30 questions, 45 minutes
+    # ============================================================
+    NON_DEV_APTITUDE_COUNT = int(os.getenv("NON_DEV_APTITUDE_COUNT", "10"))  # 10 aptitude
+    NON_DEV_MCQ_COUNT = int(os.getenv("NON_DEV_MCQ_COUNT", "20"))            # 20 MCQ
+    NON_DEV_APTITUDE_TIME_PER_Q = int(os.getenv("NON_DEV_APTITUDE_TIME_PER_Q", "1"))  # 1 min per aptitude
+    NON_DEV_MCQ_TIME_PER_Q = int(os.getenv("NON_DEV_MCQ_TIME_PER_Q", "1"))   # ~1.75 min per MCQ
+    NON_DEV_TOTAL_QUESTIONS = int(os.getenv("NON_DEV_TOTAL_QUESTIONS", "30"))  # 30 total
+    NON_DEV_TOTAL_MINUTES = int(os.getenv("NON_DEV_TOTAL_MINUTES", "45"))    # 45 minutes total
 
     # ---- Percentage (kept for backward compatibility) ----
     DEV_APTITUDE_PERCENT = int(os.getenv("DEV_APTITUDE_PERCENT", "40"))   # 40%
@@ -161,10 +168,11 @@ class Config:
     # GROQ AI CONFIGURATION
     # ============================================================
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "60"))
-    GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.7"))
-    GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "4000"))
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")  # Current supported model
+    GROQ_MCQ_MODEL = os.getenv("GROQ_MCQ_MODEL", "llama-3.3-70b-versatile")  # Model for MCQ generation
+    GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "90"))  # Increased timeout
+    GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.2"))  # Lower for deterministic MCQ
+    GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "6000"))  # Increased for MCQ
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
     RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
 
@@ -172,7 +180,7 @@ class Config:
     # EVALUATION SETTINGS
     # ============================================================
     EVALUATION_TEMPERATURE = float(os.getenv("EVALUATION_TEMPERATURE", "0.3"))
-    EVALUATION_MAX_TOKENS = int(os.getenv("EVALUATION_MAX_TOKENS", "2000"))
+    EVALUATION_MAX_TOKENS = int(os.getenv("EVALUATION_MAX_TOKENS", "8000"))  # Increased for 30 questions
 
     # ============================================================
     # VALIDATION
@@ -228,14 +236,21 @@ class Config:
                 "total_questions": self.DEV_TOTAL_QUESTIONS
             }
         else:
+            # Non-developer: Aptitude (10) + MCQ (20) = 30 questions, 45 minutes
             return {
-                "total_time_minutes": self.NON_DEV_TOTAL_QUESTIONS * self.NON_DEV_TIME_PER_Q,
+                "total_time_minutes": self.NON_DEV_TOTAL_MINUTES,
                 "sections": {
+                    "aptitude": {
+                        "percentage": 33,
+                        "minutes": self.NON_DEV_APTITUDE_COUNT * self.NON_DEV_APTITUDE_TIME_PER_Q,
+                        "question_count": self.NON_DEV_APTITUDE_COUNT,
+                        "time_per_question_sec": self.NON_DEV_APTITUDE_TIME_PER_Q * 60
+                    },
                     "mcq": {
-                        "percentage": 100,
-                        "minutes": self.NON_DEV_TOTAL_QUESTIONS * self.NON_DEV_TIME_PER_Q,
-                        "question_count": self.NON_DEV_TOTAL_QUESTIONS,
-                        "time_per_question_sec": self.NON_DEV_TIME_PER_Q * 60
+                        "percentage": 67,
+                        "minutes": self.NON_DEV_TOTAL_MINUTES - (self.NON_DEV_APTITUDE_COUNT * self.NON_DEV_APTITUDE_TIME_PER_Q),
+                        "question_count": self.NON_DEV_MCQ_COUNT,
+                        "time_per_question_sec": self.NON_DEV_MCQ_TIME_PER_Q * 60
                     }
                 },
                 "total_questions": self.NON_DEV_TOTAL_QUESTIONS
@@ -255,3 +270,4 @@ if not _validation["valid"]:
 import logging
 logger = logging.getLogger(__name__)
 logger.info(f"📊 Developer Exam: {config.DEV_APTITUDE_COUNT} aptitude + {config.DEV_THEORY_COUNT} theory + {config.DEV_CODING_COUNT} coding = {config.DEV_TOTAL_QUESTIONS} questions in {config.EXAM_TOTAL_MINUTES} min")
+logger.info(f"📊 Non-Dev Exam: {config.NON_DEV_APTITUDE_COUNT} aptitude + {config.NON_DEV_MCQ_COUNT} MCQ = {config.NON_DEV_TOTAL_QUESTIONS} questions in {config.NON_DEV_TOTAL_MINUTES} min")

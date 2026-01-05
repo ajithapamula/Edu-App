@@ -1365,7 +1365,7 @@ async def enhanced_websocket_endpoint(websocket: WebSocket, session_id: str):
                 "type": "error",
                 "text": f"Session {session_id} not found. Please start a new session.",
                 "status": "error",
-            }))
+            })) 
             return
 
         session_data.websocket = websocket

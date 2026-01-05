@@ -31,9 +31,72 @@ class PromptTemplates:
             elif question_type == "coding":
                 return PromptTemplates._dev_coding_bank_prompt(context, count)
         else:
-            return PromptTemplates._non_dev_mcq_bank_prompt(context, count)
+            # Non-developer
+            if question_type == "aptitude":
+                return PromptTemplates._non_dev_aptitude_bank_prompt(count)
+            else:
+                return PromptTemplates._non_dev_mcq_bank_prompt(context, count)
         
         raise ValueError(f"Unknown question type: {question_type}")
+    
+    @staticmethod
+    def _non_dev_aptitude_bank_prompt(count: int) -> str:
+        """Generate aptitude questions for non-developer (general logical reasoning)"""
+        return f"""Generate {count} aptitude and logical reasoning questions for a professional assessment.
+
+These are GENERAL aptitude questions (not course-specific).
+
+QUESTION TYPES TO INCLUDE:
+1. Number series and patterns
+2. Logical reasoning (if-then statements)
+3. Percentage and ratio problems
+4. Time and work problems
+5. Simple data interpretation
+6. Verbal reasoning (analogies, odd one out)
+7. Basic arithmetic word problems
+
+FORMAT FOR EACH QUESTION:
+
+=== QUESTION 1 ===
+## Title: Number Series
+## Difficulty: Easy
+## Type: aptitude
+## Question:
+What is the next number in the series: 2, 6, 12, 20, 30, ?
+## Options:
+A) 40
+B) 42
+C) 44
+D) 36
+## Correct: B
+
+=== QUESTION 2 ===
+## Title: Percentage
+## Difficulty: Medium
+## Type: aptitude
+## Question:
+If a product's price increased from Rs. 200 to Rs. 250, what is the percentage increase?
+## Options:
+A) 20%
+B) 25%
+C) 30%
+D) 50%
+## Correct: B
+
+Continue for all {count} questions.
+
+DIFFICULTY MIX:
+- Easy (40%): Simple calculations, direct patterns
+- Medium (40%): Multi-step problems
+- Hard (20%): Complex reasoning
+
+RULES:
+✓ Each question must have 4 options with exactly 1 correct answer
+✓ Questions should be solvable in ~1 minute
+✓ Use realistic numbers and scenarios
+✓ Include variety of question types
+
+Generate {count} aptitude questions now:"""
     
     @staticmethod
     def _dev_aptitude_bank_prompt(context: str, count: int) -> str:
@@ -239,49 +302,16 @@ Generate all {count} coding questions now:"""
 
     @staticmethod
     def _non_dev_mcq_bank_prompt(context: str, count: int) -> str:
-        """Generate MCQ questions for non-developer bank - BASED ON SUMMARIES"""
-        return f"""You are creating a QUESTION BANK for a non-developer assessment platform.
+        """Generate MCQ questions from the provided content - content at END for better attention"""
+        return f"""Generate {count} multiple choice questions.
 
-Generate EXACTLY {count} UNIQUE Multiple Choice Questions (MCQs).
-
-⚠️ CRITICAL: Questions MUST be based on the weekly summaries provided below!
-Read the summaries carefully and create questions that test what was actually taught.
-
-═══════════════════════════════════════════════════════════════
-WEEKLY LEARNING SUMMARIES (BASE YOUR QUESTIONS ON THESE):
-═══════════════════════════════════════════════════════════════
-{context}
-═══════════════════════════════════════════════════════════════
-
-INSTRUCTIONS:
-1. READ the summaries above carefully
-2. IDENTIFY specific topics, tools, concepts mentioned
-3. CREATE questions that test understanding of THOSE topics
-4. DO NOT create generic questions - they must relate to the summaries
-
-QUESTION TOPICS (extract from summaries):
-- Testing concepts mentioned in summaries
-- SDLC phases discussed in summaries  
-- Tools and technologies mentioned (JIRA, etc.)
-- Processes and workflows covered
-- Business analysis concepts taught
-- Any specific examples or scenarios from summaries
-
-DIFFICULTY DISTRIBUTION:
-- Easy: ~30% (direct recall from summaries)
-- Medium: ~50% (application of concepts)
-- Hard: ~20% (analysis/scenario-based)
-
-FORMAT (STRICT):
+FORMAT - Use this exact format for each question:
 
 === QUESTION 1 ===
-## Title: [Title related to summary content]
-## Difficulty: [Easy/Medium/Hard]
+## Title: [Topic]
+## Difficulty: Easy
 ## Type: mcq
-## Tags: [relevant tags from summaries]
-## Source: [Which summary/topic this relates to]
-## Question:
-[Question based on summary content]
+## Question: [Your question here]
 ## Options:
 A) [Option A]
 B) [Option B]
@@ -290,19 +320,31 @@ D) [Option D]
 ## Correct: [A/B/C/D]
 
 === QUESTION 2 ===
-...
-
-Continue for all {count} questions.
+## Title: [Topic]
+## Difficulty: Medium
+## Type: mcq
+## Question: [Your question here]
+## Options:
+A) [Option A]
+B) [Option B]
+C) [Option C]
+D) [Option D]
+## Correct: [A/B/C/D]
 
 RULES:
-1. Each question MUST have exactly 4 options
-2. ONLY ONE correct answer per question
-3. Questions MUST relate to the weekly summaries provided above
-4. Include the correct answer (## Correct: X)
-5. Vary topics across different summaries
-6. DO NOT create generic questions - ONLY use content from summaries
+- Create questions ONLY from the content below
+- Ask about specific facts, terms, codes, numbers mentioned
+- Do NOT create generic questions
+- Each question needs exactly 4 options
+- Only 1 correct answer per question
 
-Generate all {count} MCQ questions now:"""
+Now read this content and create {count} questions about it:
+
+=== CONTENT START ===
+{context}
+=== CONTENT END ===
+
+Create {count} MCQ questions about the content above. Start with "=== QUESTION 1 ===" now:"""
 
     # ================================================================
     # LEGACY: BATCH QUESTIONS PROMPT
@@ -676,26 +718,64 @@ Evaluate all {question_count} questions:"""
 
     @staticmethod
     def _non_dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
-        """Non-developer answers evaluation prompt"""
-        return f"""Evaluate this non-developer MCQ assessment.
+        """Non-developer evaluation prompt - STRICT MCQ evaluation"""
+        return f"""You are evaluating a professional MCQ assessment. Be STRICT with scoring.
 
-ASSESSMENT CONTENT:
 {qa_content}
 
-SCORING:
-- 1 = Correct answer selected
-- 0 = Incorrect answer
+═══════════════════════════════════════════════════════════════
+STRICT EVALUATION RULES
+═══════════════════════════════════════════════════════════════
 
-REQUIRED OUTPUT FORMAT:
+FOR MCQ QUESTIONS:
+- Score 1 ONLY if user selected the EXACT correct option
+- Score 0 if user selected wrong option, even if "close"
+- NO partial credit for MCQ - it's either right (1) or wrong (0)
+
+FOR APTITUDE QUESTIONS:
+- Score 1 ONLY if the numerical answer is EXACTLY correct
+- Score 0 if answer is wrong, even if the approach was good
+- "Close" answers still get 0
+
+SAP T-CODE REFERENCE (if SAP questions are present):
+- SCC4 = Client Administration
+- SCCL = Local Client Copy
+- SCC3 = View Client Copy Logs
+
+OUTPUT FORMAT:
+
 SCORES: [{','.join(['0 or 1'] * question_count)}]
-FEEDBACK: [Q1 feedback|Q2 feedback|Q3 feedback|...]
 
-DETAILED ANALYSIS:
-- Overall understanding level
-- Knowledge gaps identified
-- Recommendations
+DETAILED FEEDBACK:
 
-Evaluate all {question_count} questions:"""
+------- Question 1 -------
+📝 Question: [Question text]
+✅ Correct Answer: [The EXACT correct answer]
+👤 User Selected: [What user chose]
+📊 Score: [1 if EXACTLY correct, 0 if wrong]
+💡 Explanation: [Why correct/incorrect]
+
+------- Question 2 -------
+📝 Question: [Question text]
+✅ Correct Answer: [The EXACT correct answer]
+👤 User Selected: [What user chose]
+📊 Score: [1 if EXACTLY correct, 0 if wrong]
+💡 Explanation: [Brief explanation]
+
+(Continue for all {question_count} questions)
+
+═══════════════════════════════════════════════════════════════
+SUMMARY
+═══════════════════════════════════════════════════════════════
+📈 Total Score: X/{question_count}
+🎯 Percentage: X%
+💪 Strong Areas: [List specific topics from questions user answered correctly]
+📚 Areas to Improve: [List specific topics from questions user got wrong]
+🔑 Key Concepts from This Test: [Extract 3-5 important concepts based on the ACTUAL questions in this test]
+
+Be STRICT - only give 1 for EXACT correct answers!
+
+Evaluate now:"""
 
 
 class PromptValidator:

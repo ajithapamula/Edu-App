@@ -208,12 +208,76 @@ class TestService:
                     logger.info(f"    ✓ Got {len(coding_qs)} coding questions")
             
             else:
-                # Non-developer exam: MCQ only
-                mcq_count = exam_structure.get("total_questions", 30)
-                mcq_qs = self.db_manager.get_unseen_questions_for_student(
-                    student_id, "non_dev", "mcq", mcq_count
+                # Non-developer exam: Aptitude + MCQ
+                # 10 Aptitude (general logical reasoning) + 20 MCQ (from summaries)
+                sections = exam_structure.get("sections", {})
+                
+                # 1. Get/Generate APTITUDE questions
+                apt_count = sections.get("aptitude", {}).get("question_count", 10)
+                logger.info(f"📋 Getting {apt_count} aptitude questions for non-dev")
+                
+                # First try to get unseen questions from bank
+                apt_qs = self.db_manager.get_unseen_questions_for_student(
+                    student_id, "non_dev", "aptitude", apt_count
                 )
-                questions.extend(self._standardize_questions(mcq_qs, "mcq"))
+                logger.info(f"  ✓ Got {len(apt_qs)} aptitude from bank")
+                
+                # If not enough, generate new ones
+                if len(apt_qs) < apt_count:
+                    needed = apt_count - len(apt_qs)
+                    logger.info(f"  📋 Generating {needed} more aptitude questions")
+                    try:
+                        new_apt = self.ai_service.generate_questions_for_bank(
+                            "non_dev", "aptitude", 
+                            "General aptitude and logical reasoning for professionals", 
+                            needed + 5  # Generate extra for bank
+                        )
+                        # Save to bank for future use
+                        self.db_manager.add_questions_to_bank(new_apt, "non_dev")
+                        apt_qs.extend(new_apt[:needed])
+                        logger.info(f"  ✅ Generated and saved {len(new_apt)} aptitude questions")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to generate aptitude: {e}")
+                
+                questions.extend(self._standardize_questions(apt_qs[:apt_count], "aptitude"))
+                
+                # 2. Get/Generate MCQ questions from course summaries
+                mcq_count = sections.get("mcq", {}).get("question_count", 20)
+                logger.info(f"📋 Generating {mcq_count} FRESH MCQ questions from summary")
+                
+                # ALWAYS generate fresh questions from summary - never repeat
+                context = self.content_service.get_context_for_questions("non_dev")
+                logger.info(f"  📚 Summary loaded: {len(context)} chars")
+                
+                mcq_qs = []
+                max_retries = 3
+                
+                for attempt in range(max_retries):
+                    try:
+                        remaining = mcq_count - len(mcq_qs)
+                        if remaining <= 0:
+                            break
+                        
+                        logger.info(f"  🔄 Generating {remaining} MCQ (attempt {attempt + 1})")
+                        
+                        generated = self.ai_service.generate_questions_for_bank(
+                            "non_dev", "mcq", context, remaining
+                        )
+                        
+                        if generated:
+                            mcq_qs.extend(generated)
+                            logger.info(f"  ✅ Generated {len(generated)} MCQ")
+                        
+                        if len(mcq_qs) >= mcq_count:
+                            break
+                            
+                    except Exception as e:
+                        logger.warning(f"  ⚠️ MCQ generation attempt {attempt + 1} failed: {e}")
+                
+                if len(mcq_qs) < mcq_count:
+                    logger.warning(f"⚠️ Only generated {len(mcq_qs)} MCQ, needed {mcq_count}")
+                
+                questions.extend(self._standardize_questions(mcq_qs[:mcq_count], "mcq"))
             
             # If not enough questions from bank, generate on-demand
             required_count = exam_structure.get("total_questions", 10)
@@ -270,6 +334,8 @@ class TestService:
                 "question_type": q_type,  # Explicitly set for section grouping
                 "question": q.get("question", ""),
                 "options": q.get("options"),
+                "correct_answer": q.get("correct_answer"),  # Preserve correct answer for evaluation
+                "correct_option_text": q.get("correct_option_text"),  # Preserve correct option text
                 "time_limit": self._get_question_time_limit(q_type)
             }
             standardized.append(std_q)
@@ -282,9 +348,9 @@ class TestService:
             "aptitude": config.APTITUDE_TIME_PER_Q * 60,
             "theory": config.THEORY_TIME_PER_Q * 60,
             "coding": config.CODING_TIME_PER_Q * 60,
-            "mcq": config.NON_DEV_TIME_PER_Q * 60
+            "mcq": config.NON_DEV_MCQ_TIME_PER_Q * 60
         }
-        return time_map.get(question_type, 120)
+        return time_map.get(question_type, 60)
 
     def _generate_additional_questions(self, user_type: str, count: int,
                                         exam_structure: Dict[str, Any] = None) -> List[Dict[str, Any]]:
@@ -757,19 +823,62 @@ class TestService:
 
     async def _evaluate_non_dev_test(self, test_data: Dict[str, Any],
                                      answers: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Evaluate non-developer test"""
+        """Evaluate non-developer test with section breakdown (Aptitude + MCQ)"""
         logger.info("📊 Evaluating non-developer test")
         
+        questions = test_data.get("questions", [])
+        
+        # Build QA pairs with correct question types
         qa_pairs = []
-        for answer_data in answers:
+        for i, answer_data in enumerate(answers):
+            # Get question type from the original question
+            q_type = "mcq"  # default
+            if i < len(questions):
+                q_type = questions[i].get("question_type", "mcq").lower()
+                if "aptitude" in q_type or "logical" in q_type:
+                    q_type = "aptitude"
+                else:
+                    q_type = "mcq"
+            
             qa_pairs.append({
                 "question": answer_data["question"],
                 "answer": answer_data["answer"],
-                "question_type": "mcq",
-                "options": answer_data.get("options", [])
+                "question_type": q_type,
+                "options": answer_data.get("options", []),
+                "correct_answer": questions[i].get("correct_answer") if i < len(questions) else None,
+                "correct_option_text": questions[i].get("correct_option_text") if i < len(questions) else None
             })
         
-        return self.ai_service.evaluate_test_batch("non_dev", qa_pairs)
+        # Get evaluation from AI
+        evaluation = self.ai_service.evaluate_test_batch("non_dev", qa_pairs)
+        
+        # Calculate section scores from results
+        scores = evaluation.get("scores", [])
+        
+        # Non-dev: First 10 = Aptitude, Rest = MCQ
+        apt_scores = scores[:10] if len(scores) >= 10 else scores
+        mcq_scores = scores[10:] if len(scores) > 10 else []
+        
+        section_scores = {
+            "aptitude": {
+                "correct": sum(apt_scores),
+                "total": len(apt_scores),
+                "percentage": round(sum(apt_scores) / len(apt_scores) * 100, 1) if apt_scores else 0
+            },
+            "mcq": {
+                "correct": sum(mcq_scores),
+                "total": len(mcq_scores),
+                "percentage": round(sum(mcq_scores) / len(mcq_scores) * 100, 1) if mcq_scores else 0
+            }
+        }
+        
+        # Add section_scores to evaluation result
+        evaluation["section_scores"] = section_scores
+        
+        logger.info(f"  ✅ Aptitude: {section_scores['aptitude']['correct']}/{section_scores['aptitude']['total']}")
+        logger.info(f"  ✅ MCQ: {section_scores['mcq']['correct']}/{section_scores['mcq']['total']}")
+        
+        return evaluation
 
     def _create_completion_response(self, evaluation_result: Dict[str, Any], 
                                    total_questions: int):
@@ -779,12 +888,19 @@ class TestService:
         
         # Build section results for frontend
         section_results = []
-        for sec_name in ["aptitude", "theory", "coding"]:
+        # Include all possible sections (dev and non-dev)
+        for sec_name in ["aptitude", "theory", "coding", "mcq"]:
             if sec_name in section_scores:
                 sec = section_scores[sec_name]
+                display_names = {
+                    "aptitude": "APTITUDE",
+                    "theory": "THEORY", 
+                    "coding": "CODING",
+                    "mcq": "MCQ"
+                }
                 section_results.append({
                     "name": sec_name,
-                    "display_name": sec_name.upper(),
+                    "display_name": display_names.get(sec_name, sec_name.upper()),
                     "correct": sec["correct"],
                     "total": sec["total"],
                     "percentage": sec["percentage"],

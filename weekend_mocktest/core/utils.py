@@ -16,18 +16,27 @@ class MemoryManager:
     Streamlined memory management for active tests.
     
     Features:
-    - Active test session management
+    - Active test session management (with MongoDB backup)
     - Answer storage
     - Question caching (legacy)
     - Automatic cleanup
     """
     
     def __init__(self):
-        self.tests = {}           # Active test sessions
+        self.tests = {}           # Active test sessions (in-memory cache)
         self.answers = {}         # Test answers
         self.question_cache = {}  # Generated questions cache (legacy)
         self._cleanup_thread = None
+        self._db_manager = None   # Lazy loaded
         self._start_cleanup_thread()
+    
+    @property
+    def db_manager(self):
+        """Lazy load database manager"""
+        if self._db_manager is None:
+            from .database import get_db_manager
+            self._db_manager = get_db_manager()
+        return self._db_manager
     
     def _start_cleanup_thread(self):
         """Start background cleanup thread"""
@@ -107,7 +116,8 @@ class MemoryManager:
             if q_type in sections:
                 sections[q_type] += 1
         
-        self.tests[test_id] = {
+        test_data = {
+            "test_id": test_id,
             "user_type": user_type,
             "student_id": student_id,
             "total_questions": len(questions),
@@ -115,29 +125,76 @@ class MemoryManager:
             "questions": questions,
             "sections": {k: v for k, v in sections.items() if v > 0},
             "created_at": time.time(),
-            "started_at": time.time()
+            "started_at": time.time(),
+            "answers": []
         }
         
+        # Store in memory
+        self.tests[test_id] = test_data
         self.answers[test_id] = []
+        
+        # Also persist to MongoDB for reliability
+        try:
+            self.db_manager.active_tests_collection.update_one(
+                {"test_id": test_id},
+                {"$set": test_data},
+                upsert=True
+            )
+            logger.info(f"📝 Test created & persisted: {test_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ MongoDB persist failed (test still in memory): {e}")
         
         logger.info(f"📝 Test created: {test_id} ({len(questions)} questions, sections: {sections})")
         return test_id
     
     def get_test(self, test_id: str) -> Optional[Dict[str, Any]]:
-        """Get test data by ID"""
-        return self.tests.get(test_id)
+        """Get test data by ID (checks memory first, then MongoDB)"""
+        # Check memory first
+        test_data = self.tests.get(test_id)
+        if test_data:
+            return test_data
+        
+        # Not in memory - check MongoDB
+        try:
+            mongo_test = self.db_manager.active_tests_collection.find_one(
+                {"test_id": test_id},
+                {"_id": 0}
+            )
+            if mongo_test:
+                # Restore to memory
+                self.tests[test_id] = mongo_test
+                self.answers[test_id] = mongo_test.get("answers", [])
+                logger.info(f"📥 Test restored from MongoDB: {test_id}")
+                return mongo_test
+        except Exception as e:
+            logger.warning(f"⚠️ MongoDB lookup failed: {e}")
+        
+        return None
     
     def update_test(self, test_id: str, updates: Dict[str, Any]) -> bool:
-        """Update test data"""
-        if test_id not in self.tests:
+        """Update test data in memory and MongoDB"""
+        test = self.get_test(test_id)
+        if not test:
             return False
         
-        self.tests[test_id].update(updates)
+        # Update memory
+        test.update(updates)
+        self.tests[test_id] = test
+        
+        # Update MongoDB
+        try:
+            self.db_manager.active_tests_collection.update_one(
+                {"test_id": test_id},
+                {"$set": updates}
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ MongoDB update failed: {e}")
+        
         return True
     
     def get_current_question(self, test_id: str) -> Optional[Dict[str, Any]]:
         """Get current question for test"""
-        test = self.tests.get(test_id)
+        test = self.get_test(test_id)  # This now checks MongoDB too
         if not test:
             return None
         
@@ -172,8 +229,9 @@ class MemoryManager:
         Returns:
             True if successful
         """
-        test = self.tests.get(test_id)
+        test = self.get_test(test_id)  # This now checks MongoDB too
         if not test or question_number != test["current_question"]:
+            logger.warning(f"⚠️ Submit failed: test={bool(test)}, q={question_number}, current={test.get('current_question') if test else 'N/A'}")
             return False
         
         questions = test["questions"]
@@ -192,10 +250,27 @@ class MemoryManager:
                 "time_taken": time_taken
             }
             
+            # Initialize answers list if needed
+            if test_id not in self.answers:
+                self.answers[test_id] = []
+            
             self.answers[test_id].append(answer_data)
             
             # Move to next question
             test["current_question"] += 1
+            self.tests[test_id] = test  # Update memory
+            
+            # Persist to MongoDB
+            try:
+                self.db_manager.active_tests_collection.update_one(
+                    {"test_id": test_id},
+                    {
+                        "$set": {"current_question": test["current_question"]},
+                        "$push": {"answers": answer_data}
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ MongoDB update failed: {e}")
             
             logger.info(f"✅ Answer submitted: {test_id} Q{question_number} ({question_data.get('question_type', 'unknown')})")
             return True
@@ -204,7 +279,7 @@ class MemoryManager:
     
     def is_test_complete(self, test_id: str) -> bool:
         """Check if test is completed"""
-        test = self.tests.get(test_id)
+        test = self.get_test(test_id)
         if not test:
             return False
         
@@ -212,7 +287,23 @@ class MemoryManager:
     
     def get_test_answers(self, test_id: str) -> List[Dict[str, Any]]:
         """Get all answers for test"""
-        return self.answers.get(test_id, [])
+        # Check memory first
+        if test_id in self.answers and self.answers[test_id]:
+            return self.answers[test_id]
+        
+        # Check MongoDB
+        try:
+            test_data = self.db_manager.active_tests_collection.find_one(
+                {"test_id": test_id},
+                {"answers": 1, "_id": 0}
+            )
+            if test_data and test_data.get("answers"):
+                self.answers[test_id] = test_data["answers"]
+                return test_data["answers"]
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get answers from MongoDB: {e}")
+        
+        return []
     
     def get_answers_by_section(self, test_id: str) -> Dict[str, List[Dict[str, Any]]]:
         """Get answers organized by question type/section"""
@@ -259,9 +350,16 @@ class MemoryManager:
         return cache_data["questions"]
     
     def cleanup_test(self, test_id: str):
-        """Clean up specific test"""
+        """Clean up specific test from memory and MongoDB"""
         self.tests.pop(test_id, None)
         self.answers.pop(test_id, None)
+        
+        # Also clean from MongoDB
+        try:
+            self.db_manager.active_tests_collection.delete_one({"test_id": test_id})
+        except Exception as e:
+            logger.warning(f"⚠️ MongoDB cleanup failed: {e}")
+        
         logger.info(f"🗑️ Test cleaned: {test_id}")
     
     def get_memory_stats(self) -> Dict[str, Any]:

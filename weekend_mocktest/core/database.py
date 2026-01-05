@@ -50,6 +50,7 @@ class DatabaseManager:
             self.test_results_collection = self.db[config.TEST_RESULTS_COLLECTION]
             self.question_bank_collection = self.db[config.QUESTION_BANK_COLLECTION]
             self.student_history_collection = self.db[config.STUDENT_QUESTION_HISTORY_COLLECTION]
+            self.active_tests_collection = self.db["active_tests"]  # For persisting active tests
             
             # Create indexes
             self._create_indexes()
@@ -145,6 +146,8 @@ class DatabaseManager:
                     "title": q.get("title", ""),
                     "question": q["question"],
                     "options": q.get("options"),  # For MCQ
+                    "correct_answer": q.get("correct_answer"),  # A, B, C, or D
+                    "correct_option_text": q.get("correct_option_text"),  # The correct option text
                     "tags": q.get("tags", []),
                     "source_summary_ids": source_summary_ids or [],
                     "created_at": time.time(),
