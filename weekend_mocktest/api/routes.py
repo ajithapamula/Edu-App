@@ -1,4 +1,5 @@
 # weekend_mocktest/api/routes.py
+# FIXED: Now includes all fields needed by frontend (question_type, is_mcq, section_info, etc.)
 import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -14,33 +15,35 @@ router = APIRouter()
 test_service = get_test_service()
 pdf_service = get_pdf_service()
 
+
+def _serialize_object(obj):
+    """Convert response object to dictionary recursively"""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return {k: _serialize_object(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_serialize_object(item) for item in obj]
+    if hasattr(obj, '__dict__'):
+        return {k: _serialize_object(v) for k, v in obj.__dict__.items()}
+    return obj
+
+
 @router.get("/")
 async def home():
-    """Home endpoint"""
-    return {
-        "service": "Mock Test API",
-        "version": "5.0.0",
-        "status": "operational"
-    }
+    return {"service": "Mock Test API", "version": "7.0.0", "status": "operational"}
+
 
 @router.get("/api/health")
 async def health_check():
-    """Health check"""
-    return {
-        "status": "healthy",
-        "timestamp": DateTimeUtils.get_current_timestamp()
-    }
+    return {"status": "healthy", "timestamp": DateTimeUtils.get_current_timestamp()}
 
-# ==================== FRONTEND COMPATIBLE ENDPOINTS ====================
 
 @router.post("/api/test/start")
 async def start_test(request_data: dict):
-    """Start test - Frontend compatible with standardized response"""
+    """Start test - Frontend compatible with ALL fields from test_service"""
     try:
-        # Handle both frontend formats
         user_type = request_data.get("user_type", "dev")
-        
-        # Convert frontend user types to backend format
         if user_type in ["developer", "dev"]:
             user_type = "dev"
         elif user_type in ["non-developer", "non_dev"]:
@@ -49,26 +52,34 @@ async def start_test(request_data: dict):
             raise ValueError(f"Invalid user_type: {user_type}")
         
         logger.info(f"Starting test for user_type: {user_type}")
-        
-        # Start test via service
         test_response = await test_service.start_test(user_type)
         
-        # Create standardized response that matches frontend expectations
+        # Serialize all objects
+        section_info = _serialize_object(getattr(test_response, 'section_info', None))
+        current_section = _serialize_object(getattr(test_response, 'current_section', None))
+        section_progress = _serialize_object(getattr(test_response, 'section_progress', None))
+        exam_structure = _serialize_object(getattr(test_response, 'exam_structure', None))
+        
         response = {
-            # Primary fields (what frontend expects)
+            # Primary fields (camelCase)
             "testId": test_response.test_id,
             "sessionId": f"session_{test_response.test_id[:8]}",
             "userType": user_type,
             "totalQuestions": test_response.total_questions,
             "timeLimit": test_response.time_limit,
-            "duration": test_response.time_limit // 60,  # Convert to minutes
-            
-            # Current question data
+            "duration": test_response.time_limit // 60,
             "questionNumber": test_response.question_number,
             "questionHtml": test_response.question_html,
+            "questionType": getattr(test_response, 'question_type', 'aptitude'),
+            "title": getattr(test_response, 'title', ''),
             "options": test_response.options,
+            "isMcq": getattr(test_response, 'is_mcq', True),
+            "sectionInfo": section_info,
+            "currentSection": current_section,
+            "sectionProgress": section_progress,
+            "examStructure": exam_structure,
             
-            # Backward compatibility fields
+            # Backward compatibility (snake_case)
             "test_id": test_response.test_id,
             "session_id": f"session_{test_response.test_id[:8]}",
             "user_type": user_type,
@@ -76,32 +87,43 @@ async def start_test(request_data: dict):
             "time_limit": test_response.time_limit,
             "question_number": test_response.question_number,
             "question_html": test_response.question_html,
+            "question_type": getattr(test_response, 'question_type', 'aptitude'),
+            "is_mcq": getattr(test_response, 'is_mcq', True),
+            "section_info": section_info,
+            "current_section": current_section,
+            "section_progress": section_progress,
+            "exam_structure": exam_structure,
             
-            # Raw data for debugging
             "raw": {
                 "test_id": test_response.test_id,
-                "session_id": f"session_{test_response.test_id[:8]}",
                 "user_type": user_type,
                 "total_questions": test_response.total_questions,
                 "time_limit": test_response.time_limit,
                 "question_number": test_response.question_number,
                 "question_html": test_response.question_html,
-                "options": test_response.options
+                "question_type": getattr(test_response, 'question_type', 'aptitude'),
+                "title": getattr(test_response, 'title', ''),
+                "options": test_response.options,
+                "is_mcq": getattr(test_response, 'is_mcq', True),
+                "section_info": section_info,
+                "current_section": current_section,
+                "section_progress": section_progress,
+                "exam_structure": exam_structure
             }
         }
         
-        logger.info(f"Test started successfully: {test_response.test_id}")
+        logger.info(f"Test started: {test_response.test_id}")
         return response
         
     except Exception as e:
         logger.error(f"Test start failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.post("/api/test/submit")
 async def submit_answer(request_data: dict):
-    """Submit answer - Frontend compatible with proper response structure"""
+    """Submit answer - Frontend compatible with ALL section tracking fields"""
     try:
-        # Extract data with validation
         test_id = request_data.get("test_id")
         question_number = request_data.get("question_number")
         answer = request_data.get("answer", "")
@@ -112,66 +134,83 @@ async def submit_answer(request_data: dict):
             raise ValueError("question_number is required")
         
         logger.info(f"Submitting answer for test {test_id}, question {question_number}")
-        
-        # Submit via service
         response = await test_service.submit_answer(test_id, question_number, answer)
         
-        # Handle test completion
         if response.test_completed:
+            section_scores = _serialize_object(getattr(response, 'section_scores', {}))
+            section_results = _serialize_object(getattr(response, 'section_results', []))
+            summary = _serialize_object(getattr(response, 'summary', {}))
+            
             return {
-                # Primary fields
                 "testCompleted": True,
                 "score": response.score,
                 "totalQuestions": response.total_questions,
-                "analytics": response.analytics,
-                
-                # Backward compatibility
+                "scorePercentage": getattr(response, 'score_percentage', 0),
+                "analytics": getattr(response, 'analytics', ''),
+                "sectionScores": section_scores,
+                "sectionResults": section_results,
+                "summary": summary,
                 "test_completed": True,
-                "total_questions": response.total_questions
+                "total_questions": response.total_questions,
+                "section_scores": section_scores,
+                "section_results": section_results
             }
         else:
-            # Continue with next question
             next_q = response.next_question
+            section_info = _serialize_object(getattr(response, 'section_info', None))
+            current_section = _serialize_object(getattr(response, 'current_section', None))
+            section_progress = _serialize_object(getattr(response, 'section_progress', None))
+            section_just_completed = getattr(response, 'section_just_completed', None)
+            next_section_starting = getattr(response, 'next_section_starting', None)
+            
             return {
-                # Primary fields
                 "testCompleted": False,
                 "nextQuestion": {
                     "questionNumber": next_q.question_number,
                     "totalQuestions": next_q.total_questions,
                     "questionHtml": next_q.question_html,
+                    "questionType": getattr(next_q, 'question_type', 'mcq'),
+                    "title": getattr(next_q, 'title', ''),
                     "options": next_q.options,
+                    "isMcq": getattr(next_q, 'is_mcq', True),
                     "timeLimit": next_q.time_limit
                 },
-                
-                # Backward compatibility
+                "sectionInfo": section_info,
+                "currentSection": current_section,
+                "sectionProgress": section_progress,
+                "sectionJustCompleted": section_just_completed,
+                "nextSectionStarting": next_section_starting,
                 "test_completed": False,
                 "next_question": {
                     "question_number": next_q.question_number,
                     "total_questions": next_q.total_questions,
                     "question_html": next_q.question_html,
+                    "question_type": getattr(next_q, 'question_type', 'mcq'),
+                    "title": getattr(next_q, 'title', ''),
                     "options": next_q.options,
+                    "is_mcq": getattr(next_q, 'is_mcq', True),
                     "time_limit": next_q.time_limit
-                }
+                },
+                "section_info": section_info,
+                "current_section": current_section,
+                "section_progress": section_progress,
+                "section_just_completed": section_just_completed,
+                "next_section_starting": next_section_starting
             }
         
     except Exception as e:
         logger.error(f"Answer submission failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/api/test/results/{test_id}")
 async def get_test_results(test_id: str):
-    """Get test results - Frontend compatible"""
     try:
-        logger.info(f"Getting results for test: {test_id}")
-        
         results = await test_service.get_test_results(test_id)
-        
         if not results:
             raise HTTPException(status_code=404, detail="Test results not found")
         
-        # Standardized response
         return {
-            # Primary fields
             "testId": test_id,
             "score": results["score"],
             "totalQuestions": results["total_questions"],
@@ -179,236 +218,207 @@ async def get_test_results(test_id: str):
             "analytics": results["analytics"],
             "timestamp": results["timestamp"],
             "pdfAvailable": True,
-            
-            # Backward compatibility
+            "sectionScores": results.get("section_scores", {}),
+            "sectionResults": results.get("section_results", []),
             "test_id": test_id,
             "total_questions": results["total_questions"],
-            "pdf_available": True
+            "section_scores": results.get("section_scores", {}),
+            "section_results": results.get("section_results", [])
         }
-        
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error fetching results: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/api/test/pdf/{test_id}")
 async def download_pdf(test_id: str):
-    """Download PDF - Frontend compatible"""
     try:
-        logger.info(f"Generating PDF for test: {test_id}")
-        
         pdf_bytes = await pdf_service.generate_test_results_pdf(test_id)
-        
         return StreamingResponse(
             io.BytesIO(pdf_bytes),
             media_type="application/pdf",
             headers={"Content-Disposition": f"attachment; filename=test_results_{test_id}.pdf"}
         )
-        
     except Exception as e:
         logger.error(f"PDF generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
 
-# ==================== NAVIGATION ENDPOINTS ====================
+
+@router.post("/api/test/force-complete")
+async def force_complete_test(request_data: dict):
+    try:
+        test_id = request_data.get("test_id")
+        termination_reason = request_data.get("termination_reason", "Proctoring violation")
+        warnings = request_data.get("warnings", 0)
+        
+        if not test_id:
+            raise ValueError("test_id is required")
+        
+        result = await test_service.force_complete_test(test_id, termination_reason, warnings)
+        return {"success": result.get("status") != "error", "status": result.get("status"), "reason": result.get("reason")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/api/test/{test_id}/question/{question_number}")
 async def get_specific_question(test_id: str, question_number: int):
-    """
-    Get a specific question for navigation (Previous button, Go to Section).
-    Used by frontend for:
-    - Previous button navigation
-    - Go to Aptitude/Theory/Coding section buttons
-    """
     try:
-        logger.info(f"📍 Getting question {question_number} for test {test_id}")
-        
-        # Get test data from memory
         from ..core.utils import memory_manager
         import markdown
         
         test_data = memory_manager.get_test(test_id)
         if not test_data:
-            raise HTTPException(status_code=404, detail="Test not found or expired")
+            raise HTTPException(status_code=404, detail="Test not found")
         
-        # Validate question number
+        user_type = test_data.get("user_type", "dev")
         total_questions = test_data.get("total_questions", 25)
-        if question_number < 1 or question_number > total_questions:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Question number must be between 1 and {total_questions}"
-            )
         
-        # Get questions list
+        if question_number < 1 or question_number > total_questions:
+            raise HTTPException(status_code=400, detail=f"Question number must be between 1 and {total_questions}")
+        
         questions = test_data.get("questions", [])
         if question_number > len(questions):
             raise HTTPException(status_code=404, detail="Question not found")
         
-        # Get the specific question (0-indexed)
         question = questions[question_number - 1]
+        question_type = question.get("question_type", "mcq")
+        is_mcq = question.get("is_mcq", True)
+        options = question.get("options")
+        time_limit = test_service._get_question_time_limit(question_type, user_type)
         
-        # Determine section based on question number
-        # Aptitude: Q1-10, Theory: Q11-20, Coding: Q21-25
-        if question_number <= 10:
-            question_type = "aptitude"
-            section_question_number = question_number
-            section_total = 10
-            time_limit = 120  # 2 minutes
-        elif question_number <= 20:
-            question_type = "theory"
-            section_question_number = question_number - 10
-            section_total = 10
-            time_limit = 120  # 2 minutes
-        else:
-            question_type = "coding"
-            section_question_number = question_number - 20
-            section_total = 5
-            time_limit = 300  # 5 minutes
-        
-        # Override with actual question type if available
-        actual_type = question.get("question_type", question_type)
-        if actual_type:
-            question_type = actual_type
-            time_limit = test_service._get_question_time_limit(actual_type)
-        
-        # Format question HTML
         question_html = question.get("question", "")
         if question_html:
-            question_html = markdown.markdown(
-                question_html,
-                extensions=['codehilite', 'fenced_code']
-            )
+            question_html = markdown.markdown(question_html, extensions=['codehilite', 'fenced_code'])
         
-        # Get saved answer if exists
+        section_info = test_service._get_section_info(questions, user_type)
+        current_section = test_service._get_current_section(question_number, section_info)
+        section_progress = test_service._get_section_progress(question_number, section_info)
+        
         answers = memory_manager.get_test_answers(test_id)
         saved_answer = ""
         if answers and question_number <= len(answers):
             saved_answer = answers[question_number - 1].get("answer", "")
         
-        # Build response
-        response = {
+        return {
             "success": True,
-            
-            # Primary fields (camelCase for frontend)
             "questionNumber": question_number,
             "totalQuestions": total_questions,
             "questionHtml": question_html,
             "questionType": question_type,
             "title": question.get("title", ""),
-            "options": question.get("options"),
+            "options": options,
+            "isMcq": is_mcq,
             "timeLimit": time_limit,
-            "sectionQuestionNumber": section_question_number,
-            "sectionTotalQuestions": section_total,
             "savedAnswer": saved_answer,
-            
-            # Backward compatibility (snake_case)
+            "sectionInfo": section_info,
+            "currentSection": current_section,
+            "sectionProgress": section_progress,
             "question_number": question_number,
-            "total_questions": total_questions,
-            "question_html": question_html,
             "question_type": question_type,
-            "time_limit": time_limit,
-            "section_question_number": section_question_number,
-            "section_total_questions": section_total,
-            "saved_answer": saved_answer
+            "is_mcq": is_mcq,
+            "time_limit": time_limit
         }
-        
-        logger.info(f"✅ Returning Q{question_number} ({question_type}) for test {test_id}")
-        return response
-        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Get question failed: {e}")
+        logger.error(f"Get question failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/api/test/{test_id}/navigate")
 async def navigate_to_section(test_id: str, request_data: dict):
-    """
-    Navigate to a specific section's first question.
-    Used by "Go to Aptitude", "Go to Theory", "Go to Coding" buttons.
-    """
     try:
         section_name = request_data.get("section", "").lower()
-        
-        if section_name not in ["aptitude", "theory", "coding"]:
+        if section_name not in ["aptitude", "mcq", "coding"]:
             raise HTTPException(status_code=400, detail="Invalid section name")
         
-        logger.info(f"🧭 Navigating to {section_name} section for test {test_id}")
+        from ..core.utils import memory_manager
+        test_data = memory_manager.get_test(test_id)
+        if not test_data:
+            raise HTTPException(status_code=404, detail="Test not found")
         
-        # Get first question number for section
-        section_start = {
-            "aptitude": 1,
-            "theory": 11,
-            "coding": 21
-        }
+        questions = test_data.get("questions", [])
+        user_type = test_data.get("user_type", "dev")
+        section_info = test_service._get_section_info(questions, user_type)
         
-        question_number = section_start.get(section_name, 1)
+        question_number = 1
+        for section in section_info.get("sections", []):
+            if section["name"] == section_name:
+                question_number = section["start"]
+                break
         
-        # Use the get_specific_question logic
         return await get_specific_question(test_id, question_number)
-        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Navigation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/test/{test_id}/status")
 async def get_test_status(test_id: str):
-    """
-    Get current test status including progress and section info.
-    """
     try:
-        status = await test_service.get_test_status(test_id)
-        return status
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        from ..core.utils import memory_manager
+        test_data = memory_manager.get_test(test_id)
+        if not test_data:
+            raise HTTPException(status_code=404, detail="Test not found")
+        
+        user_type = test_data.get("user_type", "dev")
+        questions = test_data.get("questions", [])
+        current_q = test_data.get("current_question", 1)
+        
+        section_info = test_service._get_section_info(questions, user_type)
+        current_section = test_service._get_current_section(current_q, section_info)
+        section_progress = test_service._get_section_progress(current_q, section_info)
+        answers = memory_manager.get_test_answers(test_id)
+        
+        return {
+            "testId": test_id,
+            "userType": user_type,
+            "totalQuestions": test_data.get("total_questions", 25),
+            "currentQuestion": current_q,
+            "answeredCount": len(answers) if answers else 0,
+            "sectionInfo": section_info,
+            "currentSection": current_section,
+            "sectionProgress": section_progress,
+            "isComplete": current_q > test_data.get("total_questions", 25)
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ Get test status failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== ADMIN ENDPOINTS ====================
 
 @router.get("/api/tests")
 async def get_all_tests():
-    """Get all test results"""
     try:
         results = await test_service.get_all_tests()
-        return {
-            "count": len(results),
-            "results": results,
-            "timestamp": DateTimeUtils.get_current_timestamp()
-        }
+        return {"count": len(results), "results": results, "timestamp": DateTimeUtils.get_current_timestamp()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/api/students")
 async def get_students():
-    """Get students list"""
     try:
         students = await test_service.get_students()
-        return {
-            "count": len(students),
-            "students": students
-        }
+        return {"count": len(students), "students": students}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.get("/api/students/{student_id}/tests")
 async def get_student_tests(student_id: str):
-    """Get student tests"""
     try:
         tests = await test_service.get_student_tests(student_id)
         return {"count": len(tests), "tests": tests}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @router.delete("/api/cleanup")
 async def cleanup_resources():
-    """Cleanup expired tests"""
     try:
         result = test_service.cleanup_expired_tests()
         return result
