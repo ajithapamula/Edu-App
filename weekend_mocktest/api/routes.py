@@ -209,6 +209,166 @@ async def download_pdf(test_id: str):
     except Exception as e:
         logger.error(f"PDF generation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+# ==================== NAVIGATION ENDPOINTS ====================
+
+@router.get("/api/test/{test_id}/question/{question_number}")
+async def get_specific_question(test_id: str, question_number: int):
+    """
+    Get a specific question for navigation (Previous button, Go to Section).
+    Used by frontend for:
+    - Previous button navigation
+    - Go to Aptitude/Theory/Coding section buttons
+    """
+    try:
+        logger.info(f"📍 Getting question {question_number} for test {test_id}")
+        
+        # Get test data from memory
+        from ..core.utils import memory_manager
+        import markdown
+        
+        test_data = memory_manager.get_test(test_id)
+        if not test_data:
+            raise HTTPException(status_code=404, detail="Test not found or expired")
+        
+        # Validate question number
+        total_questions = test_data.get("total_questions", 25)
+        if question_number < 1 or question_number > total_questions:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Question number must be between 1 and {total_questions}"
+            )
+        
+        # Get questions list
+        questions = test_data.get("questions", [])
+        if question_number > len(questions):
+            raise HTTPException(status_code=404, detail="Question not found")
+        
+        # Get the specific question (0-indexed)
+        question = questions[question_number - 1]
+        
+        # Determine section based on question number
+        # Aptitude: Q1-10, Theory: Q11-20, Coding: Q21-25
+        if question_number <= 10:
+            question_type = "aptitude"
+            section_question_number = question_number
+            section_total = 10
+            time_limit = 120  # 2 minutes
+        elif question_number <= 20:
+            question_type = "theory"
+            section_question_number = question_number - 10
+            section_total = 10
+            time_limit = 120  # 2 minutes
+        else:
+            question_type = "coding"
+            section_question_number = question_number - 20
+            section_total = 5
+            time_limit = 300  # 5 minutes
+        
+        # Override with actual question type if available
+        actual_type = question.get("question_type", question_type)
+        if actual_type:
+            question_type = actual_type
+            time_limit = test_service._get_question_time_limit(actual_type)
+        
+        # Format question HTML
+        question_html = question.get("question", "")
+        if question_html:
+            question_html = markdown.markdown(
+                question_html,
+                extensions=['codehilite', 'fenced_code']
+            )
+        
+        # Get saved answer if exists
+        answers = memory_manager.get_test_answers(test_id)
+        saved_answer = ""
+        if answers and question_number <= len(answers):
+            saved_answer = answers[question_number - 1].get("answer", "")
+        
+        # Build response
+        response = {
+            "success": True,
+            
+            # Primary fields (camelCase for frontend)
+            "questionNumber": question_number,
+            "totalQuestions": total_questions,
+            "questionHtml": question_html,
+            "questionType": question_type,
+            "title": question.get("title", ""),
+            "options": question.get("options"),
+            "timeLimit": time_limit,
+            "sectionQuestionNumber": section_question_number,
+            "sectionTotalQuestions": section_total,
+            "savedAnswer": saved_answer,
+            
+            # Backward compatibility (snake_case)
+            "question_number": question_number,
+            "total_questions": total_questions,
+            "question_html": question_html,
+            "question_type": question_type,
+            "time_limit": time_limit,
+            "section_question_number": section_question_number,
+            "section_total_questions": section_total,
+            "saved_answer": saved_answer
+        }
+        
+        logger.info(f"✅ Returning Q{question_number} ({question_type}) for test {test_id}")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Get question failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/test/{test_id}/navigate")
+async def navigate_to_section(test_id: str, request_data: dict):
+    """
+    Navigate to a specific section's first question.
+    Used by "Go to Aptitude", "Go to Theory", "Go to Coding" buttons.
+    """
+    try:
+        section_name = request_data.get("section", "").lower()
+        
+        if section_name not in ["aptitude", "theory", "coding"]:
+            raise HTTPException(status_code=400, detail="Invalid section name")
+        
+        logger.info(f"🧭 Navigating to {section_name} section for test {test_id}")
+        
+        # Get first question number for section
+        section_start = {
+            "aptitude": 1,
+            "theory": 11,
+            "coding": 21
+        }
+        
+        question_number = section_start.get(section_name, 1)
+        
+        # Use the get_specific_question logic
+        return await get_specific_question(test_id, question_number)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Navigation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/test/{test_id}/status")
+async def get_test_status(test_id: str):
+    """
+    Get current test status including progress and section info.
+    """
+    try:
+        status = await test_service.get_test_status(test_id)
+        return status
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"❌ Get test status failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== ADMIN ENDPOINTS ====================
 

@@ -1,8 +1,7 @@
 # weekend_mocktest/core/ai_services.py
+# FIXED: Dev=3 section eval, NonDev=2 section eval
 import logging
-import time
 import re
-import json
 import uuid
 from typing import List, Dict, Any
 from groq import Groq
@@ -13,210 +12,100 @@ logger = logging.getLogger(__name__)
 
 
 class AIService:
-    """
-    Production AI service for question generation and evaluation.
-    
-    Features:
-    - Batch question generation by type (aptitude, theory, coding)
-    - Question bank population
-    - Test evaluation with detailed feedback
-    """
-    
+    """AI service for question generation and evaluation"""
+
     def __init__(self):
-        """Initialize Groq client"""
-        if not config.GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY is required")
+        self.client = Groq(api_key=config.GROQ_API_KEY)
+        logger.info("🤖 AI Service initialized")
+
+    def _call_llm_with_retries(self, prompt: str, max_tokens: int = None, 
+                               temperature: float = None) -> str:
+        """Call LLM with retries"""
+        max_tokens = max_tokens or config.GROQ_MAX_TOKENS
+        temperature = temperature or config.GROQ_TEMPERATURE
         
-        self.client = Groq(
-            api_key=config.GROQ_API_KEY,
-            timeout=config.GROQ_TIMEOUT
-        )
-        
-        self._test_connection()
-        logger.info("✅ AI Service initialized successfully")
-    
-    def _test_connection(self):
-        """Test AI service connection"""
-        try:
-            response = self.client.chat.completions.create(
-                model=config.GROQ_MODEL,
-                messages=[{"role": "user", "content": "Hello"}],
-                max_completion_tokens=10
-            )
-            if not response.choices:
-                raise Exception("No response from AI service")
-        except Exception as e:
-            raise Exception(f"AI service connection failed: {e}")
-    
-    # ================================================================
-    # QUESTION BANK GENERATION (NEW)
-    # ================================================================
-    
+        for attempt in range(config.MAX_RETRIES):
+            try:
+                response = self.client.chat.completions.create(
+                    model=config.GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are an expert question generator and evaluator."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=config.GROQ_TIMEOUT
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                logger.warning(f"LLM call attempt {attempt + 1} failed: {e}")
+                if attempt == config.MAX_RETRIES - 1:
+                    raise
+        return ""
+
     def generate_questions_for_bank(self, user_type: str, question_type: str,
                                     context: str, count: int) -> List[Dict[str, Any]]:
-        """
-        Generate questions for the question bank.
-        
-        Args:
-            user_type: 'dev' or 'non_dev'
-            question_type: 'aptitude', 'theory', 'coding', or 'mcq'
-            context: Weekly summaries context
-            count: Number of questions to generate
-        
-        Returns:
-            List of structured question dictionaries
-        """
-        logger.info(f"🏭 Generating {count} {question_type} questions for bank ({user_type})")
-        logger.info(f"📚 Context length: {len(context)} chars")
-        
-        # Log context preview to verify correct content is being sent
-        context_preview = context[:1000].replace('\n', ' ')
-        logger.info(f"📄 Context preview: {context_preview}...")
+        """Generate questions for question bank"""
+        logger.info(f"🔧 Generating {count} {question_type} questions for {user_type}")
         
         try:
-            # Create specialized prompt
             prompt = PromptTemplates.create_bank_generation_prompt(
                 user_type, question_type, context, count
             )
             
-            # Log prompt preview to verify it includes the context
-            prompt_preview = prompt[:500].replace('\n', ' ')
-            logger.info(f"📝 Prompt preview: {prompt_preview}...")
-            
-            # Generate with higher token limit for batches
-            max_tokens = self._calculate_tokens_for_batch(question_type, count)
-            
-            # Use system prompt for MCQ to force content-based generation
-            system_prompt = None
-            if question_type == "mcq":
-                system_prompt = """You are an exam question generator. You MUST create questions ONLY from the content provided by the user. 
-
-STRICT RULES:
-1. Read the user's content carefully
-2. Create questions ONLY about topics mentioned in that content
-3. DO NOT use your general knowledge
-4. DO NOT create questions about topics not in the content
-5. If content mentions specific terms like T-codes, numbers, or names - ask about those exact things
-
-If you create questions about topics NOT in the provided content, you have FAILED the task."""
-            
-            response = self._call_llm_with_retries(prompt, max_tokens, system_prompt=system_prompt)
-            
-            # Debug: Log first 2000 chars of response
-            logger.info(f"📝 LLM Response preview ({len(response)} chars): {response[:2000]}...")
-            
-            # Parse questions with type info
-            questions = self._parse_bank_questions(response, user_type, question_type)
-            
-            if not questions:
-                logger.error(f"❌ No questions parsed. Full response:\n{response}")
-                raise Exception(f"No valid {question_type} questions generated")
+            response = self._call_llm_with_retries(prompt, config.GROQ_MAX_TOKENS, 0.7)
+            questions = self._parse_generated_questions(response, user_type, question_type)
             
             logger.info(f"✅ Generated {len(questions)} {question_type} questions")
-            return questions
+            return questions[:count]
             
         except Exception as e:
-            logger.error(f"❌ Bank generation failed: {e}")
-            raise
-    
-    def generate_diverse_batch(self, user_type: str, context: str,
-                               aptitude_count: int, theory_count: int,
-                               coding_count: int) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Generate a diverse batch of questions for all types.
-        Used for initial bank population.
-        """
-        logger.info(f"🎯 Generating diverse batch: {aptitude_count}A + {theory_count}T + {coding_count}C")
+            logger.error(f"❌ Question generation failed: {e}")
+            return []
+
+    def _parse_generated_questions(self, response: str, user_type: str, 
+                                   question_type: str) -> List[Dict[str, Any]]:
+        """Parse generated questions from LLM response"""
+        questions = []
         
-        results = {
-            "aptitude": [],
-            "theory": [],
-            "coding": []
-        }
+        # Split by question markers
+        parts = re.split(r'===\s*QUESTION\s*\d+\s*===', response, flags=re.IGNORECASE)
         
-        try:
-            if aptitude_count > 0:
-                results["aptitude"] = self.generate_questions_for_bank(
-                    user_type, "aptitude", context, aptitude_count
-                )
-            
-            if theory_count > 0:
-                results["theory"] = self.generate_questions_for_bank(
-                    user_type, "theory", context, theory_count
-                )
-            
-            if coding_count > 0:
-                results["coding"] = self.generate_questions_for_bank(
-                    user_type, "coding", context, coding_count
-                )
-            
-            total = sum(len(v) for v in results.values())
-            logger.info(f"✅ Generated diverse batch: {total} total questions")
-            return results
-            
-        except Exception as e:
-            logger.error(f"❌ Diverse batch generation failed: {e}")
-            raise
-    
-    def _calculate_tokens_for_batch(self, question_type: str, count: int) -> int:
-        """Calculate appropriate token limit based on question type and count"""
-        base_tokens = {
-            "aptitude": 350,
-            "theory": 450,
-            "coding": 700,
-            "mcq": 450  # Increased for complete MCQ questions
-        }
+        for part in parts[1:]:  # Skip first empty part
+            try:
+                question_data = self._parse_single_question(part.strip(), user_type, question_type)
+                if question_data and question_data.get("question"):
+                    question_data["question_id"] = str(uuid.uuid4())
+                    questions.append(question_data)
+            except Exception as e:
+                logger.debug(f"Failed to parse question: {e}")
+                continue
         
-        per_question = base_tokens.get(question_type, 450)
-        return min(per_question * count + 1000, 12000)  # Increased cap to 12000
-    
-    def _parse_bank_questions(self, response: str, user_type: str,
-                              question_type: str) -> List[Dict[str, Any]]:
-        """Parse LLM response into structured questions for bank"""
-        try:
-            questions = []
-            
-            # Split by question markers
-            sections = re.split(r'=== QUESTION \d+ ===', response)[1:]
-            
-            for i, section in enumerate(sections, 1):
-                try:
-                    question = self._parse_single_bank_question(
-                        section, user_type, question_type, i
-                    )
-                    if question:
-                        questions.append(question)
-                except Exception as e:
-                    logger.warning(f"Failed to parse question {i}: {e}")
-            
-            return questions
-            
-        except Exception as e:
-            logger.error(f"Question parsing failed: {e}")
-            raise Exception(f"Failed to parse questions: {e}")
-    
-    def _parse_single_bank_question(self, section: str, user_type: str,
-                                    question_type: str, index: int) -> Dict[str, Any]:
-        """Parse individual question from section"""
-        lines = [line.strip() for line in section.split('\n') if line.strip()]
-        
+        return questions
+
+    def _parse_single_question(self, text: str, user_type: str, 
+                               question_type: str) -> Dict[str, Any]:
+        """Parse a single question from text"""
         question_data = {
-            "question_id": str(uuid.uuid4()),
-            "question_number": index,
-            "title": f"Question {index}",
+            "title": "Question",
             "difficulty": "Medium",
             "question_type": question_type,
             "question": "",
             "options": None,
             "correct_answer": None,
-            "tags": []
+            "correct_option_text": None
         }
         
-        current_section = None
+        lines = text.strip().split('\n')
         question_lines = []
         options = []
+        current_section = None
         
         for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
             if line.startswith("## Title:"):
                 question_data["title"] = line.replace("## Title:", "").strip()
             elif line.startswith("## Difficulty:"):
@@ -225,38 +114,22 @@ If you create questions about topics NOT in the provided content, you have FAILE
                     question_data["difficulty"] = diff
             elif line.startswith("## Type:"):
                 t = line.replace("## Type:", "").strip().lower()
-                if t in ["aptitude", "theory", "coding", "mcq"]:
+                if t in ["aptitude", "mcq", "coding"]:
                     question_data["question_type"] = t
-            elif line.startswith("## Tags:"):
-                tags_str = line.replace("## Tags:", "").strip()
-                question_data["tags"] = [t.strip() for t in tags_str.split(",") if t.strip()]
-            elif line.startswith("## Source:"):
-                question_data["source"] = line.replace("## Source:", "").strip()
             elif line.startswith("## Correct:"):
                 correct = line.replace("## Correct:", "").strip().upper()
                 if correct in ["A", "B", "C", "D"]:
                     question_data["correct_answer"] = correct
             elif line.startswith("## Question:"):
                 current_section = "question"
-                # Check if question text is on same line
-                inline_q = line.replace("## Question:", "").strip()
-                if inline_q:
-                    question_lines.append(inline_q)
+                inline = line.replace("## Question:", "").strip()
+                if inline:
+                    question_lines.append(inline)
             elif line.startswith("## Options:"):
                 current_section = "options"
-            elif current_section == "question":
-                # Continue reading question lines until we hit another section
-                if not line.startswith("##") and not re.match(r'^[A-D]\)', line):
-                    question_lines.append(line)
-            elif current_section == "options" or re.match(r'^[A-D]\)', line):
-                # Parse options
-                current_section = "options"
-                if re.match(r'^[A-D]\)', line):
-                    option_text = line[3:].strip()
-                    if option_text:
-                        options.append(option_text)
-            # Also handle options without ## Options: header
-            elif not current_section and re.match(r'^[A-D]\)', line):
+            elif current_section == "question" and not line.startswith("##") and not re.match(r'^[A-D]\)', line):
+                question_lines.append(line)
+            elif re.match(r'^[A-D]\)', line):
                 current_section = "options"
                 option_text = line[3:].strip()
                 if option_text:
@@ -265,133 +138,66 @@ If you create questions about topics NOT in the provided content, you have FAILE
         question_data["question"] = "\n".join(question_lines).strip()
         
         # Add options for MCQ types
-        if user_type == "non_dev" or question_type == "mcq":
-            # Accept 3-4 options
+        if question_type in ["mcq", "aptitude"]:
             if len(options) >= 3:
-                question_data["options"] = options[:4]  # Take max 4
-            else:
-                question_data["options"] = None
-                
-            # Map correct answer index
-            if question_data["correct_answer"] and question_data["options"]:
-                answer_map = {"A": 0, "B": 1, "C": 2, "D": 3}
-                idx = answer_map.get(question_data["correct_answer"], 0)
-                if idx < len(question_data["options"]):
-                    question_data["correct_option_text"] = question_data["options"][idx]
-        
-        # Validation - be more lenient for MCQs
-        min_length = 15 if question_type in ["aptitude", "mcq"] else 40
-        if not question_data["question"] or len(question_data["question"]) < min_length:
-            raise Exception(f"Question too short ({len(question_data['question'])} chars)")
-        
-        if (user_type == "non_dev" or question_type == "mcq") and not question_data["options"]:
-            raise Exception("MCQ missing options (need at least 3)")
+                question_data["options"] = options[:4]
+                # Map correct answer
+                if question_data["correct_answer"] and question_data["options"]:
+                    idx = {"A": 0, "B": 1, "C": 2, "D": 3}.get(question_data["correct_answer"], 0)
+                    if idx < len(question_data["options"]):
+                        question_data["correct_option_text"] = question_data["options"][idx]
         
         return question_data
 
     # ================================================================
-    # LEGACY: BATCH GENERATION (for backward compatibility)
+    # EVALUATION BY SECTION
     # ================================================================
-    
-    def generate_questions_batch(self, user_type: str, context: str) -> List[Dict[str, Any]]:
-        """
-        Generate questions using AI based on context.
-        LEGACY: Use generate_questions_for_bank for new implementations.
-        """
-        logger.info(f"🤖 Generating {config.QUESTIONS_PER_TEST} {user_type} questions (legacy)")
-        
-        try:
-            prompt = PromptTemplates.create_batch_questions_prompt(
-                user_type, context, config.QUESTIONS_PER_TEST
-            )
-            
-            response = self._call_llm_with_retries(prompt, config.GROQ_MAX_TOKENS)
-            
-            questions = self._parse_questions_response(response, user_type)
-            
-            if len(questions) != config.QUESTIONS_PER_TEST:
-                logger.warning(f"Generated {len(questions)}/{config.QUESTIONS_PER_TEST} questions")
-            
-            if not questions:
-                raise Exception("No valid questions generated")
-            
-            logger.info(f"✅ Generated {len(questions)} questions successfully")
-            return questions
-            
-        except Exception as e:
-            logger.error(f"❌ Question generation failed: {e}")
-            raise
 
-    # ================================================================
-    # EVALUATION
-    # ================================================================
-    
-    def evaluate_test_batch(self, user_type: str, qa_pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Evaluate test answers using AI"""
-        logger.info(f"🎯 Evaluating {len(qa_pairs)} {user_type} answers")
-        
-        try:
-            prompt = PromptTemplates.create_evaluation_prompt(user_type, qa_pairs)
-            
-            response = self._call_llm_with_retries(
-                prompt, 
-                config.EVALUATION_MAX_TOKENS,
-                config.EVALUATION_TEMPERATURE
-            )
-            
-            evaluation = self._parse_evaluation_response(response, qa_pairs)
-            
-            logger.info(f"✅ Evaluation completed: {evaluation['total_correct']}/{len(qa_pairs)}")
-            return evaluation
-            
-        except Exception as e:
-            logger.error(f"❌ Evaluation failed: {e}")
-            raise
-    
     def evaluate_by_section(self, user_type: str, 
                            sections: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
         """
-        Evaluate test answers by section (Aptitude, Theory, Coding).
-        Each section is evaluated separately with its own prompt.
+        Evaluate test by sections.
         
-        Args:
-            user_type: 'dev' or 'non_dev'
-            sections: Dict with keys 'aptitude', 'theory', 'coding' containing Q&A pairs
+        DEVELOPER (user_type='dev'): 3 sections
+          - aptitude
+          - mcq
+          - coding
         
-        Returns:
-            Evaluation results with section-wise scores
+        NON-DEVELOPER (user_type='non_dev'): 2 sections only
+          - aptitude
+          - mcq
+          - NO CODING!
         """
-        logger.info(f"📊 Evaluating test by sections (Developer Exam)")
+        logger.info(f"📊 Evaluating {user_type} test by sections")
         
         all_scores = []
         all_feedbacks = []
         section_results = {}
         full_report = []
         
-        # Define section order for consistent output
-        section_order = ["aptitude", "theory", "coding"]
+        # Define section order based on user type
+        if user_type == "non_dev":
+            section_order = ["aptitude", "mcq"]  # 2 sections only
+            logger.info("  NON-DEV: Evaluating 2 sections (Aptitude, MCQ)")
+        else:
+            section_order = ["aptitude", "mcq", "coding"]  # 3 sections
+            logger.info("  DEV: Evaluating 3 sections (Aptitude, MCQ, Coding)")
         
         for section_name in section_order:
             qa_pairs = sections.get(section_name, [])
             
             if not qa_pairs:
+                logger.info(f"  ⏭️ Skipping {section_name}: no questions")
                 continue
             
             logger.info(f"  📝 Evaluating {section_name.upper()}: {len(qa_pairs)} questions")
             
             try:
-                # Use section-specific evaluation prompt
-                prompt = PromptTemplates.create_section_evaluation_prompt(
-                    section_name, qa_pairs
-                )
-                
+                prompt = PromptTemplates.create_section_evaluation_prompt(section_name, qa_pairs)
                 response = self._call_llm_with_retries(
-                    prompt, 
-                    config.EVALUATION_MAX_TOKENS,
-                    config.EVALUATION_TEMPERATURE
+                    prompt, config.EVALUATION_MAX_TOKENS, config.EVALUATION_TEMPERATURE
                 )
                 
-                # Parse evaluation
                 result = self._parse_evaluation_response(response, qa_pairs)
                 
                 section_results[section_name] = {
@@ -403,47 +209,29 @@ If you create questions about topics NOT in the provided content, you have FAILE
                 all_scores.extend(result["scores"])
                 all_feedbacks.extend(result["feedbacks"])
                 
-                # Format section report
-                section_header = f"""
-{'='*60}
-{section_name.upper()} SECTION EVALUATION
-{'='*60}
-Questions: {len(qa_pairs)}
-Score: {result['total_correct']}/{len(qa_pairs)} ({section_results[section_name]['percentage']}%)
-{'='*60}
-"""
-                full_report.append(section_header + result['evaluation_report'])
+                report_header = f"\n{'='*50}\n{section_name.upper()} SECTION\n{'='*50}\n"
+                report_header += f"Score: {result['total_correct']}/{len(qa_pairs)}\n"
+                full_report.append(report_header + result.get('evaluation_report', ''))
                 
                 logger.info(f"  ✅ {section_name.upper()}: {result['total_correct']}/{len(qa_pairs)}")
                 
             except Exception as e:
-                logger.error(f"Section evaluation failed for {section_name}: {e}")
-                section_results[section_name] = {
-                    "correct": 0,
-                    "total": len(qa_pairs),
-                    "percentage": 0
-                }
+                logger.error(f"  ❌ {section_name} evaluation failed: {e}")
+                section_results[section_name] = {"correct": 0, "total": len(qa_pairs), "percentage": 0}
                 all_scores.extend([0] * len(qa_pairs))
                 all_feedbacks.extend([f"Evaluation failed: {e}"] * len(qa_pairs))
-                full_report.append(f"\n=== {section_name.upper()} SECTION ===\nEvaluation failed: {e}")
         
-        # Calculate overall stats
+        # Calculate totals
         total_questions = sum(len(sections.get(s, [])) for s in section_order)
         total_correct = sum(all_scores)
         
-        # Add summary to report
-        summary = f"""
-{'='*60}
-OVERALL SUMMARY
-{'='*60}
-Total Score: {total_correct}/{total_questions} ({round(total_correct/total_questions*100, 1) if total_questions > 0 else 0}%)
-
-Section Breakdown:
-"""
-        for section_name in section_order:
-            if section_name in section_results:
-                sr = section_results[section_name]
-                summary += f"  - {section_name.upper()}: {sr['correct']}/{sr['total']} ({sr['percentage']}%)\n"
+        # Summary
+        summary = f"\n{'='*50}\nOVERALL SUMMARY\n{'='*50}\n"
+        summary += f"Total: {total_correct}/{total_questions}\n\n"
+        for sec in section_order:
+            if sec in section_results:
+                sr = section_results[sec]
+                summary += f"  {sec.upper()}: {sr['correct']}/{sr['total']} ({sr['percentage']}%)\n"
         
         full_report.insert(0, summary)
         
@@ -451,234 +239,59 @@ Section Breakdown:
             "scores": all_scores,
             "feedbacks": all_feedbacks,
             "total_correct": total_correct,
+            "percentage": round(total_correct / total_questions * 100, 1) if total_questions > 0 else 0,
             "section_scores": section_results,
             "evaluation_report": "\n".join(full_report)
         }
 
-    # ================================================================
-    # LLM COMMUNICATION
-    # ================================================================
-    
-    def _call_llm_with_retries(self, prompt: str, max_tokens: int, 
-                              temperature: float = None,
-                              system_prompt: str = None) -> str:
-        """Call LLM with retry logic and optional system prompt"""
-        if temperature is None:
-            temperature = config.GROQ_TEMPERATURE
-        
-        last_error = None
-        
-        # Build messages
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        
-        for attempt in range(config.MAX_RETRIES):
-            try:
-                logger.debug(f"LLM call attempt {attempt + 1}/{config.MAX_RETRIES}")
-                
-                completion = self.client.chat.completions.create(
-                    model=config.GROQ_MODEL,
-                    messages=messages,
-                    temperature=temperature,
-                    max_completion_tokens=max_tokens
-                )
-                
-                if not completion.choices:
-                    raise Exception("No response from LLM")
-                
-                response = completion.choices[0].message.content.strip()
-                
-                if len(response) < 100:
-                    raise Exception("Response too short")
-                
-                return response
-                
-            except Exception as e:
-                last_error = e
-                logger.warning(f"LLM attempt {attempt + 1} failed: {e}")
-                if attempt < config.MAX_RETRIES - 1:
-                    time.sleep(config.RETRY_DELAY * (attempt + 1))
-        
-        raise Exception(f"LLM failed after {config.MAX_RETRIES} attempts: {last_error}")
-
-    # ================================================================
-    # PARSING METHODS
-    # ================================================================
-    
-    def _parse_questions_response(self, response: str, user_type: str) -> List[Dict[str, Any]]:
-        """Parse LLM response into structured questions (legacy)"""
-        try:
-            questions = []
-            sections = re.split(r'=== QUESTION \d+ ===', response)[1:]
-            
-            for i, section in enumerate(sections, 1):
-                try:
-                    question = self._parse_single_question(section, user_type, i)
-                    if question:
-                        questions.append(question)
-                except Exception as e:
-                    logger.warning(f"Failed to parse question {i}: {e}")
-            
-            return questions
-            
-        except Exception as e:
-            logger.error(f"Question parsing failed: {e}")
-            raise Exception(f"Failed to parse questions: {e}")
-    
-    def _parse_single_question(self, section: str, user_type: str, 
-                               question_number: int) -> Dict[str, Any]:
-        """Parse individual question from section (legacy)"""
-        lines = [line.strip() for line in section.split('\n') if line.strip()]
-        
-        question_data = {
-            "question_number": question_number,
-            "title": f"Question {question_number}",
-            "difficulty": "Medium",
-            "type": "General",
-            "question": "",
-            "options": None
-        }
-        
-        current_section = None
-        question_lines = []
-        options = []
-        
-        for line in lines:
-            if line.startswith("## Title:"):
-                question_data["title"] = line.replace("## Title:", "").strip()
-            elif line.startswith("## Difficulty:"):
-                question_data["difficulty"] = line.replace("## Difficulty:", "").strip()
-            elif line.startswith("## Type:"):
-                question_data["type"] = line.replace("## Type:", "").strip()
-            elif line.startswith("## Question:"):
-                current_section = "question"
-            elif line.startswith("## Options:") and user_type == "non_dev":
-                current_section = "options"
-            elif current_section == "question":
-                if not line.startswith("##"):
-                    question_lines.append(line)
-            elif current_section == "options" and user_type == "non_dev":
-                if re.match(r'^[A-D]\)', line):
-                    option_text = line[3:].strip()
-                    if option_text:
-                        options.append(option_text)
-        
-        question_data["question"] = "\n".join(question_lines).strip()
-        
-        if user_type == "non_dev":
-            question_data["options"] = options if len(options) == 4 else None
-        
-        if not question_data["question"] or len(question_data["question"]) < 50:
-            raise Exception("Question too short")
-        
-        if user_type == "non_dev" and not question_data["options"]:
-            raise Exception("MCQ missing options")
-        
-        return question_data
-    
     def _parse_evaluation_response(self, response: str, 
                                    qa_pairs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Parse evaluation response from LLM"""
-        try:
-            scores = []
-            feedbacks = []
-            
-            # Extract scores
-            score_match = re.search(r'SCORES:\s*\[(.*?)\]', response, re.DOTALL)
-            if score_match:
-                score_str = score_match.group(1)
-                scores = [int(s.strip()) for s in score_str.split(',') if s.strip().isdigit()]
-            
-            # Extract feedbacks
-            feedback_match = re.search(r'FEEDBACK:\s*\[(.*?)\]', response, re.DOTALL)
-            if feedback_match:
-                feedback_str = feedback_match.group(1)
-                feedbacks = [f.strip().strip('"\'') for f in feedback_str.split('|')]
-            
-            # Fallbacks
-            if not scores or len(scores) != len(qa_pairs):
-                scores = self._extract_scores_fallback(response, len(qa_pairs))
-            
-            if not feedbacks or len(feedbacks) != len(qa_pairs):
-                feedbacks = self._extract_feedbacks_fallback(response, len(qa_pairs))
-            
-            if len(scores) != len(qa_pairs):
-                raise Exception(f"Score count mismatch: {len(scores)} vs {len(qa_pairs)}")
-            
-            if len(feedbacks) != len(qa_pairs):
-                feedbacks = [f"Question {i+1}: {'Correct' if scores[i] else 'Incorrect'}" 
-                           for i in range(len(qa_pairs))]
-            
-            return {
-                "scores": scores,
-                "feedbacks": feedbacks,
-                "total_correct": sum(scores),
-                "evaluation_report": response
-            }
-            
-        except Exception as e:
-            logger.error(f"Evaluation parsing failed: {e}")
-            raise Exception(f"Failed to parse evaluation: {e}")
-    
-    def _extract_scores_fallback(self, response: str, expected_count: int) -> List[int]:
-        """Fallback method to extract scores"""
-        score_patterns = re.findall(r'(?:^|\s)([01](?:\s*,\s*[01])+)(?:\s|$)', response)
-        
-        for pattern in score_patterns:
-            scores = [int(s.strip()) for s in pattern.split(',')]
-            if len(scores) == expected_count:
-                return scores
-        
-        logger.warning("Using fallback scoring")
-        return [1 if i % 2 == 0 else 0 for i in range(expected_count)]
-    
-    def _extract_feedbacks_fallback(self, response: str, expected_count: int) -> List[str]:
-        """Fallback method to extract feedbacks"""
-        lines = response.split('\n')
+        """Parse evaluation response"""
+        scores = []
         feedbacks = []
         
-        for line in lines:
-            if 'question' in line.lower() and any(word in line.lower() for word in ['correct', 'incorrect', 'good', 'poor']):
-                feedbacks.append(line.strip())
-                if len(feedbacks) == expected_count:
-                    break
-        
-        while len(feedbacks) < expected_count:
-            feedbacks.append(f"Question {len(feedbacks) + 1}: Evaluated")
-        
-        return feedbacks[:expected_count]
-    
-    def health_check(self) -> Dict[str, Any]:
-        """Check AI service health"""
-        try:
-            start_time = time.time()
-            response = self.client.chat.completions.create(
-                model=config.GROQ_MODEL,
-                messages=[{"role": "user", "content": "ping"}],
-                max_completion_tokens=5
-            )
-            response_time = time.time() - start_time
+        # Try to parse structured format
+        for i, qa in enumerate(qa_pairs, 1):
+            # Look for score pattern
+            score_pattern = rf'Q{i}[:\s]*(\d+)[/\s]*\d*|Question\s*{i}[:\s]*(\d+)'
+            match = re.search(score_pattern, response, re.IGNORECASE)
             
-            return {
-                "status": "healthy",
-                "model": config.GROQ_MODEL,
-                "response_time_ms": round(response_time * 1000, 2),
-                "available": bool(response.choices)
-            }
-        except Exception as e:
-            return {
-                "status": "error",
-                "error": str(e)
-            }
+            if match:
+                score = int(match.group(1) or match.group(2) or 0)
+                scores.append(min(score, 1))  # Normalize to 0 or 1
+            else:
+                # Try to match by answer comparison
+                user_answer = str(qa.get("answer", "")).strip().lower()
+                correct = str(qa.get("correct_option_text") or qa.get("correct_answer", "")).strip().lower()
+                
+                if user_answer and correct and (user_answer == correct or user_answer in correct or correct in user_answer):
+                    scores.append(1)
+                else:
+                    scores.append(0)
+            
+            # Extract feedback
+            feedback_pattern = rf'Q{i}[^Q]*?feedback[:\s]*([^\n]+)|Question\s*{i}[^Q]*?([^\n]+)'
+            fb_match = re.search(feedback_pattern, response, re.IGNORECASE)
+            feedbacks.append(fb_match.group(1).strip() if fb_match and fb_match.group(1) else "")
+        
+        # Fill missing
+        while len(scores) < len(qa_pairs):
+            scores.append(0)
+        while len(feedbacks) < len(qa_pairs):
+            feedbacks.append("")
+        
+        return {
+            "scores": scores,
+            "feedbacks": feedbacks,
+            "total_correct": sum(scores),
+            "evaluation_report": response
+        }
 
 
-# Singleton instance
+# Singleton
 _ai_service = None
 
 def get_ai_service() -> AIService:
-    """Get AI service singleton"""
     global _ai_service
     if _ai_service is None:
         _ai_service = AIService()
