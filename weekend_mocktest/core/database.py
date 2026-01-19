@@ -1,13 +1,13 @@
 # weekend_mocktest/core/database.py
-# FIXED: Auto collection routing + No question repetition for large scale
+# PRODUCTION READY – FULL VERSION WITH WARNINGS
+
 import logging
-import time
 import pymongo
 import random
 import hashlib
 import uuid
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from datetime import datetime
+from typing import List, Dict, Any
 from .config import config
 
 logger = logging.getLogger(__name__)
@@ -15,369 +15,487 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """
-    Production database manager with Question Bank support.
-    
-    Features:
-    - Auto collection routing: dev → Developer, non_dev → Non-Developer
-    - Question tracking to prevent repetition (large scale)
-    - Question Bank for reusable questions
+    Central MongoDB manager for Weekend Mocktest
     """
-    
+
     def __init__(self):
-        logger.info("🔗 Initializing database connections")
+        logger.info("🔗 Initializing MongoDB")
         self._init_mongodb()
-        logger.info("✅ Database manager initialized")
-    
+        logger.info("✅ DatabaseManager ready")
+
+    # ==========================================================
+    # MongoDB INIT
+    # ==========================================================
     def _init_mongodb(self):
-        """Initialize MongoDB connection with all collections"""
-        try:
-            self.mongo_client = pymongo.MongoClient(
-                config.MONGO_CONNECTION_STRING,
-                serverSelectionTimeoutMS=10000,
-                connectTimeoutMS=10000,
-                maxPoolSize=50,
-                minPoolSize=5
-            )
-            
-            self.mongo_client.admin.command('ping')
-            self.db = self.mongo_client[config.MONGO_DB_NAME]
-            
-            # Content Collections - AUTO ROUTING
-            self.developer_collection = self.db["Developer"]
-            self.non_developer_collection = self.db["Non-Developer"]
-            
-            # System Collections
-            self.test_results_collection = self.db[config.TEST_RESULTS_COLLECTION]
-            self.question_bank_collection = self.db[config.QUESTION_BANK_COLLECTION]
-            self.student_history_collection = self.db[config.STUDENT_QUESTION_HISTORY_COLLECTION]
-            
-            self._create_indexes()
-            
-            # Log collection stats
-            dev_count = self.developer_collection.count_documents({"summary": {"$exists": True, "$ne": ""}})
-            non_dev_count = self.non_developer_collection.count_documents({"summary": {"$exists": True, "$ne": ""}})
-            
-            logger.info(f"✅ MongoDB connected:")
-            logger.info(f"   - Developer collection: {dev_count} summaries")
-            logger.info(f"   - Non-Developer collection: {non_dev_count} summaries")
-            
-        except Exception as e:
-            logger.error(f"❌ MongoDB connection failed: {e}")
-            raise
-    
-    def _create_indexes(self):
-        """Create indexes for performance"""
-        try:
-            # Question bank indexes
-            self.question_bank_collection.create_index([("user_type", 1), ("question_type", 1)])
-            self.question_bank_collection.create_index([("question_hash", 1)], unique=True, sparse=True)
-            self.question_bank_collection.create_index([("usage_count", 1)])
-            self.question_bank_collection.create_index([("created_at", -1)])
-            
-            # Student history index - for preventing repetition
-            self.student_history_collection.create_index([("student_id", 1)])
-            self.student_history_collection.create_index([("student_id", 1), ("question_id", 1)], unique=True)
-            self.student_history_collection.create_index([("seen_at", -1)])
-            
-            # Test results
-            self.test_results_collection.create_index([("test_id", 1)], unique=True)
-            self.test_results_collection.create_index([("student_id", 1), ("created_at", -1)])
-            
-            logger.info("✅ Database indexes created")
-        except Exception as e:
-            logger.warning(f"Index creation warning: {e}")
+        self.mongo_client = pymongo.MongoClient(
+            config.MONGO_CONNECTION_STRING,
+            serverSelectionTimeoutMS=10000
+        )
 
-    # ================================================================
-    # AUTO COLLECTION ROUTING
-    # ================================================================
-    
-    def get_summaries_by_user_type(self, user_type: str) -> List[Dict[str, Any]]:
-        """
-        AUTO ROUTING: Fetch from correct collection based on user_type
+        self.mongo_client.admin.command("ping")
+        self.db = self.mongo_client[config.MONGO_DB_NAME]
+
+        # Content collections
+        self.developer_collection = self.db["Developer"]
+        self.non_developer_collection = self.db["Non-Developer"]
+
+        # System collections
+        self.test_results_collection = self.db[config.TEST_RESULTS_COLLECTION]
+        self.question_bank_collection = self.db[config.QUESTION_BANK_COLLECTION]
+        self.student_history_collection = self.db[config.STUDENT_QUESTION_HISTORY_COLLECTION]
+
+        # Active tests collection
+        self.active_tests_collection = self.db["active_tests"]
         
-        dev → Developer collection
-        non_dev → Non-Developer collection
-        """
-        try:
-            # AUTO ROUTE to correct collection
-            if user_type == "dev":
-                collection = self.developer_collection
-                collection_name = "Developer"
-            else:
-                collection = self.non_developer_collection
-                collection_name = "Non-Developer"
-            
-            logger.info(f"🔄 AUTO ROUTING: {user_type} → '{collection_name}' collection")
-            
-            # ONLY fetch 'summary' field - ignore filename, transcript_text
-            cursor = collection.find(
-                {
-                    "summary": {"$exists": True, "$ne": "", "$type": "string"},
-                    "$expr": {"$gt": [{"$strLenCP": "$summary"}, 100]}
-                },
-                {"summary": 1, "_id": 1}  # ONLY summary field!
-            ).sort("_id", pymongo.DESCENDING).limit(50)
-            
-            summaries = list(cursor)
-            logger.info(f"📄 Found {len(summaries)} summaries in '{collection_name}'")
-            
-            # Log preview of first summary
-            if summaries:
-                preview = summaries[0].get("summary", "")[:100]
-                logger.info(f"📝 Sample: {preview}...")
-            
-            return summaries
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to fetch summaries: {e}")
-            return []
-    
-    def get_weekly_summaries(self, user_type: str = None) -> List[Dict[str, Any]]:
-        """Get summaries - routes to correct collection if user_type provided"""
-        if user_type:
-            return self.get_summaries_by_user_type(user_type)
-        return []
+        # Warnings collection for proctoring (3 warnings = termination)
+        self.warnings_collection = self.db["test_warnings"]
 
-    # ================================================================
-    # QUESTION BANK - NO REPETITION FOR LARGE SCALE
-    # ================================================================
+        self._create_indexes()
+
+    def _create_indexes(self):
+        self.question_bank_collection.create_index(
+            [("question_hash", 1)], unique=True, sparse=True
+        )
+        self.test_results_collection.create_index(
+            [("test_id", 1)], unique=True
+        )
+        self.student_history_collection.create_index(
+            [("student_id", 1), ("question_id", 1)], unique=True
+        )
+        # Warnings indexes
+        self.warnings_collection.create_index([("test_id", 1)])
+        self.warnings_collection.create_index([("student_id", 1)])
+
+    # ==========================================================
+    # WARNINGS (3 warnings = termination)
+    # Warning types:
+    # - multiple_faces: Multiple faces detected in camera
+    # - object_detected: Objects/phone detected
+    # - tab_switch: Tab/window switching
+    # - face_turning: Face turned away from screen  
+    # - face_not_visible: Face not detected
+    # - screenshot: Screenshot attempt
+    # ==========================================================
     
-    def get_questions_from_bank(self, user_type: str, question_type: str, 
-                                count: int, student_id: int = None) -> List[Dict[str, Any]]:
+    VALID_WARNING_TYPES = [
+        "multiple_faces",    # Multiple faces detected
+        "object_detected",   # Objects like phone, book detected
+        "tab_switch",        # Tab or window switching
+        "face_turning",      # Face turned away
+        "face_not_visible",  # Face not detected in camera
+        "screenshot"         # Screenshot attempt
+    ]
+    
+    MAX_WARNINGS = 3
+
+    def add_warning(self, test_id: str, student_id: int, warning_type: str, 
+                    details: Dict = None) -> Dict[str, Any]:
         """
-        Get questions from bank, EXCLUDING ones the student has already seen.
-        For large scale - prevents repetition across all users.
+        Add a proctoring warning.
+        After 3 warnings, test is terminated.
         """
-        try:
-            # Get question IDs this student has already seen
-            seen_question_ids = set()
-            if student_id:
-                seen_docs = self.student_history_collection.find(
-                    {"student_id": student_id},
-                    {"question_id": 1}
-                )
-                seen_question_ids = {doc["question_id"] for doc in seen_docs}
-                logger.info(f"📊 Student {student_id} has seen {len(seen_question_ids)} questions")
+        import time
+        
+        if warning_type not in self.VALID_WARNING_TYPES:
+            warning_type = "unknown"
+        
+        timestamp = time.time()
+        
+        warning_event = {
+            "type": warning_type,
+            "timestamp": timestamp,
+            "timestamp_readable": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            "details": details or {}
+        }
+        
+        existing = self.warnings_collection.find_one({"test_id": test_id})
+        
+        if existing:
+            new_count = existing.get("warning_count", 0) + 1
             
-            # Query for questions NOT seen by this student
-            query = {
-                "user_type": user_type,
-                "question_type": question_type,
-                "active": {"$ne": False}
+            self.warnings_collection.update_one(
+                {"test_id": test_id},
+                {
+                    "$push": {"warnings": warning_event},
+                    "$set": {
+                        "warning_count": new_count,
+                        "last_warning_at": timestamp,
+                        "last_warning_type": warning_type
+                    }
+                }
+            )
+        else:
+            new_count = 1
+            self.warnings_collection.insert_one({
+                "test_id": test_id,
+                "student_id": student_id,
+                "warning_count": new_count,
+                "warnings": [warning_event],
+                "first_warning_at": timestamp,
+                "last_warning_at": timestamp,
+                "last_warning_type": warning_type,
+                "terminated": False,
+                "termination_reason": None,
+                "created_at": timestamp
+            })
+        
+        should_terminate = new_count >= self.MAX_WARNINGS
+        
+        if should_terminate:
+            self._mark_test_terminated(test_id)
+        
+        # User friendly messages
+        messages = {
+            "multiple_faces": "Multiple faces detected. Only the test taker should be visible.",
+            "object_detected": "Suspicious object detected (phone/book). Please remove it.",
+            "tab_switch": "Tab switching detected. Stay on the test window.",
+            "face_turning": "Please face the screen directly.",
+            "face_not_visible": "Your face is not visible. Adjust your camera.",
+            "screenshot": "Screenshot attempt detected. This is not allowed."
+        }
+        
+        message = messages.get(warning_type, "Warning recorded.")
+        if new_count < self.MAX_WARNINGS:
+            message += f" Warning {new_count}/{self.MAX_WARNINGS}. {self.MAX_WARNINGS - new_count} remaining."
+        else:
+            message += " Maximum warnings reached. Test terminated."
+        
+        logger.warning(f"⚠️ Warning #{new_count} for test {test_id}: {warning_type}")
+        
+        return {
+            "warning_count": new_count,
+            "max_warnings": self.MAX_WARNINGS,
+            "warnings_remaining": max(0, self.MAX_WARNINGS - new_count),
+            "should_terminate": should_terminate,
+            "warning_type": warning_type,
+            "message": message
+        }
+
+    def _mark_test_terminated(self, test_id: str):
+        """Mark test as terminated due to warnings"""
+        doc = self.warnings_collection.find_one({"test_id": test_id})
+        warnings_list = doc.get("warnings", []) if doc else []
+        
+        warning_summary = [f"{w['type']} at {w['timestamp_readable']}" for w in warnings_list]
+        termination_reason = f"Test terminated after {self.MAX_WARNINGS} warnings: " + "; ".join(warning_summary)
+        
+        self.warnings_collection.update_one(
+            {"test_id": test_id},
+            {
+                "$set": {
+                    "terminated": True,
+                    "terminated_at": datetime.utcnow().timestamp(),
+                    "termination_reason": termination_reason
+                }
             }
-            
-            # Exclude seen questions
-            if seen_question_ids:
-                query["question_id"] = {"$nin": list(seen_question_ids)}
-            
-            # Get questions sorted by usage_count (prefer less used)
-            cursor = self.question_bank_collection.find(query).sort([
-                ("usage_count", 1),  # Least used first
-                ("created_at", -1)   # Newer questions preferred
-            ]).limit(count * 2)  # Get extra in case some are filtered
-            
-            questions = list(cursor)
-            
-            if len(questions) < count:
-                logger.warning(f"⚠️ Only {len(questions)} unused questions available (need {count})")
-                # If not enough, include some seen questions (better than nothing)
-                if len(questions) < count:
-                    remaining = count - len(questions)
-                    seen_cursor = self.question_bank_collection.find({
-                        "user_type": user_type,
-                        "question_type": question_type,
-                        "active": {"$ne": False},
-                        "question_id": {"$in": list(seen_question_ids)}
-                    }).sort("usage_count", 1).limit(remaining)
-                    questions.extend(list(seen_cursor))
-            
-            # Shuffle and take required count
-            random.shuffle(questions)
-            selected = questions[:count]
-            
-            # Increment usage count for selected questions
-            if selected:
-                selected_ids = [q["question_id"] for q in selected if q.get("question_id")]
-                if selected_ids:
-                    self.question_bank_collection.update_many(
-                        {"question_id": {"$in": selected_ids}},
-                        {"$inc": {"usage_count": 1}}
-                    )
-            
-            logger.info(f"✅ Retrieved {len(selected)} {question_type} questions for {user_type}")
-            return selected
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to get questions from bank: {e}")
-            return []
-    
-    def add_questions_to_bank(self, questions: List[Dict[str, Any]], user_type: str) -> int:
-        """Add new questions to bank with deduplication"""
+        )
+        
+        logger.error(f"🚫 Test {test_id} TERMINATED: {termination_reason}")
+
+    def get_warnings(self, test_id: str) -> Dict[str, Any]:
+        """Get all warnings for a test"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"_id": 0})
+        if not doc:
+            return {"test_id": test_id, "warning_count": 0, "warnings": [], "terminated": False}
+        return doc
+
+    def get_warning_count(self, test_id: str) -> int:
+        """Get current warning count"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"warning_count": 1})
+        return doc.get("warning_count", 0) if doc else 0
+
+    def is_test_terminated(self, test_id: str) -> bool:
+        """Check if test is terminated"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"terminated": 1})
+        return doc.get("terminated", False) if doc else False
+
+    def get_termination_reason(self, test_id: str) -> str:
+        """Get termination reason"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"termination_reason": 1})
+        return doc.get("termination_reason", "") if doc else ""
+
+    # ==========================================================
+    # CONTENT (AUTO ROUTING)
+    # ==========================================================
+    def get_weekly_summaries(self, user_type: str):
+        """
+        Get summaries from MongoDB.
+        
+        ROUTING:
+        - dev → Developer collection (Python/Coding content)
+        - non_dev → Non-Developer collection (SAP/Business content)
+        """
+        if user_type == "dev":
+            collection = self.developer_collection
+            collection_name = "Developer"
+            logger.info(f"📂 DB Query: {collection_name} collection (Python/Coding)")
+        else:
+            collection = self.non_developer_collection
+            collection_name = "Non-Developer"
+            logger.info(f"📂 DB Query: {collection_name} collection (SAP/Business)")
+        
+        # Query for documents with valid summary field
+        result = list(
+            collection.find(
+                {"summary": {"$exists": True, "$ne": "", "$type": "string"}},
+                {"summary": 1}
+            ).limit(50)
+        )
+        
+        logger.info(f"📂 DB Result: Found {len(result)} documents with 'summary' field in {collection_name}")
+        
+        return result
+
+    # ==========================================================
+    # QUESTION BANK
+    # ==========================================================
+    def add_questions_to_bank(self, questions: List[Dict[str, Any]], user_type: str):
         added = 0
         for q in questions:
             try:
-                # Create unique hash for deduplication
-                question_text = q.get("question", "")
-                question_hash = hashlib.md5(question_text.encode()).hexdigest()
-                
-                # Check if already exists
-                existing = self.question_bank_collection.find_one({"question_hash": question_hash})
-                if existing:
-                    continue
-                
-                # Add new question
-                question_id = str(uuid.uuid4())
-                doc = {
-                    "question_id": question_id,
-                    "question_hash": question_hash,
+                q_text = q.get("question", "")
+                q_hash = hashlib.md5(q_text.encode()).hexdigest()
+
+                self.question_bank_collection.insert_one({
+                    "question_id": str(uuid.uuid4()),
+                    "question_hash": q_hash,
                     "user_type": user_type,
                     "question_type": q.get("question_type", "mcq"),
-                    "question": question_text,
-                    "title": q.get("title", "Question"),
-                    "difficulty": q.get("difficulty", "Medium"),
+                    "question": q_text,
                     "options": q.get("options"),
                     "correct_answer": q.get("correct_answer"),
                     "correct_option_text": q.get("correct_option_text"),
                     "usage_count": 0,
                     "active": True,
                     "created_at": datetime.utcnow()
-                }
-                
-                self.question_bank_collection.insert_one(doc)
+                })
                 added += 1
-                
             except pymongo.errors.DuplicateKeyError:
-                continue
-            except Exception as e:
-                logger.warning(f"Failed to add question: {e}")
-        
-        logger.info(f"📦 Added {added} new questions to bank")
-        return added
-    
-    def mark_questions_as_seen(self, student_id: int, question_ids: List[str]):
-        """Mark questions as seen by student - prevents repetition"""
-        try:
-            if not student_id or not question_ids:
-                return
-            
-            for qid in question_ids:
-                try:
-                    self.student_history_collection.update_one(
-                        {"student_id": student_id, "question_id": qid},
-                        {
-                            "$set": {"seen_at": datetime.utcnow()},
-                            "$inc": {"times_seen": 1}
-                        },
-                        upsert=True
-                    )
-                except pymongo.errors.DuplicateKeyError:
-                    pass
-            
-            logger.info(f"📝 Marked {len(question_ids)} questions as seen for student {student_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to mark questions as seen: {e}")
-    
-    def check_bank_needs_refill(self, user_type: str) -> Dict[str, int]:
-        """Check if question bank needs more questions"""
-        needs = {}
-        
-        question_types = ["aptitude", "mcq"]
-        if user_type == "dev":
-            question_types.append("coding")
-        
-        for q_type in question_types:
-            count = self.question_bank_collection.count_documents({
-                "user_type": user_type,
-                "question_type": q_type,
-                "active": {"$ne": False},
-                "usage_count": {"$lt": config.QUESTION_MAX_USAGE}
-            })
-            
-            min_required = getattr(config, f"MIN_BANK_{q_type.upper()}", 50)
-            if count < min_required:
-                batch_size = getattr(config, f"BATCH_SIZE_{q_type.upper()}", 20)
-                needs[q_type] = batch_size
-        
-        return needs
-    
-    def get_question_bank_stats(self) -> Dict[str, Any]:
-        """Get question bank statistics"""
-        try:
-            stats = {}
-            for user_type in ["dev", "non_dev"]:
-                question_types = ["aptitude", "mcq"]
-                if user_type == "dev":
-                    question_types.append("coding")
-                
-                user_stats = {}
-                for q_type in question_types:
-                    count = self.question_bank_collection.count_documents({
-                        "user_type": user_type,
-                        "question_type": q_type,
-                        "active": {"$ne": False}
-                    })
-                    user_stats[q_type] = count
-                
-                stats[user_type] = user_stats
-            
-            return stats
-        except Exception as e:
-            return {"error": str(e)}
-    
-    def retire_overused_questions(self):
-        """Retire questions that have been used too many times"""
-        try:
-            result = self.question_bank_collection.update_many(
-                {"usage_count": {"$gte": config.QUESTION_MAX_USAGE}},
-                {"$set": {"active": False, "retired_at": datetime.utcnow()}}
-            )
-            if result.modified_count > 0:
-                logger.info(f"🔄 Retired {result.modified_count} overused questions")
-        except Exception as e:
-            logger.error(f"Failed to retire questions: {e}")
+                pass
 
-    # ================================================================
-    # TEST RESULTS
-    # ================================================================
-    
-    def save_test_results(self, test_id: str, test_data: Dict[str, Any], 
-                         evaluation_result: Dict[str, Any]):
-        """Save test results to database"""
-        try:
-            doc = {
-                "test_id": test_id,
-                "user_type": test_data.get("user_type"),
-                "student_id": test_data.get("student_id"),
-                "total_questions": test_data.get("total_questions"),
-                "total_correct": evaluation_result.get("total_correct", 0),
-                "percentage": evaluation_result.get("percentage", 0),
-                "section_scores": evaluation_result.get("section_scores", {}),
-                "answers": test_data.get("answers", []),
-                "evaluation_report": evaluation_result.get("evaluation_report", ""),
-                "terminated": evaluation_result.get("terminated", False),
-                "termination_reason": evaluation_result.get("termination_reason"),
-                "created_at": datetime.utcnow()
-            }
-            
-            self.test_results_collection.update_one(
-                {"test_id": test_id},
-                {"$set": doc},
+        return added
+
+    def mark_questions_as_seen(self, student_id: int, question_ids: List[str]):
+        for qid in question_ids:
+            self.student_history_collection.update_one(
+                {"student_id": student_id, "question_id": qid},
+                {"$set": {"seen_at": datetime.utcnow()}},
                 upsert=True
             )
+
+    def get_seen_question_ids(self, student_id: int) -> List[str]:
+        """Get question IDs this student has already seen"""
+        cursor = self.student_history_collection.find(
+            {"student_id": student_id},
+            {"question_id": 1}
+        )
+        return [doc["question_id"] for doc in cursor]
+
+    def get_unseen_questions(self, student_id: int, user_type: str, 
+                             question_type: str, count: int) -> List[Dict]:
+        """Get questions student has NOT seen yet"""
+        seen_ids = self.get_seen_question_ids(student_id)
+        
+        cursor = self.question_bank_collection.find(
+            {
+                "user_type": user_type,
+                "question_type": question_type,
+                "active": True,
+                "question_id": {"$nin": seen_ids}
+            }
+        ).sort("usage_count", 1).limit(count)  # Prefer less-used questions
+        
+        return list(cursor)
+
+    def increment_question_usage(self, question_ids: List[str]):
+        """Increment usage count for questions"""
+        self.question_bank_collection.update_many(
+            {"question_id": {"$in": question_ids}},
+            {"$inc": {"usage_count": 1}}
+        )
+
+    # ==========================================================
+    # WARNINGS (3 warnings = termination)
+    # ==========================================================
+    def add_warning(self, test_id: str, student_id: int, warning_type: str, 
+                    details: Dict = None) -> Dict[str, Any]:
+        """
+        Add a proctoring warning.
+        
+        Warning types:
+        - multiple_faces: Multiple faces detected
+        - object_detected: Suspicious object detected
+        - tab_switch: Tab/window switching
+        - face_turning: Face turned away
+        - face_not_visible: Face not detected
+        - screenshot: Screenshot attempt detected
+        """
+        import time
+        
+        timestamp = time.time()
+        
+        warning_event = {
+            "type": warning_type,
+            "timestamp": timestamp,
+            "timestamp_readable": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            "details": details or {}
+        }
+        
+        # Find existing or create new
+        existing = self.warnings_collection.find_one({"test_id": test_id})
+        
+        if existing:
+            new_count = existing.get("warning_count", 0) + 1
             
-            logger.info(f"💾 Saved test results: {test_id}")
+            self.warnings_collection.update_one(
+                {"test_id": test_id},
+                {
+                    "$push": {"warnings": warning_event},
+                    "$set": {
+                        "warning_count": new_count,
+                        "last_warning_at": timestamp,
+                        "last_warning_type": warning_type
+                    }
+                }
+            )
+        else:
+            new_count = 1
+            self.warnings_collection.insert_one({
+                "test_id": test_id,
+                "student_id": student_id,
+                "warning_count": new_count,
+                "warnings": [warning_event],
+                "first_warning_at": timestamp,
+                "last_warning_at": timestamp,
+                "last_warning_type": warning_type,
+                "terminated": False,
+                "termination_reason": None,
+                "created_at": timestamp
+            })
+        
+        # Check if should terminate (3 warnings)
+        should_terminate = new_count >= 3
+        
+        if should_terminate:
+            self._mark_test_terminated(test_id)
+        
+        logger.warning(f"⚠️ Warning #{new_count} for test {test_id}: {warning_type}")
+        
+        return {
+            "warning_count": new_count,
+            "max_warnings": 3,
+            "warnings_remaining": max(0, 3 - new_count),
+            "should_terminate": should_terminate,
+            "warning_type": warning_type
+        }
+
+    def _mark_test_terminated(self, test_id: str):
+        """Mark test as terminated due to warnings"""
+        doc = self.warnings_collection.find_one({"test_id": test_id})
+        warnings_list = doc.get("warnings", []) if doc else []
+        
+        # Build termination reason
+        warning_summary = [f"{w['type']} at {w['timestamp_readable']}" for w in warnings_list]
+        termination_reason = f"Session terminated after 3 warnings: " + "; ".join(warning_summary)
+        
+        self.warnings_collection.update_one(
+            {"test_id": test_id},
+            {
+                "$set": {
+                    "terminated": True,
+                    "terminated_at": datetime.utcnow().timestamp(),
+                    "termination_reason": termination_reason
+                }
+            }
+        )
+        
+        logger.error(f"🚫 Test {test_id} TERMINATED: {termination_reason}")
+
+    def get_warnings(self, test_id: str) -> Dict[str, Any]:
+        """Get all warnings for a test"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"_id": 0})
+        if not doc:
+            return {"test_id": test_id, "warning_count": 0, "warnings": [], "terminated": False}
+        return doc
+
+    def get_warning_count(self, test_id: str) -> int:
+        """Get current warning count"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"warning_count": 1})
+        return doc.get("warning_count", 0) if doc else 0
+
+    def is_test_terminated(self, test_id: str) -> bool:
+        """Check if test is terminated due to warnings"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"terminated": 1})
+        return doc.get("terminated", False) if doc else False
+
+    def get_termination_reason(self, test_id: str) -> str:
+        """Get termination reason"""
+        doc = self.warnings_collection.find_one({"test_id": test_id}, {"termination_reason": 1})
+        return doc.get("termination_reason", "") if doc else ""
+
+    # ==========================================================
+    # TEST RESULTS (EVALUATION + PDF)
+    # ==========================================================
+    def save_test_results(
+        self,
+        test_id: str,
+        test_data: Dict[str, Any],
+        evaluation_result: Dict[str, Any]
+    ):
+        """Save test results with warning info"""
+        
+        # Get warnings info
+        warnings_data = self.get_warnings(test_id)
+
+        doc = {
+            "test_id": test_id,
+            "user_type": test_data.get("user_type"),
+            "student_id": test_data.get("student_id"),
+            "total_questions": test_data.get("total_questions"),
+
+            # Scores
+            "score": evaluation_result.get("total_correct", 0),
+            "score_percentage": round(
+                (evaluation_result.get("total_correct", 0) /
+                 max(test_data.get("total_questions", 1), 1)) * 100, 1
+            ),
+
+            # Evaluation details
+            "scores": evaluation_result.get("scores", []),
+            "feedbacks": evaluation_result.get("feedbacks", []),
+            "section_scores": evaluation_result.get("section_scores", {}),
+            "evaluation_report": evaluation_result.get("evaluation_report", ""),
+
+            "answers": test_data.get("answers", []),
+            "created_at": datetime.utcnow().timestamp(),
             
-        except Exception as e:
-            logger.error(f"Failed to save test results: {e}")
-    
-    def _get_student_info(self) -> Dict[str, Any]:
-        """Get current student info (placeholder)"""
+            # WARNING INFO (audit trail)
+            "warning_count": warnings_data.get("warning_count", 0),
+            "warnings": warnings_data.get("warnings", []),
+            "terminated_by_warnings": warnings_data.get("terminated", False),
+            "termination_reason": warnings_data.get("termination_reason")
+        }
+
+        self.test_results_collection.update_one(
+            {"test_id": test_id},
+            {"$set": doc},
+            upsert=True
+        )
+
+        logger.info(f"💾 Saved test {test_id} | Warnings: {warnings_data.get('warning_count', 0)}")
+
+    # ==========================================================
+    # STUDENT
+    # ==========================================================
+    def _get_student_info(self):
         return {"student_id": random.randint(1000, 9999)}
 
 
-# Singleton
+# ==========================================================
+# SINGLETON
+# ==========================================================
 _db_manager = None
+
 
 def get_db_manager() -> DatabaseManager:
     global _db_manager
@@ -385,14 +503,13 @@ def get_db_manager() -> DatabaseManager:
         _db_manager = DatabaseManager()
     return _db_manager
 
+
 def close_db_manager():
-    """Close database connections"""
     global _db_manager
-    if _db_manager is not None:
+    if _db_manager:
         try:
-            if hasattr(_db_manager, 'mongo_client'):
-                _db_manager.mongo_client.close()
-                logger.info("🔌 MongoDB connection closed")
+            _db_manager.mongo_client.close()
+            logger.info("🔌 MongoDB closed")
         except Exception as e:
-            logger.error(f"Error closing database: {e}")
+            logger.error(f"Mongo close error: {e}")
         _db_manager = None

@@ -1,619 +1,501 @@
 # weekend_mocktest/services/pdf_service.py
-import logging
+"""
+PDF Service - Generate Professional Test Result PDFs
+
+Features:
+- Section-wise breakdown (Aptitude → MCQ → Coding)
+- Question-by-question analysis
+- User Answer vs Correct Answer
+- AI-generated explanations
+- ✅/❌ status indicators
+- Professional formatting
+"""
+
 import io
-import datetime
-import re
-from typing import Dict, Any, List, Optional
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import LETTER
-from reportlab.lib.colors import HexColor
-from reportlab.lib.units import inch
-from ..core.config import config
-from ..core.database import get_db_manager
+import logging
+import os
+from typing import Dict, Any, Optional, List
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
 class PDFService:
-    """Service for generating professional PDF reports"""
+    """PDF generation service for detailed test results"""
     
     def __init__(self):
+        from ..core.database import get_db_manager
         self.db_manager = get_db_manager()
         
-        # Colors
-        self.colors = {
-            "primary": HexColor("#1e40af"),      # Dark blue
-            "secondary": HexColor("#7c3aed"),     # Purple
-            "success": HexColor("#059669"),       # Green
-            "warning": HexColor("#d97706"),       # Orange
-            "danger": HexColor("#dc2626"),        # Red
-            "gray": HexColor("#6b7280"),
-            "light_gray": HexColor("#e5e7eb"),
-            "dark": HexColor("#111827"),
-            "white": HexColor("#ffffff"),
-            "aptitude": HexColor("#3b82f6"),      # Blue
-            "mcq": HexColor("#8b5cf6"),           # Purple
-            "theory": HexColor("#06b6d4"),        # Cyan
-            "coding": HexColor("#10b981"),        # Emerald
-        }
-    
+        # Create output directory
+        self.output_dir = "static/pdf_reports"
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        logger.info("📄 PDF Service initialized with AI Explanations support")
+
     async def generate_test_results_pdf(self, test_id: str) -> bytes:
-        """Generate comprehensive PDF report for test results"""
-        logger.info(f"📄 Generating PDF for test: {test_id}")
-        
+        """Generate comprehensive PDF report with AI explanations"""
         try:
-            # Get test results from database
-            doc = self.db_manager.test_results_collection.find_one(
-                {"test_id": test_id}, 
-                {"_id": 0}
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib import colors
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.platypus import (
+                SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+                PageBreak, HRFlowable, ListFlowable, ListItem
             )
-            
-            if not doc:
-                raise Exception("Test results not found")
-            
-            # Create PDF buffer
-            buffer = io.BytesIO()
-            
-            # Create PDF document
-            pdf = canvas.Canvas(buffer, pagesize=LETTER)
-            width, height = LETTER
-            
-            # Generate PDF content
-            self._create_pdf_content(pdf, doc, width, height)
-            
-            # Save PDF
-            pdf.save()
-            buffer.seek(0)
-            
-            logger.info(f"✅ PDF generated successfully for test: {test_id}")
-            return buffer.getvalue()
-            
-        except Exception as e:
-            logger.error(f"❌ PDF generation failed: {e}")
-            raise Exception(f"PDF generation failed: {e}")
-    
-    def _create_pdf_content(self, pdf: canvas.Canvas, doc: Dict[str, Any], 
-                          width: float, height: float):
-        """Create PDF content with professional layout"""
-        
-        user_type = doc.get('user_type', 'non_dev')
-        
-        # Page 1: Header and Summary
-        y = self._add_header(pdf, doc, width, height)
-        
-        # Candidate Information Box
-        y = self._add_candidate_info(pdf, doc, y, width)
-        
-        # Overall Score Card
-        y = self._add_score_card(pdf, doc, y, width)
-        
-        # Section Performance
-        y = self._add_section_breakdown(pdf, doc, y, width, user_type)
-        
-        # Page break for detailed feedback
-        pdf.showPage()
-        y = height - 50
-        
-        # Detailed Questions & Answers
-        y = self._add_detailed_feedback(pdf, doc, y, width, height, user_type)
-        
-        # Add footer on last page
-        self._add_footer(pdf, width, doc)
-    
-    def _add_header(self, pdf: canvas.Canvas, doc: Dict[str, Any], 
-                   width: float, height: float) -> float:
-        """Add professional header"""
-        user_type = doc.get('user_type', 'non_dev')
-        
-        # Title based on test type
-        if user_type == 'dev':
-            title = "Developer Assessment Report"
-            subtitle = "Aptitude • Theory • Coding"
-        else:
-            title = "Professional Assessment Report"
-            subtitle = "Aptitude • Multiple Choice Questions"
-        
-        # Background header bar
-        pdf.setFillColor(self.colors["primary"])
-        pdf.rect(0, height - 80, width, 80, fill=1, stroke=0)
-        
-        # Title
-        pdf.setFillColor(self.colors["white"])
-        pdf.setFont("Helvetica-Bold", 24)
-        pdf.drawCentredString(width/2, height - 45, title)
-        
-        # Subtitle
-        pdf.setFont("Helvetica", 12)
-        pdf.drawCentredString(width/2, height - 65, subtitle)
-        
-        # Reset colors
-        pdf.setFillColor(self.colors["dark"])
-        
-        return height - 100
-    
-    def _add_candidate_info(self, pdf: canvas.Canvas, doc: Dict[str, Any], 
-                           y: float, width: float) -> float:
-        """Add candidate information box"""
-        
-        # Box background
-        box_height = 70
-        pdf.setFillColor(self.colors["light_gray"])
-        pdf.roundRect(40, y - box_height, width - 80, box_height, 8, fill=1, stroke=0)
-        
-        pdf.setFillColor(self.colors["dark"])
-        
-        # Left column
-        pdf.setFont("Helvetica-Bold", 11)
-        pdf.drawString(55, y - 20, "Candidate:")
-        pdf.drawString(55, y - 38, "Student ID:")
-        pdf.drawString(55, y - 56, "Test Date:")
-        
-        pdf.setFont("Helvetica", 11)
-        pdf.drawString(130, y - 20, doc.get('name', 'N/A'))
-        pdf.drawString(130, y - 38, str(doc.get('Student_ID', 'N/A')))
-        pdf.drawString(130, y - 56, self._format_timestamp(doc.get('timestamp', 0)))
-        
-        # Right column
-        user_type = doc.get('user_type', 'non_dev')
-        test_type = "Developer" if user_type == 'dev' else "Non-Developer"
-        
-        pdf.setFont("Helvetica-Bold", 11)
-        pdf.drawString(320, y - 20, "Test Type:")
-        pdf.drawString(320, y - 38, "Test ID:")
-        
-        pdf.setFont("Helvetica", 11)
-        pdf.drawString(400, y - 20, test_type)
-        pdf.drawString(400, y - 38, doc.get('test_id', 'N/A')[:20] + "...")
-        
-        return y - box_height - 20
-    
-    def _add_score_card(self, pdf: canvas.Canvas, doc: Dict[str, Any], 
-                       y: float, width: float) -> float:
-        """Add overall score card with visual indicator"""
-        
-        score = doc.get('score', 0)
-        total = doc.get('total_questions', 30)
-        percentage = doc.get('score_percentage', 0)
-        
-        # Determine status and color
-        if percentage >= 70:
-            status = "EXCELLENT"
-            status_color = self.colors["success"]
-            bg_color = HexColor("#d1fae5")
-        elif percentage >= 50:
-            status = "PASS"
-            status_color = self.colors["warning"]
-            bg_color = HexColor("#fef3c7")
-        else:
-            status = "NEEDS IMPROVEMENT"
-            status_color = self.colors["danger"]
-            bg_color = HexColor("#fee2e2")
-        
-        # Score card background
-        card_height = 100
-        pdf.setFillColor(bg_color)
-        pdf.roundRect(40, y - card_height, width - 80, card_height, 10, fill=1, stroke=0)
-        
-        # Score circle
-        circle_x = 120
-        circle_y = y - card_height/2
-        circle_radius = 35
-        
-        pdf.setFillColor(status_color)
-        pdf.circle(circle_x, circle_y, circle_radius, fill=1, stroke=0)
-        
-        # Score text inside circle
-        pdf.setFillColor(self.colors["white"])
-        pdf.setFont("Helvetica-Bold", 22)
-        pdf.drawCentredString(circle_x, circle_y + 5, f"{score}")
-        pdf.setFont("Helvetica", 10)
-        pdf.drawCentredString(circle_x, circle_y - 12, f"of {total}")
-        
-        # Percentage and status
-        pdf.setFillColor(self.colors["dark"])
-        pdf.setFont("Helvetica-Bold", 36)
-        pdf.drawString(200, y - 45, f"{percentage:.1f}%")
-        
-        pdf.setFillColor(status_color)
-        pdf.setFont("Helvetica-Bold", 14)
-        pdf.drawString(200, y - 70, status)
-        
-        # Performance label
-        pdf.setFillColor(self.colors["gray"])
-        pdf.setFont("Helvetica", 10)
-        pdf.drawString(200, y - 90, "Overall Performance")
-        
-        return y - card_height - 25
-    
-    def _add_section_breakdown(self, pdf: canvas.Canvas, doc: Dict[str, Any], 
-                               y: float, width: float, user_type: str) -> float:
-        """Add section-wise performance breakdown"""
-        
-        # Section header
-        pdf.setFillColor(self.colors["dark"])
-        pdf.setFont("Helvetica-Bold", 14)
-        pdf.drawString(40, y, "📊 Section-wise Performance")
-        y -= 30
-        
-        # Parse scores from evaluation report if section_scores not available
-        section_scores = doc.get('section_scores', {})
-        
-        if not section_scores:
-            # Try to calculate from evaluation report
-            section_scores = self._calculate_section_scores(doc, user_type)
-        
-        if not section_scores:
-            pdf.setFont("Helvetica", 11)
-            pdf.setFillColor(self.colors["gray"])
-            pdf.drawString(50, y, "Section breakdown not available")
-            return y - 30
-        
-        # Define sections based on user type
-        if user_type == 'dev':
-            sections = [
-                ("aptitude", "APTITUDE", "Logical Reasoning", self.colors["aptitude"]),
-                ("theory", "THEORY", "Conceptual Knowledge", self.colors["theory"]),
-                ("coding", "CODING", "Programming Skills", self.colors["coding"]),
-            ]
-        else:
-            sections = [
-                ("aptitude", "APTITUDE", "Logical Reasoning (Q1-10)", self.colors["aptitude"]),
-                ("mcq", "MCQ", "Course Content (Q11-30)", self.colors["mcq"]),
-            ]
-        
-        bar_width = 300
-        bar_height = 25
-        
-        for sec_key, sec_name, sec_desc, color in sections:
-            if sec_key not in section_scores:
-                continue
-            
-            sec = section_scores[sec_key]
-            correct = sec.get('correct', 0)
-            total = sec.get('total', 0)
-            pct = sec.get('percentage', 0) if total > 0 else 0
-            
-            # Section name
-            pdf.setFillColor(self.colors["dark"])
-            pdf.setFont("Helvetica-Bold", 11)
-            pdf.drawString(50, y + 5, sec_name)
-            
-            # Description
-            pdf.setFillColor(self.colors["gray"])
-            pdf.setFont("Helvetica", 9)
-            pdf.drawString(50, y - 10, sec_desc)
-            
-            # Background bar
-            bar_x = 200
-            pdf.setFillColor(self.colors["light_gray"])
-            pdf.roundRect(bar_x, y - 5, bar_width, bar_height, 4, fill=1, stroke=0)
-            
-            # Progress bar
-            if pct > 0:
-                pdf.setFillColor(color)
-                progress_width = bar_width * (pct / 100)
-                pdf.roundRect(bar_x, y - 5, progress_width, bar_height, 4, fill=1, stroke=0)
-            
-            # Score text
-            pdf.setFillColor(self.colors["dark"])
-            pdf.setFont("Helvetica-Bold", 11)
-            score_text = f"{correct}/{total} ({pct:.0f}%)"
-            pdf.drawRightString(bar_x + bar_width + 60, y + 3, score_text)
-            
-            y -= 45
-        
-        return y - 10
-    
-    def _calculate_section_scores(self, doc: Dict[str, Any], user_type: str) -> Dict[str, Any]:
-        """Calculate section scores from answers if not stored"""
-        
-        scores_array = doc.get('scores', [])
-        if not scores_array:
-            # Try to parse from evaluation report
-            eval_report = doc.get('evaluation_report', '')
-            match = re.search(r'SCORES:\s*\[([\d,\s]+)\]', eval_report)
-            if match:
-                try:
-                    scores_array = [int(x.strip()) for x in match.group(1).split(',')]
-                except:
-                    return {}
-        
-        if not scores_array:
-            return {}
-        
-        if user_type == 'dev':
-            # Developer: Aptitude (1-3), Theory (4-6), Coding (7-10)
-            apt_scores = scores_array[:3] if len(scores_array) >= 3 else []
-            theory_scores = scores_array[3:6] if len(scores_array) >= 6 else []
-            coding_scores = scores_array[6:] if len(scores_array) > 6 else []
-            
-            return {
-                "aptitude": {
-                    "correct": sum(apt_scores),
-                    "total": len(apt_scores),
-                    "percentage": (sum(apt_scores) / len(apt_scores) * 100) if apt_scores else 0
-                },
-                "theory": {
-                    "correct": sum(theory_scores),
-                    "total": len(theory_scores),
-                    "percentage": (sum(theory_scores) / len(theory_scores) * 100) if theory_scores else 0
-                },
-                "coding": {
-                    "correct": sum(coding_scores),
-                    "total": len(coding_scores),
-                    "percentage": (sum(coding_scores) / len(coding_scores) * 100) if coding_scores else 0
-                }
-            }
-        else:
-            # Non-developer: Aptitude (1-10), MCQ (11-30)
-            apt_scores = scores_array[:10] if len(scores_array) >= 10 else scores_array
-            mcq_scores = scores_array[10:] if len(scores_array) > 10 else []
-            
-            return {
-                "aptitude": {
-                    "correct": sum(apt_scores),
-                    "total": len(apt_scores),
-                    "percentage": (sum(apt_scores) / len(apt_scores) * 100) if apt_scores else 0
-                },
-                "mcq": {
-                    "correct": sum(mcq_scores),
-                    "total": len(mcq_scores),
-                    "percentage": (sum(mcq_scores) / len(mcq_scores) * 100) if mcq_scores else 0
-                }
-            }
-    
-    def _add_detailed_feedback(self, pdf: canvas.Canvas, doc: Dict[str, Any], 
-                               y: float, width: float, height: float, 
-                               user_type: str) -> float:
-        """Add detailed question-by-question feedback"""
-        
-        # Header
-        pdf.setFillColor(self.colors["primary"])
-        pdf.setFont("Helvetica-Bold", 16)
-        pdf.drawString(40, y, "📝 Detailed Feedback & Answers")
-        y -= 30
-        
-        # Parse evaluation report
-        eval_report = doc.get('evaluation_report', '')
-        questions = self._parse_evaluation_questions(eval_report)
-        
-        if not questions:
-            pdf.setFont("Helvetica", 11)
-            pdf.setFillColor(self.colors["gray"])
-            pdf.drawString(50, y, "Detailed feedback not available")
-            return y - 30
-        
-        # Define section breaks
-        if user_type == 'dev':
-            section_breaks = {1: "APTITUDE SECTION", 4: "THEORY SECTION", 7: "CODING SECTION"}
-        else:
-            section_breaks = {1: "APTITUDE SECTION (Q1-10)", 11: "MCQ SECTION (Q11-30)"}
-        
-        for q in questions:
-            q_num = q.get('number', 0)
-            
-            # Check for section header
-            if q_num in section_breaks:
-                if y < 150:
-                    pdf.showPage()
-                    y = height - 50
-                
-                # Section divider
-                pdf.setFillColor(self.colors["primary"])
-                pdf.setFont("Helvetica-Bold", 12)
-                pdf.drawString(40, y, f"━━━ {section_breaks[q_num]} ━━━")
-                y -= 25
-            
-            # Check if need new page
-            if y < 120:
-                pdf.showPage()
-                y = height - 50
-            
-            # Question box
-            y = self._add_question_box(pdf, q, y, width)
-        
-        return y
-    
-    def _add_question_box(self, pdf: canvas.Canvas, q: Dict[str, Any], 
-                         y: float, width: float) -> float:
-        """Add a single question feedback box"""
-        
-        is_correct = q.get('score', 0) == 1
-        
-        # Question header with status indicator
-        if is_correct:
-            status_color = self.colors["success"]
-            status_icon = "✓"
-        else:
-            status_color = self.colors["danger"]
-            status_icon = "✗"
-        
-        # Question number and status
-        pdf.setFillColor(status_color)
-        pdf.setFont("Helvetica-Bold", 11)
-        pdf.drawString(40, y, f"{status_icon} Question {q.get('number', '?')}")
-        
-        # Score badge
-        score_text = "CORRECT" if is_correct else "INCORRECT"
-        pdf.setFont("Helvetica", 9)
-        pdf.drawRightString(width - 40, y, score_text)
-        
-        y -= 18
-        
-        # Question text (wrapped)
-        pdf.setFillColor(self.colors["dark"])
-        pdf.setFont("Helvetica", 10)
-        question_text = q.get('question', 'N/A')
-        y = self._draw_wrapped_text(pdf, question_text, 50, y, width - 100, 12)
-        
-        y -= 5
-        
-        # Correct answer
-        pdf.setFillColor(self.colors["success"])
-        pdf.setFont("Helvetica-Bold", 9)
-        pdf.drawString(50, y, "Correct Answer:")
-        pdf.setFont("Helvetica", 9)
-        correct_ans = q.get('correct_answer', 'N/A')
-        if len(correct_ans) > 60:
-            correct_ans = correct_ans[:60] + "..."
-        pdf.drawString(130, y, correct_ans)
-        y -= 14
-        
-        # User's answer
-        user_color = self.colors["success"] if is_correct else self.colors["danger"]
-        pdf.setFillColor(user_color)
-        pdf.setFont("Helvetica-Bold", 9)
-        pdf.drawString(50, y, "Your Answer:")
-        pdf.setFont("Helvetica", 9)
-        user_ans = q.get('user_answer', 'N/A')
-        if len(user_ans) > 60:
-            user_ans = user_ans[:60] + "..."
-        pdf.drawString(130, y, user_ans)
-        y -= 14
-        
-        # Brief explanation (only if wrong)
-        if not is_correct and q.get('explanation'):
-            pdf.setFillColor(self.colors["gray"])
-            pdf.setFont("Helvetica-Oblique", 9)
-            explanation = q.get('explanation', '')[:100]
-            if len(q.get('explanation', '')) > 100:
-                explanation += "..."
-            pdf.drawString(50, y, f"💡 {explanation}")
-            y -= 14
-        
-        # Divider line
-        pdf.setStrokeColor(self.colors["light_gray"])
-        pdf.setLineWidth(0.5)
-        pdf.line(40, y, width - 40, y)
-        
-        return y - 15
-    
-    def _parse_evaluation_questions(self, eval_report: str) -> List[Dict[str, Any]]:
-        """Parse evaluation report into structured questions"""
-        
-        questions = []
-        
-        # Split by question markers
-        pattern = r'---+\s*Question\s+(\d+)\s*---+'
-        parts = re.split(pattern, eval_report, flags=re.IGNORECASE)
-        
-        if len(parts) < 2:
-            return questions
-        
-        # Process pairs (question_number, content)
-        for i in range(1, len(parts), 2):
-            if i + 1 >= len(parts):
-                break
-            
+            from reportlab.lib.units import inch, cm
+            from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+        except ImportError:
+            logger.error("ReportLab not installed")
+            raise Exception("PDF generation requires reportlab: pip install reportlab --break-system-packages")
+        
+        # Get test results from MongoDB
+        doc = self.db_manager.test_results_collection.find_one(
+            {"test_id": test_id}, {"_id": 0}
+        )
+        
+        if not doc:
+            raise Exception(f"Test results not found: {test_id}")
+        
+        # Create PDF buffer
+        buffer = io.BytesIO()
+        pdf_doc = SimpleDocTemplate(
+            buffer, 
+            pagesize=A4, 
+            topMargin=0.5*inch, 
+            bottomMargin=0.5*inch,
+            leftMargin=0.5*inch,
+            rightMargin=0.5*inch
+        )
+        
+        # Setup styles
+        styles = getSampleStyleSheet()
+        
+        # Custom styles
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=20,
+            alignment=TA_CENTER,
+            spaceAfter=20,
+            textColor=colors.HexColor('#1a365d')
+        )
+        
+        section_header_style = ParagraphStyle(
+            'SectionHeader',
+            parent=styles['Heading2'],
+            fontSize=14,
+            spaceBefore=15,
+            spaceAfter=10,
+            textColor=colors.HexColor('#2563eb')
+        )
+        
+        question_style = ParagraphStyle(
+            'QuestionStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            spaceBefore=8,
+            spaceAfter=4,
+            leftIndent=10
+        )
+        
+        answer_style = ParagraphStyle(
+            'AnswerStyle',
+            parent=styles['Normal'],
+            fontSize=9,
+            leftIndent=20,
+            textColor=colors.HexColor('#374151')
+        )
+        
+        explanation_style = ParagraphStyle(
+            'ExplanationStyle',
+            parent=styles['Normal'],
+            fontSize=9,
+            leftIndent=20,
+            textColor=colors.HexColor('#4b5563'),
+            fontName='Helvetica-Oblique'
+        )
+        
+        correct_style = ParagraphStyle(
+            'CorrectStyle',
+            parent=styles['Normal'],
+            fontSize=9,
+            leftIndent=20,
+            textColor=colors.HexColor('#059669')
+        )
+        
+        wrong_style = ParagraphStyle(
+            'WrongStyle',
+            parent=styles['Normal'],
+            fontSize=9,
+            leftIndent=20,
+            textColor=colors.HexColor('#dc2626')
+        )
+        
+        elements = []
+        
+        # ════════════════════════════════════════════════════════════
+        # HEADER
+        # ════════════════════════════════════════════════════════════
+        user_type = doc.get("user_type", "dev")
+        track_name = "Non-Developer" if user_type == "non_dev" else "Developer"
+        
+        elements.append(Paragraph(f"📋 {track_name} Mock Test Results", title_style))
+        elements.append(Spacer(1, 10))
+        
+        # ════════════════════════════════════════════════════════════
+        # TEST INFO TABLE
+        # ════════════════════════════════════════════════════════════
+        score = doc.get("score", 0)
+        total = doc.get("total_questions", 0)
+        percentage = doc.get("score_percentage", 0)
+        student_id = doc.get("Student_ID", "N/A")
+        warning_count = doc.get("warning_count", 0)
+        terminated = doc.get("terminated_by_warnings", False)
+        timestamp = doc.get("timestamp", 0)
+        
+        # Format timestamp
+        if timestamp:
             try:
-                q_num = int(parts[i])
-                content = parts[i + 1]
+                date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                date_str = "N/A"
+        else:
+            date_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Performance level
+        if percentage >= 80:
+            performance = "🏆 Excellent"
+            perf_color = colors.HexColor('#059669')
+        elif percentage >= 60:
+            performance = "👍 Good"
+            perf_color = colors.HexColor('#2563eb')
+        elif percentage >= 40:
+            performance = "📚 Average"
+            perf_color = colors.HexColor('#d97706')
+        else:
+            performance = "⚠️ Needs Improvement"
+            perf_color = colors.HexColor('#dc2626')
+        
+        info_data = [
+            ["Test ID:", test_id[:16] + "..." if len(test_id) > 16 else test_id, "Student ID:", str(student_id)],
+            ["Test Type:", f"{track_name} Assessment", "Date:", date_str],
+            ["Overall Score:", f"{score}/{total} ({percentage}%)", "Performance:", performance],
+            ["Warnings:", f"{warning_count}/3", "Status:", "TERMINATED ❌" if terminated else "Completed ✅"]
+        ]
+        
+        info_table = Table(info_data, colWidths=[1.3*inch, 2*inch, 1.3*inch, 2*inch])
+        info_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f8fafc')),
+            ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#e2e8f0')),
+            ('LINEBELOW', (0, 0), (-1, -2), 0.5, colors.HexColor('#e2e8f0')),
+        ]))
+        
+        elements.append(info_table)
+        elements.append(Spacer(1, 20))
+        
+        # ════════════════════════════════════════════════════════════
+        # SECTION SCORES SUMMARY
+        # ════════════════════════════════════════════════════════════
+        section_scores = doc.get("section_scores", {})
+        
+        if section_scores:
+            elements.append(Paragraph("📊 Section-wise Performance", section_header_style))
+            
+            section_data = [["Section", "Score", "Percentage", "Status"]]
+            
+            section_icons = {
+                "aptitude": "🧮 Aptitude",
+                "mcq": "📚 MCQ/Theory",
+                "theory": "📚 Theory",
+                "coding": "💻 Coding"
+            }
+            
+            for section, data in section_scores.items():
+                if isinstance(data, dict):
+                    correct = data.get("correct", 0)
+                    total_sec = data.get("total", 0)
+                    pct = data.get("percentage", 0)
+                    
+                    section_name = section_icons.get(section, section.upper())
+                    status = "✅ Pass" if pct >= 50 else "⚠️ Needs Work"
+                    
+                    section_data.append([
+                        section_name,
+                        f"{correct}/{total_sec}",
+                        f"{pct}%",
+                        status
+                    ])
+            
+            if len(section_data) > 1:
+                section_table = Table(section_data, colWidths=[2.5*inch, 1.2*inch, 1.2*inch, 1.5*inch])
+                section_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e40af')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('TOPPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f8fafc')),
+                    ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#1e40af')),
+                    ('LINEBELOW', (0, 0), (-1, -2), 0.5, colors.HexColor('#e2e8f0')),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f1f5f9')])
+                ]))
+                elements.append(section_table)
+                elements.append(Spacer(1, 20))
+        
+        # ════════════════════════════════════════════════════════════
+        # DETAILED QUESTION REVIEW WITH AI EXPLANATIONS
+        # ════════════════════════════════════════════════════════════
+        elements.append(Paragraph("📝 Detailed Question Review", section_header_style))
+        elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#e2e8f0')))
+        elements.append(Spacer(1, 10))
+        
+        # Get section details (new format with AI explanations)
+        section_details = doc.get("section_details", {})
+        conversation_pairs = doc.get("conversation_pairs", [])
+        
+        if section_details:
+            # NEW FORMAT: Use section_details with AI explanations
+            for section_name, details in section_details.items():
+                section_icon = "🧮" if section_name == "aptitude" else "📚" if section_name in ["mcq", "theory"] else "💻"
+                section_score = details.get("score", {})
+                questions = details.get("questions", [])
                 
-                q_data = {
-                    'number': q_num,
-                    'question': self._extract_field(content, ['Question:', '📝 Question:']),
-                    'correct_answer': self._extract_field(content, ['Correct Answer:', '✅ Correct Answer:']),
-                    'user_answer': self._extract_field(content, ['User Selected:', '👤 User Selected:']),
-                    'score': self._extract_score(content),
-                    'explanation': self._extract_field(content, ['Explanation:', '💡 Explanation:'])
-                }
+                # Section header
+                elements.append(Paragraph(
+                    f"{section_icon} {section_name.upper()} SECTION ({section_score.get('correct', 0)}/{section_score.get('total', 0)} - {section_score.get('percentage', 0)}%)",
+                    section_header_style
+                ))
                 
-                questions.append(q_data)
+                for q in questions:
+                    q_num = q.get("question_number", "?")
+                    is_correct = q.get("is_correct", False)
+                    question_text = q.get("question", "")
+                    user_answer = q.get("user_answer", "No answer")
+                    correct_answer = q.get("correct_answer", "N/A")
+                    explanation = q.get("explanation", "")
+                    
+                    # Status icon
+                    status = "✅" if is_correct else "❌"
+                    status_color = colors.HexColor('#059669') if is_correct else colors.HexColor('#dc2626')
+                    
+                    # Question header
+                    q_header_style = ParagraphStyle(
+                        'QHeader',
+                        parent=styles['Normal'],
+                        fontSize=10,
+                        fontName='Helvetica-Bold',
+                        textColor=status_color,
+                        spaceBefore=10,
+                        spaceAfter=4
+                    )
+                    
+                    elements.append(Paragraph(f"{status} Q{q_num}. {question_text[:150]}{'...' if len(question_text) > 150 else ''}", q_header_style))
+                    
+                    # User answer
+                    if is_correct:
+                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", correct_style))
+                    else:
+                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", wrong_style))
+                        elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer}", correct_style))
+                    
+                    # AI Explanation
+                    if explanation:
+                        elements.append(Paragraph(f"💡 <i>{explanation}</i>", explanation_style))
+                    
+                    elements.append(Spacer(1, 5))
                 
-            except Exception as e:
-                logger.warning(f"Failed to parse question: {e}")
-                continue
+                elements.append(Spacer(1, 10))
+                elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#e2e8f0')))
         
-        return questions
+        elif conversation_pairs:
+            # FALLBACK: Use conversation_pairs (old format)
+            # Group by section
+            sections_grouped = {"aptitude": [], "mcq": [], "coding": []}
+            
+            for qa in conversation_pairs:
+                q_type = qa.get("question_type", "mcq")
+                if q_type in sections_grouped:
+                    sections_grouped[q_type].append(qa)
+                else:
+                    sections_grouped["mcq"].append(qa)
+            
+            for section_name, questions in sections_grouped.items():
+                if not questions:
+                    continue
+                
+                section_icon = "🧮" if section_name == "aptitude" else "📚" if section_name == "mcq" else "💻"
+                correct_in_section = sum(1 for q in questions if q.get("correct", False))
+                
+                # Section header
+                elements.append(Paragraph(
+                    f"{section_icon} {section_name.upper()} SECTION ({correct_in_section}/{len(questions)})",
+                    section_header_style
+                ))
+                
+                for qa in questions:
+                    q_num = qa.get("question_number", "?")
+                    is_correct = qa.get("correct", False)
+                    question_text = qa.get("question", "")[:150]
+                    user_answer = qa.get("answer", "No answer")
+                    correct_answer = qa.get("correct_answer", "N/A")
+                    feedback = qa.get("feedback", "")
+                    
+                    status = "✅" if is_correct else "❌"
+                    status_color = colors.HexColor('#059669') if is_correct else colors.HexColor('#dc2626')
+                    
+                    q_header_style = ParagraphStyle(
+                        'QHeader',
+                        parent=styles['Normal'],
+                        fontSize=10,
+                        fontName='Helvetica-Bold',
+                        textColor=status_color,
+                        spaceBefore=10,
+                        spaceAfter=4
+                    )
+                    
+                    elements.append(Paragraph(f"{status} Q{q_num}. {question_text}{'...' if len(question_text) >= 150 else ''}", q_header_style))
+                    
+                    if is_correct:
+                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", correct_style))
+                    else:
+                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", wrong_style))
+                        elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer}", correct_style))
+                    
+                    if feedback:
+                        elements.append(Paragraph(f"💡 <i>{feedback}</i>", explanation_style))
+                    
+                    elements.append(Spacer(1, 5))
+                
+                elements.append(Spacer(1, 10))
+        
+        # ════════════════════════════════════════════════════════════
+        # WARNINGS SECTION (if any)
+        # ════════════════════════════════════════════════════════════
+        warnings = doc.get("warnings", [])
+        if warnings:
+            elements.append(PageBreak())
+            elements.append(Paragraph("⚠️ Proctoring Warnings", section_header_style))
+            
+            warning_data = [["#", "Type", "Time"]]
+            for i, w in enumerate(warnings, 1):
+                warning_data.append([
+                    str(i),
+                    w.get("type", "unknown").replace("_", " ").title(),
+                    w.get("timestamp_readable", "N/A")
+                ])
+            
+            warning_table = Table(warning_data, colWidths=[0.5*inch, 3*inch, 2.5*inch])
+            warning_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dc2626')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#dc2626')),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, colors.HexColor('#fecaca')),
+            ]))
+            elements.append(warning_table)
+            
+            if terminated:
+                term_reason = doc.get("termination_reason", "Maximum warnings exceeded")
+                elements.append(Spacer(1, 10))
+                term_style = ParagraphStyle(
+                    'Terminated',
+                    parent=styles['Normal'],
+                    textColor=colors.HexColor('#dc2626'),
+                    fontName='Helvetica-Bold'
+                )
+                elements.append(Paragraph(f"❌ TEST TERMINATED: {term_reason}", term_style))
+        
+        # ════════════════════════════════════════════════════════════
+        # RECOMMENDATIONS
+        # ════════════════════════════════════════════════════════════
+        elements.append(Spacer(1, 20))
+        elements.append(Paragraph("📌 Recommendations", section_header_style))
+        
+        weak_sections = []
+        for section, data in section_scores.items():
+            if isinstance(data, dict) and data.get("percentage", 0) < 50:
+                weak_sections.append(section)
+        
+        if weak_sections:
+            elements.append(Paragraph("Areas that need improvement:", styles['Normal']))
+            for section in weak_sections:
+                if section == "aptitude":
+                    rec = "• <b>Aptitude:</b> Practice more logical reasoning, quantitative aptitude, and problem-solving questions."
+                elif section in ["mcq", "theory"]:
+                    if user_type == "non_dev":
+                        rec = "• <b>MCQ/Theory:</b> Review SAP module concepts, business processes, and ERP fundamentals."
+                    else:
+                        rec = "• <b>MCQ/Theory:</b> Review programming concepts, data structures, and algorithms theory."
+                elif section == "coding":
+                    rec = "• <b>Coding:</b> Practice more coding problems on platforms like LeetCode or HackerRank."
+                else:
+                    rec = f"• <b>{section}:</b> Review this section thoroughly."
+                
+                elements.append(Paragraph(rec, answer_style))
+        else:
+            elements.append(Paragraph("🎉 Great performance across all sections! Keep up the excellent work.", styles['Normal']))
+        
+        # ════════════════════════════════════════════════════════════
+        # FOOTER
+        # ════════════════════════════════════════════════════════════
+        elements.append(Spacer(1, 30))
+        elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#e2e8f0')))
+        
+        footer_style = ParagraphStyle(
+            'Footer',
+            parent=styles['Normal'],
+            fontSize=8,
+            textColor=colors.HexColor('#6b7280'),
+            alignment=TA_CENTER
+        )
+        elements.append(Spacer(1, 10))
+        elements.append(Paragraph(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Mock Test Assessment System", footer_style))
+        
+        # Build PDF
+        pdf_doc.build(elements)
+        buffer.seek(0)
+        
+        # Save PDF to file system for dashboard access
+        pdf_path = os.path.join(self.output_dir, f"test_results_{test_id}.pdf")
+        with open(pdf_path, 'wb') as f:
+            f.write(buffer.getvalue())
+        
+        # Update database with PDF path
+        self.db_manager.test_results_collection.update_one(
+            {"test_id": test_id},
+            {"$set": {"pdf_path": pdf_path, "pdf_generated_at": datetime.now().isoformat()}}
+        )
+        
+        logger.info(f"📄 PDF generated and saved: {pdf_path}")
+        
+        buffer.seek(0)
+        return buffer.getvalue()
     
-    def _extract_field(self, content: str, markers: List[str]) -> str:
-        """Extract field value from content"""
-        for marker in markers:
-            if marker in content:
-                start = content.find(marker) + len(marker)
-                # Find end (next marker or newline patterns)
-                end = len(content)
-                for next_marker in ['■', '📝', '✅', '👤', '📊', '💡', '---', '\n\n']:
-                    pos = content.find(next_marker, start)
-                    if pos != -1 and pos < end:
-                        end = pos
-                return content[start:end].strip()
-        return ""
-    
-    def _extract_score(self, content: str) -> int:
-        """Extract score from content"""
-        match = re.search(r'Score:\s*(\d+)', content)
-        if match:
-            return int(match.group(1))
-        return 0
-    
-    def _draw_wrapped_text(self, pdf: canvas.Canvas, text: str, x: float, y: float,
-                          max_width: float, line_height: float) -> float:
-        """Draw text with word wrapping"""
-        if not text:
-            return y
-        
-        words = text.split()
-        lines = []
-        current_line = ""
-        
-        for word in words:
-            test_line = current_line + " " + word if current_line else word
-            # Approximate character width
-            if len(test_line) * 5 <= max_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        
-        if current_line:
-            lines.append(current_line)
-        
-        for line in lines[:3]:  # Max 3 lines
-            pdf.drawString(x, y, line)
-            y -= line_height
-        
-        if len(lines) > 3:
-            pdf.drawString(x, y, "...")
-            y -= line_height
-        
-        return y
-    
-    def _add_footer(self, pdf: canvas.Canvas, width: float, doc: Dict[str, Any]):
-        """Add footer to the page"""
-        pdf.setFillColor(self.colors["gray"])
-        pdf.setFont("Helvetica", 8)
-        
-        # Footer text
-        pdf.drawString(40, 30, "Weekend Mock Test System - Automated Assessment Report")
-        pdf.drawRightString(width - 40, 30, f"API Version: {config.API_VERSION}")
-        
-        # Line
-        pdf.setStrokeColor(self.colors["light_gray"])
-        pdf.line(40, 45, width - 40, 45)
-    
-    def _format_timestamp(self, timestamp) -> str:
-        """Format timestamp to readable string"""
-        try:
-            if isinstance(timestamp, (int, float)):
-                dt = datetime.datetime.fromtimestamp(timestamp)
-            elif isinstance(timestamp, str):
-                dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            else:
-                return str(timestamp)
-            return dt.strftime('%Y-%m-%d %H:%M')
-        except:
-            return "N/A"
+    async def get_pdf_path(self, test_id: str) -> Optional[str]:
+        """Get stored PDF path for a test"""
+        doc = self.db_manager.test_results_collection.find_one(
+            {"test_id": test_id},
+            {"pdf_path": 1}
+        )
+        return doc.get("pdf_path") if doc else None
 
 
-# Singleton instance
-_pdf_service_instance = None
-
+# Singleton
+_pdf_service = None
 
 def get_pdf_service() -> PDFService:
-    """Get singleton instance of PDFService"""
-    global _pdf_service_instance
-    if _pdf_service_instance is None:
-        _pdf_service_instance = PDFService()
-    return _pdf_service_instance
+    global _pdf_service
+    if _pdf_service is None:
+        _pdf_service = PDFService()
+    return _pdf_service

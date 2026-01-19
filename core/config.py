@@ -90,10 +90,6 @@ class Config:
 
     @property
     def MONGO_CONNECTION_STRING(self) -> str:
-        encoded_pass = quote_plus(self.MONGO_PASS)
-        return f"mongodb://{self.MONGO_USER}:{encoded_pass}@{self.MONGO_HOST}/{self.MONGO_AUTH_SOURCE}"
-    @property
-    def MONGO_CONNECTION_STRING(self) -> str:
         from urllib.parse import quote_plus
         encoded_pass = quote_plus(self.MONGO_PASS)
         return (
@@ -115,14 +111,12 @@ class Config:
     GREETING_GROQ_FALLBACK = os.getenv("GREETING_GROQ_FALLBACK", "true").lower() == "true"
 
     # config.py
-    MIN_STT_SEGMENT_MS = int(os.getenv("MIN_STT_SEGMENT_MS", "700"))       # don’t transcribe < ~0.7s voiced audio
-    MAX_STT_LATENCY_MS = int(os.getenv("MAX_STT_LATENCY_MS", "1600"))      # flush even if user keeps talking
-    MIN_STT_SEGMENT_BYTES = int(os.getenv("MIN_STT_SEGMENT_BYTES", "8192"))# guard for tiny chunks (webm/opus)
+    MIN_STT_SEGMENT_MS = int(os.getenv("MIN_STT_SEGMENT_MS", "700"))
+    MAX_STT_LATENCY_MS = int(os.getenv("MAX_STT_LATENCY_MS", "1600"))
+    MIN_STT_SEGMENT_BYTES = int(os.getenv("MIN_STT_SEGMENT_BYTES", "8192"))
     CLIENT_SILENCE_THRESHOLD_MS = int(os.getenv("CLIENT_SILENCE_THRESHOLD_MS", "4000"))
     CLIENT_SILENCE_GRACE_MS = int(os.getenv("CLIENT_SILENCE_GRACE_MS", "250"))
-    FILLER_IGNORE_MAX_TOKENS = int(os.getenv("FILLER_IGNORE_MAX_TOKENS", "2"))  # ignore “yeah”, “thanks”, “and”
-
-
+    FILLER_IGNORE_MAX_TOKENS = int(os.getenv("FILLER_IGNORE_MAX_TOKENS", "2"))
 
     # =========================================================================
     # COLLECTION NAMES
@@ -135,7 +129,7 @@ class Config:
     )
 
     # =========================================================================
-    # DAILY STANDUP SETTINGS
+    # DAILY STANDUP SETTINGS (UNCHANGED)
     # =========================================================================
     GREETING_EXCHANGES = int(os.getenv("GREETING_EXCHANGES", "2"))
     SUMMARY_CHUNKS = int(os.getenv("SUMMARY_CHUNKS", "8"))
@@ -146,12 +140,11 @@ class Config:
         os.getenv("ESTIMATED_SECONDS_PER_QUESTION", "180")
     )
     BASE_QUESTIONS_PER_CHUNK = int(os.getenv("BASE_QUESTIONS_PER_CHUNK", "3"))
-    # core/config.py
     SILENCE_CHUNKS_THRESHOLD = 1
     SILENCE_GRACE_AFTER_GREETING_SECONDS = 4
 
     # =========================================================================
-    # WEEKEND MOCKTEST SETTINGS
+    # WEEKEND MOCKTEST SETTINGS (UNCHANGED)
     # =========================================================================
     QUESTIONS_PER_TEST = int(os.getenv("QUESTIONS_PER_TEST", "10"))
     DEV_TIME_LIMIT = int(os.getenv("DEV_TIME_LIMIT", "300"))
@@ -162,7 +155,7 @@ class Config:
     TEST_SESSION_TIMEOUT = int(os.getenv("TEST_SESSION_TIMEOUT", "3600"))
 
     # =========================================================================
-    # WEEKLY INTERVIEW SETTINGS
+    # WEEKLY INTERVIEW SETTINGS (UPDATED - Time-based rounds)
     # =========================================================================
     RECENT_SUMMARIES_DAYS = int(os.getenv("RECENT_SUMMARIES_DAYS", "7"))
     SUMMARIES_LIMIT = int(os.getenv("SUMMARIES_LIMIT", "10"))
@@ -173,20 +166,47 @@ class Config:
     MAX_INTERVIEW_FRAGMENTS = int(os.getenv("MAX_INTERVIEW_FRAGMENTS", "12"))
     FRAGMENT_MIN_LENGTH = int(os.getenv("FRAGMENT_MIN_LENGTH", "100"))
 
+    # Total interview duration: 45 minutes
     INTERVIEW_DURATION_MINUTES = int(os.getenv("INTERVIEW_DURATION_MINUTES", "45"))
-    QUESTIONS_PER_ROUND = int(os.getenv("QUESTIONS_PER_ROUND", "6"))
-    MIN_QUESTIONS_PER_ROUND = int(os.getenv("MIN_QUESTIONS_PER_ROUND", "4"))
-    MAX_QUESTIONS_PER_ROUND = int(os.getenv("MAX_QUESTIONS_PER_ROUND", "8"))
+    
+    # Time-based round durations (in seconds)
+    COMMUNICATION_ROUND_DURATION = int(os.getenv("COMMUNICATION_ROUND_DURATION", "600"))  # 10 minutes
+    TECHNICAL_ROUND_DURATION = int(os.getenv("TECHNICAL_ROUND_DURATION", "1200"))  # 20 minutes
+    HR_ROUND_DURATION = int(os.getenv("HR_ROUND_DURATION", "900"))  # 15 minutes
+    
+    # Round time configuration dictionary
+    ROUND_DURATIONS = {
+        "communication": COMMUNICATION_ROUND_DURATION,
+        "technical": TECHNICAL_ROUND_DURATION,
+        "hr": HR_ROUND_DURATION,
+    }
+    
+    # Minimum questions per round (ensure at least some questions even if time is short)
+    MIN_QUESTIONS_PER_ROUND = int(os.getenv("MIN_QUESTIONS_PER_ROUND", "3"))
+    MAX_QUESTIONS_PER_ROUND = int(os.getenv("MAX_QUESTIONS_PER_ROUND", "10"))
+    MAX_QUESTIONS_PER_CONCEPT_WI = int(os.getenv("MAX_QUESTIONS_PER_CONCEPT_WI", "3"))
 
-    ROUND_NAMES = ["greeting", "technical", "communication", "hr"]
+    # Round order: Communication -> Technical -> HR (no greeting round)
+    ROUND_NAMES = ["communication", "technical", "hr"]
     TOTAL_ROUNDS = len(ROUND_NAMES)
+    
+    # Silence handling for weekly interview
+    WI_SILENCE_PROMPT_THRESHOLD_SECONDS = int(os.getenv("WI_SILENCE_PROMPT_THRESHOLD_SECONDS", "10"))
+    WI_MAX_SILENCE_PROMPTS = int(os.getenv("WI_MAX_SILENCE_PROMPTS", "2"))
+    
+    # Adaptive difficulty settings for technical round
+    WI_DIFFICULTY_INCREASE_THRESHOLD = float(os.getenv("WI_DIFFICULTY_INCREASE_THRESHOLD", "0.7"))
+    WI_DIFFICULTY_DECREASE_THRESHOLD = float(os.getenv("WI_DIFFICULTY_DECREASE_THRESHOLD", "0.4"))
+    
+    # Response quality thresholds
+    WI_STRONG_ANSWER_MIN_WORDS = int(os.getenv("WI_STRONG_ANSWER_MIN_WORDS", "30"))
+    WI_WEAK_ANSWER_MAX_WORDS = int(os.getenv("WI_WEAK_ANSWER_MAX_WORDS", "10"))
 
     # =========================================================================
     # TTS CONFIG (merged)
     # =========================================================================
-    # near other PATHS
     REF_AUDIO_DIR = (Path(__file__).resolve().parent.parent / "core/ref_audios")
-    TTS_STREAM_ENCODING = os.getenv("TTS_STREAM_ENCODING", "wav")  # "wav" or "pcm16"
+    TTS_STREAM_ENCODING = os.getenv("TTS_STREAM_ENCODING", "wav")
 
     # daily_standup fixed style
     TTS_VOICE = os.getenv("TTS_VOICE", "en-IN-PrabhatNeural")
@@ -243,10 +263,10 @@ class Config:
     SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "3600"))
     MAX_ACTIVE_SESSIONS = int(os.getenv("MAX_ACTIVE_SESSIONS", "100"))
 
-    # Hard/soft cutoff and final-answer behavior (seconds)
-    SESSION_MAX_SECONDS = int(os.getenv("SESSION_MAX_SECONDS", "900"))              # 15 minutes
+    # Hard/soft cutoff (45 minutes for full interview)
+    SESSION_MAX_SECONDS = int(os.getenv("SESSION_MAX_SECONDS", "2700"))
     SESSION_SOFT_CUTOFF_SECONDS = int(os.getenv("SESSION_SOFT_CUTOFF_SECONDS", "10"))
-    FINAL_ANSWER_GRACE_SECONDS = int(os.getenv("FINAL_ANSWER_GRACE_SECONDS", "0"))  # 0 = take reply then end immediately
+    FINAL_ANSWER_GRACE_SECONDS = int(os.getenv("FINAL_ANSWER_GRACE_SECONDS", "0"))
 
     # =========================================================================
     # PERFORMANCE
@@ -268,7 +288,7 @@ class Config:
     # APP METADATA
     # =========================================================================
     APP_TITLE = "Unified Edu-App AI System"
-    APP_VERSION = "1.0.0"
+    APP_VERSION = "2.0.0"
     APP_DESCRIPTION = "Unified AI-powered daily standup, mock test, and interview system"
 
     # =============================================================================
@@ -279,22 +299,23 @@ class Config:
     CORS_ALLOW_METHODS = ["*"]
     CORS_ALLOW_HEADERS = ["*"]
 
-    
     # =========================================================================
-    # EVALUATION CONFIG (weekly_interview style)
+    # EVALUATION CONFIG (UPDATED for new weekly interview criteria)
     # =========================================================================
     EVALUATION_CRITERIA = {
-        "technical_weight": 0.35,
-        "communication_weight": 0.30,
-        "behavioral_weight": 0.25,
-        "overall_presentation": 0.10,
+        # Weekly Interview weights (5 criteria)
+        "communication_weight": 0.25,
+        "technical_weight": 0.30,
+        "leadership_weight": 0.15,
+        "behaviour_weight": 0.15,
+        "confidence_weight": 0.15,
     }
 
     # =========================================================================
     # VALIDATION
     # =========================================================================
     def validate(self) -> dict:
-        """weekend_mocktest style validation"""
+        """Configuration validation"""
         issues = []
 
         if not os.getenv("GROQ_API_KEY"):
@@ -307,6 +328,11 @@ class Config:
 
         if not (0.1 <= self.CONTENT_SLICE_FRACTION <= 1.0):
             issues.append("CONTENT_SLICE_FRACTION must be between 0.1 and 1.0")
+        
+        # Validate round durations
+        total_round_time = sum(self.ROUND_DURATIONS.values())
+        if total_round_time != self.INTERVIEW_DURATION_MINUTES * 60:
+            issues.append(f"Round durations ({total_round_time}s) don't match total interview time ({self.INTERVIEW_DURATION_MINUTES * 60}s)")
 
         return {"valid": len(issues) == 0, "issues": issues}
 

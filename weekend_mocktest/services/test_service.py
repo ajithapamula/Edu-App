@@ -1,8 +1,20 @@
 # weekend_mocktest/services/test_service.py
-# FIXED: Dev=3 sections (apt+mcq+coding), NonDev=2 sections (apt+mcq), No repetition
+"""
+Mock Test Service - UPDATED with AI Explanations in Evaluation
+
+UPDATES:
+- Saves section_details with AI explanations
+- Proper answer comparison
+- Stores detailed question-by-question results
+"""
+
 import logging
 import markdown
-from typing import Dict, Any, List
+import time
+import hashlib
+import uuid
+from typing import Dict, Any, List, Optional
+
 from ..core.config import config
 from ..core.database import get_db_manager
 from ..core.ai_services import get_ai_service
@@ -13,64 +25,97 @@ logger = logging.getLogger(__name__)
 
 
 class TestService:
-    """
-    Test service for large scale deployment.
+    """Test service with AI explanations in evaluation"""
+
+    PROGRAMMING_KEYWORDS = [
+        'write a program', 'write a function', 'write code', 'write python',
+        'implement a function', 'create a function', 'code to',
+        'python program', 'python code', 'python function',
+        'in python', 'using python', 'java program',
+        'def ', 'import ', 'from ', 'class ', 'return ',
+        'print(', 'input(', 'len(', 'range(',
+        '__init__', '__name__', '__main__', 'self.',
+        'try:', 'except:', 'finally:', 'lambda',
+        'for i in range', '>>>', '```python',
+        '.py', 'pip install', 'pip ', 'npm ',
+        'pandas', 'numpy', 'tensorflow', 'pytorch', 'sklearn',
+        'django', 'flask', 'react', 'angular', 'vue'
+    ]
     
-    Developer: Aptitude (10) + MCQ (10) + Coding (5) = 25 questions, 3 section evaluation
-    Non-Developer: Aptitude (10) + MCQ (20) = 30 questions, 2 section evaluation
-    
-    Features:
-    - Auto collection routing (dev→Developer, non_dev→Non-Developer)
-    - No question repetition for same user
-    - Question bank for large scale
-    """
+    SAP_WHITELIST = [
+        'sap', 'erp', 'enterprise', 'procurement', 'sales', 'distribution',
+        'finance', 'accounting', 'hr', 'human resources', 'production',
+        'material', 'vendor', 'customer', 'invoice', 'payment', 'billing',
+        'purchase order', 'sales order', 'master data', 'transaction',
+        'mm', 'sd', 'fico', 'pp', 'wm', 'qm', 'pm',
+        'general ledger', 'cost center', 'profit center',
+        'business process', 'organizational'
+    ]
 
     def __init__(self):
         self.db_manager = get_db_manager()
         self.ai_service = get_ai_service()
         self.content_service = get_content_service()
-        self._ensure_question_bank_ready()
-        logger.info("🚀 Test service initialized")
+        logger.info("🚀 Test Service initialized with AI Explanations support")
 
-    def _ensure_question_bank_ready(self):
-        """Ensure question bank has enough questions"""
-        try:
-            for user_type in ["dev", "non_dev"]:
-                needs = self.db_manager.check_bank_needs_refill(user_type)
-                if needs:
-                    logger.info(f"📦 Refilling question bank for {user_type}: {needs}")
-                    self._populate_question_bank(user_type, needs)
-        except Exception as e:
-            logger.warning(f"⚠️ Bank check failed: {e}")
+    def _is_programming_question(self, question_data: Dict) -> bool:
+        """Check if question contains programming content"""
+        text_parts = [
+            str(question_data.get("question", "")),
+            str(question_data.get("title", "")),
+        ]
+        
+        options = question_data.get("options", [])
+        if isinstance(options, list):
+            text_parts.extend([str(opt) for opt in options])
+        elif isinstance(options, dict):
+            text_parts.extend([str(v) for v in options.values()])
+        
+        combined = " ".join(text_parts).lower()
+        
+        for sap_term in self.SAP_WHITELIST:
+            if sap_term in combined:
+                return False
+        
+        for keyword in self.PROGRAMMING_KEYWORDS:
+            if keyword.lower() in combined:
+                return True
+        
+        return False
 
-    def _populate_question_bank(self, user_type: str, needs: Dict[str, int]):
-        """Populate question bank with new questions"""
-        try:
-            # Get context from correct collection (auto-routed)
-            context = self.content_service.get_context_for_questions(user_type)
+    def _filter_programming_questions(self, questions: List[Dict], user_type: str) -> List[Dict]:
+        """Filter out programming questions for non-dev users"""
+        if user_type == "dev":
+            return questions
+        
+        filtered = []
+        removed = 0
+        
+        for q in questions:
+            if q.get("question_type") == "coding":
+                removed += 1
+                continue
             
-            for question_type, count in needs.items():
-                if count <= 0:
-                    continue
-                    
-                questions = self.ai_service.generate_questions_for_bank(
-                    user_type, question_type, context, count
-                )
-                if questions:
-                    self.db_manager.add_questions_to_bank(questions, user_type)
-                    
-            self.db_manager.retire_overused_questions()
-        except Exception as e:
-            logger.error(f"❌ Bank population failed: {e}")
+            if self._is_programming_question(q):
+                removed += 1
+            else:
+                filtered.append(q)
+        
+        if removed > 0:
+            logger.info(f"✅ Filtered out {removed} programming questions for non-dev")
+        
+        return filtered
 
     async def start_test(self, user_type: str, student_id: int = None):
-        """
-        Start a new test.
+        """Start test with NO question repetition"""
         
-        user_type='dev' → Developer collection → 3 sections
-        user_type='non_dev' → Non-Developer collection → 2 sections
-        """
-        logger.info(f"🎯 Starting {user_type} test")
+        logger.info("")
+        logger.info("=" * 70)
+        if user_type == "dev":
+            logger.info("🟢🟢🟢 STARTING DEVELOPER TEST 🟢🟢🟢")
+        else:
+            logger.info("🟠🟠🟠 STARTING NON-DEVELOPER TEST 🟠🟠🟠")
+        logger.info("=" * 70)
 
         if not ValidationUtils.validate_user_type(user_type):
             raise ValueError("Invalid user type. Use 'dev' or 'non_dev'")
@@ -81,35 +126,34 @@ class TestService:
                 student_id = student_info["student_id"]
             
             exam_structure = config.get_exam_structure(user_type)
-            logger.info(f"📋 Exam structure: {exam_structure}")
-            
-            # Generate questions (auto-routes to correct collection)
-            questions = self._get_questions_for_test(user_type, student_id, exam_structure)
+            questions = self._generate_questions_no_repeat(user_type, exam_structure, student_id)
             
             if not questions:
                 raise Exception("Failed to generate questions")
             
-            # Mark questions as seen (prevents repetition)
-            question_ids = [q.get("question_id") for q in questions if q.get("question_id")]
-            if question_ids:
-                self.db_manager.mark_questions_as_seen(student_id, question_ids)
+            if user_type == "non_dev":
+                questions = self._filter_programming_questions(questions, user_type)
             
-            # Create test session
-            test_id = memory_manager.create_test(user_type, questions)
+            test_id = memory_manager.create_test(user_type, questions, student_id)
             test_data = memory_manager.get_test(test_id)
             test_data["student_id"] = student_id
             test_data["exam_structure"] = exam_structure
             
+            question_ids = [q.get("question_id") for q in questions if q.get("question_id")]
+            if question_ids:
+                self.db_manager.mark_questions_as_seen(student_id, question_ids)
+                self.db_manager.increment_question_usage(question_ids)
+            
             current_question = memory_manager.get_current_question(test_id)
             current_question["question_html"] = markdown.markdown(
                 current_question["question_html"],
-                extensions=['codehilite', 'fenced_code']
+                extensions=['fenced_code']
             )
             
             first_q = questions[0]
-            time_limit = self._get_question_time_limit(first_q.get("question_type", "aptitude"), user_type)
+            time_limit = self._get_time_limit(first_q.get("question_type", "aptitude"), user_type)
             
-            response = self._create_test_response(test_id, test_data, current_question, time_limit, exam_structure, user_type)
+            response = self._create_start_response(test_id, test_data, current_question, time_limit, exam_structure, user_type)
             
             logger.info(f"✅ Test started: {test_id} ({len(questions)} questions)")
             return response
@@ -118,143 +162,421 @@ class TestService:
             logger.error(f"❌ Test start failed: {e}")
             raise
 
-    def _get_questions_for_test(self, user_type: str, student_id: int,
-                                exam_structure: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Generate questions based on user type.
-        
-        DEVELOPER (user_type='dev'):
-          - Aptitude: 10 questions (general)
-          - MCQ: 10 questions (from Developer collection)
-          - Coding: 5 questions (from Developer collection)
-          = 25 total
-        
-        NON-DEVELOPER (user_type='non_dev'):
-          - Aptitude: 10 questions (general)
-          - MCQ: 20 questions (from Non-Developer collection)
-          - NO CODING!
-          = 30 total
-        """
+    def _generate_questions_no_repeat(self, user_type: str, exam_structure: Dict, student_id: int) -> List[Dict]:
+        """Generate questions with NO REPETITION for this student"""
         questions = []
         sections = exam_structure.get("sections", {})
         
-        try:
-            # Get context from correct collection (AUTO ROUTED)
-            logger.info(f"📚 Getting content for {user_type} (auto-routed to correct collection)")
-            context = self.content_service.get_context_for_questions(user_type)
+        context = self.content_service.get_context_for_questions(user_type)
+        
+        if user_type == "dev":
+            section_config = [
+                ("aptitude", sections.get("aptitude", {}).get("question_count", 10), True),
+                ("mcq", sections.get("mcq", {}).get("question_count", 10), True),
+                ("coding", sections.get("coding", {}).get("question_count", 5), False)
+            ]
+        else:
+            section_config = [
+                ("aptitude", sections.get("aptitude", {}).get("question_count", 10), True),
+                ("mcq", sections.get("mcq", {}).get("question_count", 20), True)
+            ]
+        
+        for q_type, count, is_mcq in section_config:
+            if user_type == "non_dev" and q_type == "coding":
+                continue
             
-            if user_type == "dev":
-                # ============================================
-                # DEVELOPER: 3 SECTIONS (Aptitude + MCQ + Coding)
-                # ============================================
-                logger.info("🔧 DEVELOPER TEST: 3 sections")
-                
-                # 1. Aptitude (general, no context needed)
-                apt_count = sections.get("aptitude", {}).get("question_count", 10)
-                apt_qs = self.ai_service.generate_questions_for_bank("dev", "aptitude", "", apt_count)
-                questions.extend(self._standardize_questions(apt_qs, "aptitude", is_mcq=True))
-                logger.info(f"  ✓ Aptitude: {len(apt_qs)} questions")
-                
-                # 2. MCQ (from Developer collection)
-                mcq_count = sections.get("mcq", {}).get("question_count", 10)
-                mcq_qs = self.ai_service.generate_questions_for_bank("dev", "mcq", context, mcq_count)
-                questions.extend(self._standardize_questions(mcq_qs, "mcq", is_mcq=True))
-                logger.info(f"  ✓ MCQ: {len(mcq_qs)} questions")
-                
-                # 3. Coding (from Developer collection)
-                code_count = sections.get("coding", {}).get("question_count", 5)
-                code_qs = self.ai_service.generate_questions_for_bank("dev", "coding", context, code_count)
-                questions.extend(self._standardize_questions(code_qs, "coding", is_mcq=False))
-                logger.info(f"  ✓ Coding: {len(code_qs)} questions")
-                
-            else:
-                # ============================================
-                # NON-DEVELOPER: 2 SECTIONS ONLY (Aptitude + MCQ)
-                # NO CODING!
-                # ============================================
-                logger.info("📊 NON-DEVELOPER TEST: 2 sections only (NO CODING)")
-                
-                # 1. Aptitude (general)
-                apt_count = sections.get("aptitude", {}).get("question_count", 10)
-                apt_qs = self.ai_service.generate_questions_for_bank("non_dev", "aptitude", "", apt_count)
-                questions.extend(self._standardize_questions(apt_qs, "aptitude", is_mcq=True))
-                logger.info(f"  ✓ Aptitude: {len(apt_qs)} questions")
-                
-                # 2. MCQ (from Non-Developer collection)
-                mcq_count = sections.get("mcq", {}).get("question_count", 20)
-                mcq_qs = self.ai_service.generate_questions_for_bank("non_dev", "mcq", context, mcq_count)
-                questions.extend(self._standardize_questions(mcq_qs, "mcq", is_mcq=True))
-                logger.info(f"  ✓ MCQ: {len(mcq_qs)} questions")
-                
-                # NO CODING FOR NON-DEVELOPER!
+            section_qs = self._get_section_questions_no_repeat(
+                student_id=student_id,
+                user_type=user_type,
+                question_type=q_type,
+                count=count,
+                is_mcq=is_mcq,
+                context="" if q_type == "aptitude" else context
+            )
             
-            # Re-number questions
-            for i, q in enumerate(questions, 1):
-                q["question_number"] = i
+            if user_type == "non_dev":
+                section_qs = self._filter_programming_questions(section_qs, user_type)
             
-            # Log final breakdown
-            breakdown = {}
-            for q in questions:
-                qt = q.get("question_type", "unknown")
-                breakdown[qt] = breakdown.get(qt, 0) + 1
-            logger.info(f"📝 Final: {breakdown}, Total: {len(questions)}")
-            
-            return questions
-            
-        except Exception as e:
-            logger.error(f"❌ Question generation failed: {e}")
-            raise
+            questions.extend(section_qs)
+        
+        for i, q in enumerate(questions, 1):
+            q["question_number"] = i
+        
+        return questions
 
-    def _standardize_questions(self, questions: List[Dict[str, Any]], 
-                               question_type: str, is_mcq: bool) -> List[Dict[str, Any]]:
-        """Standardize questions format"""
-        standardized = []
+    def _get_section_questions_no_repeat(self, student_id: int, user_type: str, 
+                                          question_type: str, count: int, 
+                                          is_mcq: bool, context: str) -> List[Dict]:
+        """Get section questions, ensuring no repetition"""
+        
+        if user_type == "non_dev" and question_type == "coding":
+            return []
+        
+        unseen = self.db_manager.get_unseen_questions(student_id, user_type, question_type, count * 2)
+        
+        if user_type == "non_dev" and unseen:
+            unseen = [q for q in unseen if not self._is_programming_question(q)]
+        
+        if len(unseen) < count:
+            shortfall = count - len(unseen)
+            generate_count = shortfall + 10
+            
+            new_qs = self.ai_service.generate_questions_for_bank(
+                user_type, question_type, context, generate_count
+            )
+            
+            if user_type == "non_dev" and new_qs:
+                new_qs = [q for q in new_qs if not self._is_programming_question(q)]
+            
+            if new_qs:
+                for q in new_qs:
+                    q["question_id"] = str(uuid.uuid4())
+                    q["question_hash"] = hashlib.md5(q.get("question", "").encode()).hexdigest()
+                
+                self.db_manager.add_questions_to_bank(new_qs, user_type)
+                unseen = self.db_manager.get_unseen_questions(student_id, user_type, question_type, count * 2)
+                
+                if user_type == "non_dev":
+                    unseen = [q for q in unseen if not self._is_programming_question(q)]
+        
+        return self._format_questions(unseen[:count], question_type, is_mcq)
+
+    def _format_questions(self, questions: List[Dict], q_type: str, is_mcq: bool) -> List[Dict]:
+        """Format questions for test"""
+        formatted = []
+        
         for q in questions:
-            std_q = {
-                "question_id": q.get("question_id", ""),
+            fq = {
+                "question_id": q.get("question_id", str(uuid.uuid4())),
                 "question_number": 0,
                 "title": q.get("title", "Question"),
                 "difficulty": q.get("difficulty", "Medium"),
-                "question_type": question_type,
+                "question_type": q_type,
                 "question": q.get("question", ""),
                 "options": q.get("options") if is_mcq else None,
                 "correct_answer": q.get("correct_answer"),
                 "correct_option_text": q.get("correct_option_text"),
                 "is_mcq": is_mcq
             }
-            if is_mcq and (not std_q["options"] or len(std_q["options"]) < 3):
-                std_q["options"] = ["Option A", "Option B", "Option C", "Option D"]
-            standardized.append(std_q)
-        return standardized
+            if is_mcq and (not fq["options"] or len(fq["options"]) < 4):
+                fq["options"] = ["Option A", "Option B", "Option C", "Option D"]
+            formatted.append(fq)
+        
+        return formatted
 
-    def _get_question_time_limit(self, question_type: str, user_type: str) -> int:
-        """Get time limit in seconds"""
-        if user_type == "non_dev":
-            return {"aptitude": 60, "mcq": 60}.get(question_type, 60)
-        else:
-            return {"aptitude": 90, "mcq": 90, "coding": 240}.get(question_type, 90)
+    async def submit_answer(self, test_id: str, question_number: int, answer: str):
+        """Submit answer"""
+        logger.info(f"📝 Submit: {test_id} Q{question_number}")
 
-    def _create_test_response(self, test_id: str, test_data: Dict[str, Any],
-                              current_question: Dict[str, Any], time_limit: int,
-                              exam_structure: Dict[str, Any], user_type: str):
-        """Create test start response"""
+        try:
+            if self.db_manager.is_test_terminated(test_id):
+                reason = self.db_manager.get_termination_reason(test_id)
+                raise ValueError(f"Test terminated: {reason}")
+            
+            test_data = memory_manager.get_test(test_id)
+            if not test_data:
+                raise ValueError("Test not found")
+
+            user_type = test_data.get("user_type", "dev")
+            
+            processed = self._process_answer(answer, test_id, question_number)
+            memory_manager.submit_answer(test_id, question_number, processed)
+
+            if memory_manager.is_test_complete(test_id):
+                return await self._complete_test(test_id, test_data)
+
+            next_q = memory_manager.get_current_question(test_id)
+            next_q["question_html"] = markdown.markdown(
+                next_q["question_html"], extensions=['fenced_code']
+            )
+
+            questions = test_data.get("questions", [])
+            q_num = next_q["question_number"]
+            q_data = questions[q_num - 1] if q_num <= len(questions) else {}
+            
+            time_limit = self._get_time_limit(q_data.get("question_type", "mcq"), user_type)
+            
+            return self._create_next_response(next_q, time_limit, test_data)
+
+        except Exception as e:
+            logger.error(f"❌ Submit failed: {e}")
+            raise
+
+    def _process_answer(self, answer: str, test_id: str, q_num: int) -> str:
+        """Process answer - convert index to text if needed"""
+        if answer.isdigit():
+            try:
+                test_data = memory_manager.get_test(test_id)
+                questions = test_data["questions"]
+                if q_num <= len(questions):
+                    q = questions[q_num - 1]
+                    options = q.get("options", [])
+                    idx = int(answer)
+                    if 0 <= idx < len(options):
+                        return options[idx]
+            except:
+                pass
+        return answer.strip()
+
+    def add_warning(self, test_id: str, student_id: int, warning_type: str, 
+                    details: Dict = None) -> Dict[str, Any]:
+        """Add a proctoring warning"""
+        result = self.db_manager.add_warning(test_id, student_id, warning_type, details)
+        
+        if result.get("should_terminate"):
+            logger.warning(f"🚫 Auto-terminating test {test_id} after 3 warnings")
+        
+        return result
+
+    def get_warning_status(self, test_id: str) -> Dict[str, Any]:
+        """Get current warning status for a test"""
+        warnings = self.db_manager.get_warnings(test_id)
+        return {
+            "test_id": test_id,
+            "warning_count": warnings.get("warning_count", 0),
+            "max_warnings": 3,
+            "warnings_remaining": max(0, 3 - warnings.get("warning_count", 0)),
+            "is_terminated": warnings.get("terminated", False),
+            "termination_reason": warnings.get("termination_reason"),
+            "warnings": warnings.get("warnings", [])
+        }
+
+    # ════════════════════════════════════════════════════════════
+    # COMPLETE TEST WITH AI EXPLANATIONS
+    # ════════════════════════════════════════════════════════════
+
+    async def _complete_test(self, test_id: str, test_data: Dict):
+        """Complete test and evaluate with AI explanations"""
+        logger.info(f"🎯 Completing: {test_id}")
+
+        answers = memory_manager.get_test_answers(test_id)
+        user_type = test_data.get("user_type", "dev")
         questions = test_data.get("questions", [])
-        section_info = self._get_section_info(questions, user_type)
-        current_section = self._get_current_section(1, section_info)
         
-        first_q = questions[0] if questions else {}
+        logger.info(f"📊 Evaluating {len(answers)} answers for {user_type} test with AI explanations")
         
-        class TestResponse:
+        # Build sections for evaluation
+        if user_type == "non_dev":
+            sections = {"aptitude": [], "mcq": []}
+        else:
+            sections = {"aptitude": [], "mcq": [], "coding": []}
+        
+        for i, ans_data in enumerate(answers):
+            q = questions[i] if i < len(questions) else {}
+            q_type = q.get("question_type", "mcq")
+            
+            if user_type == "non_dev" and q_type not in ["aptitude", "mcq"]:
+                q_type = "mcq"
+            
+            qa_entry = {
+                "question": q.get("question", ans_data.get("question", "")),
+                "answer": ans_data.get("answer", ""),
+                "question_type": q_type,
+                "options": q.get("options", []),
+                "correct_answer": q.get("correct_answer"),
+                "correct_option_text": q.get("correct_option_text")
+            }
+            
+            if q_type in sections:
+                sections[q_type].append(qa_entry)
+        
+        # Evaluate with AI explanations
+        logger.info(f"🤖 Generating AI explanations for evaluation...")
+        eval_result = self.ai_service.evaluate_by_section(user_type, sections)
+        
+        logger.info(f"✅ Evaluation complete: {eval_result.get('total_correct', 0)}/{len(answers)} correct")
+        
+        # Save results with section_details
+        await self._save_results(test_id, test_data, eval_result, answers)
+        memory_manager.cleanup_test(test_id)
+        
+        return self._create_complete_response(eval_result, test_data["total_questions"], user_type, test_id)
+
+    def _create_complete_response(self, eval_result: Dict, total_q: int, user_type: str, test_id: str):
+        """Create completion response"""
+        correct = eval_result.get("total_correct", 0)
+        pct = round((correct / total_q) * 100, 1) if total_q else 0
+
+        if pct >= 80:
+            status, msg = "Excellent", "Excellent performance!"
+        elif pct >= 50:
+            status, msg = "Good", "Good attempt, room for improvement."
+        else:
+            status, msg = "Needs Improvement", "Please practice more."
+
+        warnings = self.db_manager.get_warnings(test_id)
+
+        class Response:
             def __init__(self, **kwargs):
                 for k, v in kwargs.items():
                     setattr(self, k, v)
 
-        return TestResponse(
+        return Response(
+            test_completed=True,
+            score=correct,
+            total_questions=total_q,
+            score_percentage=pct,
+            analytics=eval_result.get("evaluation_report", ""),
+            section_scores=eval_result.get("section_scores", {}),
+            section_details=eval_result.get("section_details", {}),  # NEW: Include section_details
+            warning_count=warnings.get("warning_count", 0),
+            terminated_by_warnings=warnings.get("terminated", False),
+            summary={"status": status, "percentage": pct, "final_message": msg}
+        )
+
+    async def _save_results(self, test_id: str, test_data: Dict, eval_result: Dict, answers: List):
+        """Save test results to MongoDB with section_details and AI explanations"""
+        questions = test_data.get("questions", [])
+        scores = eval_result.get("scores", [])
+        feedbacks = eval_result.get("feedbacks", [])
+        section_details = eval_result.get("section_details", {})
+
+        # Build conversation_pairs for backward compatibility
+        conversation_pairs = []
+        for idx, ans in enumerate(answers):
+            q = questions[idx] if idx < len(questions) else {}
+            is_correct = bool(scores[idx]) if idx < len(scores) else False
+            correct_ans = q.get("correct_option_text") or q.get("correct_answer", "N/A")
+            
+            fb = feedbacks[idx] if idx < len(feedbacks) else ""
+
+            conversation_pairs.append({
+                "question_number": idx + 1,
+                "question_id": q.get("question_id"),
+                "question": q.get("question"),
+                "question_type": q.get("question_type"),
+                "answer": ans.get("answer"),
+                "correct": is_correct,
+                "correct_answer": correct_ans,
+                "feedback": fb,  # AI explanation
+                "options": q.get("options", [])
+            })
+
+        total_correct = eval_result.get("total_correct", 0)
+        total_q = test_data.get("total_questions", len(questions))
+        pct = round((total_correct / total_q) * 100, 1) if total_q else 0
+
+        if pct >= 80:
+            final_msg = "Excellent performance!"
+        elif pct >= 50:
+            final_msg = "Good attempt, room for improvement."
+        else:
+            final_msg = "Needs Improvement. Please practice more."
+
+        warnings_data = self.db_manager.get_warnings(test_id)
+
+        doc = {
+            "test_id": test_id,
+            "user_type": test_data.get("user_type"),
+            "Student_ID": test_data.get("student_id"),
+            "score": total_correct,
+            "total_questions": total_q,
+            "score_percentage": pct,
+            "final_message": final_msg,
+            
+            # Section scores (summary)
+            "section_scores": eval_result.get("section_scores", {}),
+            
+            # NEW: Section details with AI explanations
+            "section_details": section_details,
+            
+            # Detailed evaluation report
+            "evaluation_report": eval_result.get("evaluation_report", ""),
+            
+            # Raw scores and feedbacks
+            "scores": scores,
+            "feedbacks": feedbacks,
+            
+            # Backward compatible conversation_pairs
+            "conversation_pairs": conversation_pairs,
+            
+            "test_completed": True,
+            "timestamp": time.time(),
+            
+            # Warning audit trail
+            "warning_count": warnings_data.get("warning_count", 0),
+            "warnings": warnings_data.get("warnings", []),
+            "terminated_by_warnings": warnings_data.get("terminated", False),
+            "termination_reason": warnings_data.get("termination_reason")
+        }
+
+        self.db_manager.test_results_collection.update_one(
+            {"test_id": test_id},
+            {"$set": doc},
+            upsert=True
+        )
+
+        logger.info(f"💾 Saved with AI explanations: {test_id} | {total_correct}/{total_q} ({pct}%)")
+
+    async def force_complete_test(self, test_id: str, reason: str, warnings: int = 0):
+        """Force complete test due to warnings"""
+        logger.warning(f"🚨 Force complete: {test_id} - {reason}")
+        
+        try:
+            test_data = memory_manager.get_test(test_id)
+            if not test_data:
+                return {"status": "not_found"}
+            
+            answers = memory_manager.get_test_answers(test_id) or []
+            user_type = test_data.get("user_type", "dev")
+            questions = test_data.get("questions", [])
+            
+            if user_type == "non_dev":
+                sections = {"aptitude": [], "mcq": []}
+            else:
+                sections = {"aptitude": [], "mcq": [], "coding": []}
+            
+            for i, ans in enumerate(answers):
+                q = questions[i] if i < len(questions) else {}
+                qt = q.get("question_type", "mcq")
+                if user_type == "non_dev" and qt not in ["aptitude", "mcq"]:
+                    qt = "mcq"
+                if qt in sections:
+                    sections[qt].append({
+                        "question": q.get("question", ans.get("question", "")),
+                        "answer": ans.get("answer", ""),
+                        "question_type": qt,
+                        "options": q.get("options", []),
+                        "correct_answer": q.get("correct_answer"),
+                        "correct_option_text": q.get("correct_option_text")
+                    })
+            
+            eval_result = self.ai_service.evaluate_by_section(user_type, sections)
+            eval_result["terminated"] = True
+            eval_result["termination_reason"] = reason
+            
+            await self._save_results(test_id, test_data, eval_result, answers)
+            memory_manager.cleanup_test(test_id)
+            
+            return {"status": "terminated", "reason": reason}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def _get_time_limit(self, q_type: str, user_type: str) -> int:
+        """Get time limit in seconds"""
+        if user_type == "non_dev":
+            return {"aptitude": 60, "mcq": 60}.get(q_type, 60)
+        return {"aptitude": 120, "mcq": 120, "coding": 240}.get(q_type, 120)
+
+    def _create_start_response(self, test_id: str, test_data: Dict, current_q: Dict, 
+                                time_limit: int, exam_structure: Dict, user_type: str):
+        """Create test start response"""
+        questions = test_data.get("questions", [])
+        section_info = self._get_section_info(questions, user_type)
+        current_section = self._get_current_section(1, section_info)
+        first_q = questions[0] if questions else {}
+
+        class Response:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        return Response(
             test_id=test_id,
             user_type=user_type,
-            question_number=current_question["question_number"],
-            total_questions=current_question["total_questions"],
-            question_html=current_question["question_html"],
+            question_number=current_q["question_number"],
+            total_questions=current_q["total_questions"],
+            question_html=current_q["question_html"],
             question_type=first_q.get("question_type", "aptitude"),
             title=first_q.get("title", ""),
             options=first_q.get("options"),
@@ -265,9 +587,47 @@ class TestService:
             section_info=section_info,
             section_progress=self._get_section_progress(1, section_info)
         )
-    
-    def _get_section_info(self, questions: List[Dict[str, Any]], user_type: str) -> Dict[str, Any]:
-        """Get section breakdown - 2 sections for non_dev, 3 for dev"""
+
+    def _create_next_response(self, next_q: Dict, time_limit: int, test_data: Dict):
+        """Create next question response"""
+        user_type = test_data.get("user_type", "dev")
+        questions = test_data.get("questions", [])
+        section_info = self._get_section_info(questions, user_type)
+        q_num = next_q["question_number"]
+        curr_sec = self._get_current_section(q_num, section_info)
+        sec_progress = self._get_section_progress(q_num, section_info)
+        
+        q = questions[q_num - 1] if q_num <= len(questions) else {}
+        
+        prev_sec = self._get_current_section(q_num - 1, section_info) if q_num > 1 else curr_sec
+        sec_completed = prev_sec["display_name"] if prev_sec["name"] != curr_sec["name"] else None
+
+        class Response:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        return Response(
+            test_completed=False,
+            next_question=Response(
+                question_number=next_q["question_number"],
+                total_questions=next_q["total_questions"],
+                question_html=next_q["question_html"],
+                question_type=q.get("question_type", "mcq"),
+                title=q.get("title", ""),
+                options=q.get("options"),
+                is_mcq=q.get("is_mcq", True),
+                time_limit=time_limit
+            ),
+            current_section=curr_sec,
+            section_info=section_info,
+            section_progress=sec_progress,
+            section_just_completed=sec_completed,
+            next_section_starting=curr_sec["display_name"] if sec_completed else None
+        )
+
+    def _get_section_info(self, questions: List[Dict], user_type: str) -> Dict:
+        """Get section breakdown"""
         if user_type == "non_dev":
             sections = {"aptitude": {"start": None, "end": None, "count": 0},
                        "mcq": {"start": None, "end": None, "count": 0}}
@@ -279,12 +639,12 @@ class TestService:
             section_order = ["aptitude", "mcq", "coding"]
         
         for i, q in enumerate(questions, 1):
-            q_type = q.get("question_type", "mcq")
-            if q_type in sections:
-                if sections[q_type]["start"] is None:
-                    sections[q_type]["start"] = i
-                sections[q_type]["end"] = i
-                sections[q_type]["count"] += 1
+            qt = q.get("question_type", "mcq")
+            if qt in sections:
+                if sections[qt]["start"] is None:
+                    sections[qt]["start"] = i
+                sections[qt]["end"] = i
+                sections[qt]["count"] += 1
         
         section_list = []
         for name in section_order:
@@ -298,301 +658,80 @@ class TestService:
                 })
         
         return {"sections": section_list, "total_sections": len(section_list)}
-    
-    def _get_current_section(self, question_number: int, section_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Get current section based on question number"""
-        for i, section in enumerate(section_info.get("sections", [])):
-            if section["start"] <= question_number <= section["end"]:
-                return {"index": i, "name": section["name"], "display_name": section["display_name"],
-                       "start": section["start"], "end": section["end"], "count": section["count"]}
+
+    def _get_current_section(self, q_num: int, section_info: Dict) -> Dict:
+        """Get current section"""
+        for i, sec in enumerate(section_info.get("sections", [])):
+            if sec["start"] <= q_num <= sec["end"]:
+                return {"index": i, "name": sec["name"], "display_name": sec["display_name"],
+                       "start": sec["start"], "end": sec["end"], "count": sec["count"]}
         return {"name": "unknown", "index": 0}
-    
-    def _get_section_progress(self, question_number: int, section_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Get progress within section"""
-        current = self._get_current_section(question_number, section_info)
-        in_section = question_number - current.get("start", 1) + 1
-        total = current.get("count", 1)
-        return {"current_in_section": in_section, "total_in_section": total,
-                "is_last_question_in_section": in_section >= total}
 
-    async def submit_answer(self, test_id: str, question_number: int, answer: str):
-        """Submit answer and get next question"""
-        logger.info(f"📝 Submitting: {test_id} Q{question_number}")
+    def _get_section_progress(self, q_num: int, section_info: Dict) -> Dict:
+        """Get progress in section"""
+        curr = self._get_current_section(q_num, section_info)
+        in_sec = q_num - curr.get("start", 1) + 1
+        total = curr.get("count", 1)
+        return {"current_in_section": in_sec, "total_in_section": total,
+                "is_last_question_in_section": in_sec >= total}
 
-        try:
-            test_data = memory_manager.get_test(test_id)
-            if not test_data:
-                raise ValueError("Test not found")
+    def _get_question_time_limit(self, q_type: str, user_type: str) -> int:
+        """Alias for _get_time_limit"""
+        return self._get_time_limit(q_type, user_type)
 
-            user_type = test_data.get("user_type", "dev")
-            
-            # Process answer
-            processed_answer = self._process_answer(answer, test_id, question_number)
-            memory_manager.submit_answer(test_id, question_number, processed_answer)
-
-            # Check if test complete
-            if memory_manager.is_test_complete(test_id):
-                logger.info(f"🏁 Test completed: {test_id}")
-                return await self._complete_test(test_id, test_data)
-
-            # Get next question
-            next_question = memory_manager.get_current_question(test_id)
-            next_question["question_html"] = markdown.markdown(
-                next_question["question_html"],
-                extensions=['codehilite', 'fenced_code']
-            )
-
-            questions = test_data.get("questions", [])
-            next_q_num = next_question["question_number"]
-            next_q = questions[next_q_num - 1] if next_q_num <= len(questions) else {}
-            
-            time_limit = self._get_question_time_limit(next_q.get("question_type", "mcq"), user_type)
-            
-            return self._create_next_question_response(next_question, time_limit, test_data)
-
-        except Exception as e:
-            logger.error(f"❌ Submit failed: {e}")
-            raise
-
-    def _process_answer(self, answer: str, test_id: str, question_number: int) -> str:
-        """Process answer - convert option index to text if MCQ"""
-        if answer.isdigit():
-            try:
-                test_data = memory_manager.get_test(test_id)
-                questions = test_data["questions"]
-                if question_number <= len(questions):
-                    question = questions[question_number - 1]
-                    options = question.get("options", [])
-                    idx = int(answer)
-                    if 0 <= idx < len(options):
-                        return options[idx]
-            except:
-                pass
-        return answer.strip()
-
-    def _create_next_question_response(self, next_question: Dict[str, Any], 
-                                       time_limit: int, test_data: Dict[str, Any]):
-        """Create next question response"""
-        user_type = test_data.get("user_type", "dev")
-        questions = test_data.get("questions", [])
-        section_info = self._get_section_info(questions, user_type)
-        q_num = next_question["question_number"]
-        current_section = self._get_current_section(q_num, section_info)
-        section_progress = self._get_section_progress(q_num, section_info)
-        
-        q = questions[q_num - 1] if q_num <= len(questions) else {}
-        
-        # Check for section change
-        prev_section = self._get_current_section(q_num - 1, section_info) if q_num > 1 else current_section
-        section_completed = prev_section["display_name"] if prev_section["name"] != current_section["name"] else None
-        
-        class Response:
-            def __init__(self, **kwargs):
-                for k, v in kwargs.items():
-                    setattr(self, k, v)
-
-        return Response(
-            test_completed=False,
-            next_question=Response(
-                question_number=next_question["question_number"],
-                total_questions=next_question["total_questions"],
-                question_html=next_question["question_html"],
-                question_type=q.get("question_type", "mcq"),
-                title=q.get("title", ""),
-                options=q.get("options"),
-                is_mcq=q.get("is_mcq", True),
-                time_limit=time_limit
-            ),
-            current_section=current_section,
-            section_info=section_info,
-            section_progress=section_progress,
-            section_just_completed=section_completed,
-            next_section_starting=current_section["display_name"] if section_completed else None
+    async def get_test_results(self, test_id: str) -> Optional[Dict]:
+        """Get test results from MongoDB"""
+        doc = self.db_manager.test_results_collection.find_one(
+            {"test_id": test_id}, {"_id": 0}
         )
-
-    async def _complete_test(self, test_id: str, test_data: Dict[str, Any]):
-        """Complete test and evaluate by sections"""
-        logger.info(f"🎯 Completing test: {test_id}")
-
-        answers = memory_manager.get_test_answers(test_id)
-        user_type = test_data.get("user_type", "dev")
-        
-        # Evaluate based on user type
-        if user_type == "dev":
-            # DEVELOPER: 3 sections (Aptitude, MCQ, Coding)
-            evaluation_result = await self._evaluate_developer_test(test_data, answers)
-        else:
-            # NON-DEVELOPER: 2 sections only (Aptitude, MCQ)
-            evaluation_result = await self._evaluate_non_dev_test(test_data, answers)
-
-        await self._save_test_results(test_id, test_data, evaluation_result, answers)
-        memory_manager.cleanup_test(test_id)
-
-        return self._create_completion_response(evaluation_result, test_data["total_questions"], user_type)
-
-    async def _evaluate_developer_test(self, test_data: Dict[str, Any],
-                                       answers: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        DEVELOPER EVALUATION: 3 SECTIONS
-        - Aptitude
-        - MCQ
-        - Coding
-        """
-        logger.info("📊 Evaluating DEVELOPER test (3 sections: Aptitude, MCQ, Coding)")
-        
-        questions = test_data.get("questions", [])
-        sections = {"aptitude": [], "mcq": [], "coding": []}
-        
-        for i, answer_data in enumerate(answers):
-            q_type = questions[i].get("question_type", "mcq") if i < len(questions) else "mcq"
-            sections[q_type].append({
-                "question": answer_data["question"],
-                "answer": answer_data["answer"],
-                "question_type": q_type,
-                "options": answer_data.get("options", []),
-                "correct_answer": questions[i].get("correct_answer") if i < len(questions) else None,
-                "correct_option_text": questions[i].get("correct_option_text") if i < len(questions) else None
-            })
-        
-        return self.ai_service.evaluate_by_section("dev", sections)
-
-    async def _evaluate_non_dev_test(self, test_data: Dict[str, Any],
-                                     answers: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        NON-DEVELOPER EVALUATION: 2 SECTIONS ONLY
-        - Aptitude
-        - MCQ
-        - NO CODING!
-        """
-        logger.info("📊 Evaluating NON-DEVELOPER test (2 sections: Aptitude, MCQ)")
-        
-        questions = test_data.get("questions", [])
-        
-        # ONLY 2 sections for non-dev
-        sections = {"aptitude": [], "mcq": []}
-        
-        for i, answer_data in enumerate(answers):
-            q_type = questions[i].get("question_type", "mcq") if i < len(questions) else "mcq"
-            # Force any non-aptitude to mcq for non-dev
-            if q_type not in ["aptitude", "mcq"]:
-                q_type = "mcq"
-            
-            sections[q_type].append({
-                "question": answer_data["question"],
-                "answer": answer_data["answer"],
-                "question_type": q_type,
-                "options": answer_data.get("options", []),
-                "correct_answer": questions[i].get("correct_answer") if i < len(questions) else None,
-                "correct_option_text": questions[i].get("correct_option_text") if i < len(questions) else None
-            })
-        
-        logger.info(f"  Aptitude: {len(sections['aptitude'])} questions")
-        logger.info(f"  MCQ: {len(sections['mcq'])} questions")
-        
-        return self.ai_service.evaluate_by_section("non_dev", sections)
-
-    def _create_completion_response(self, evaluation_result: Dict[str, Any], 
-                                    total_questions: int, user_type: str):
-        """Create completion response with section scores"""
-        section_scores = evaluation_result.get("section_scores", {})
-        
-        # Order based on user type
-        if user_type == "non_dev":
-            section_order = ["aptitude", "mcq"]  # 2 sections only
-        else:
-            section_order = ["aptitude", "mcq", "coding"]  # 3 sections
-        
-        section_results = []
-        for sec_name in section_order:
-            if sec_name in section_scores:
-                sec = section_scores[sec_name]
-                section_results.append({
-                    "name": sec_name,
-                    "display_name": sec_name.upper(),
-                    "correct": sec["correct"],
-                    "total": sec["total"],
-                    "percentage": sec["percentage"],
-                    "status": "pass" if sec["percentage"] >= 50 else "fail"
-                })
-        
-        class Response:
-            def __init__(self, **kwargs):
-                for k, v in kwargs.items():
-                    setattr(self, k, v)
-
-        total_correct = evaluation_result.get("total_correct", 0)
-        return Response(
-            test_completed=True,
-            score=total_correct,
-            total_questions=total_questions,
-            score_percentage=round(total_correct / total_questions * 100, 1) if total_questions > 0 else 0,
-            section_scores=section_scores,
-            section_results=section_results,
-            analytics=evaluation_result.get("evaluation_report", ""),
-            summary={
-                "total_score": f"{total_correct}/{total_questions}",
-                "percentage": round(total_correct / total_questions * 100, 1) if total_questions > 0 else 0,
-                "status": "pass" if total_correct / total_questions >= 0.5 else "fail",
-                "sections_passed": sum(1 for s in section_results if s["status"] == "pass"),
-                "total_sections": len(section_results)
+        if doc:
+            return {
+                "test_id": doc.get("test_id"),
+                "score": doc.get("score", 0),
+                "total_questions": doc.get("total_questions", 0),
+                "score_percentage": doc.get("score_percentage", 0),
+                "analytics": doc.get("evaluation_report", ""),
+                "section_scores": doc.get("section_scores", {}),
+                "section_details": doc.get("section_details", {}),
+                "timestamp": doc.get("timestamp", 0),
+                "warning_count": doc.get("warning_count", 0),
+                "terminated_by_warnings": doc.get("terminated_by_warnings", False)
             }
-        )
+        return None
 
-    async def _save_test_results(self, test_id: str, test_data: Dict[str, Any],
-                                 evaluation_result: Dict[str, Any], answers: List[Dict[str, Any]]):
-        """Save results"""
-        for i, answer in enumerate(answers):
-            if i < len(evaluation_result.get("scores", [])):
-                answer["correct"] = bool(evaluation_result["scores"][i])
-            if i < len(evaluation_result.get("feedbacks", [])):
-                answer["feedback"] = evaluation_result["feedbacks"][i]
+    async def get_all_tests(self) -> List[Dict]:
+        """Get all test results"""
+        cursor = self.db_manager.test_results_collection.find(
+            {}, {"_id": 0}
+        ).sort("timestamp", -1).limit(100)
+        return list(cursor)
 
-        save_data = {
-            "user_type": test_data["user_type"],
-            "student_id": test_data.get("student_id"),
-            "total_questions": test_data["total_questions"],
-            "answers": answers,
-            "section_scores": evaluation_result.get("section_scores", {})
-        }
+    async def get_students(self) -> List[Dict]:
+        """Get unique students"""
+        pipeline = [
+            {"$group": {"_id": "$Student_ID"}},
+            {"$project": {"Student_ID": "$_id", "_id": 0}}
+        ]
+        return list(self.db_manager.test_results_collection.aggregate(pipeline))
 
-        self.db_manager.save_test_results(test_id, save_data, evaluation_result)
+    async def get_student_tests(self, student_id: str) -> List[Dict]:
+        """Get tests for a student"""
+        cursor = self.db_manager.test_results_collection.find(
+            {"Student_ID": int(student_id)}, {"_id": 0}
+        ).sort("timestamp", -1)
+        return list(cursor)
 
-    async def force_complete_test(self, test_id: str, termination_reason: str, warnings: int = 0):
-        """Force complete test due to proctoring violation"""
-        logger.warning(f"🚨 Force completing: {test_id} - {termination_reason}")
-        
-        try:
-            test_data = memory_manager.get_test(test_id)
-            if not test_data:
-                return {"status": "not_found"}
-            
-            user_type = test_data.get("user_type", "dev")
-            answers = memory_manager.get_test_answers(test_id) or []
-            
-            if user_type == "dev":
-                evaluation_result = await self._evaluate_developer_test(test_data, answers)
-            else:
-                evaluation_result = await self._evaluate_non_dev_test(test_data, answers)
-            
-            evaluation_result["terminated"] = True
-            evaluation_result["termination_reason"] = termination_reason
-            
-            await self._save_test_results(test_id, test_data, evaluation_result, answers)
-            memory_manager.cleanup_test(test_id)
-            
-            return {"status": "terminated", "reason": termination_reason}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
+    def cleanup_expired_tests(self) -> Dict:
+        """Cleanup expired tests"""
+        memory_manager.cleanup_expired_data()
+        return {"message": "Cleanup complete", "active_tests": len(memory_manager.tests)}
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> Dict:
         """Health check"""
-        return {
-            "status": "healthy",
-            "question_bank": self.db_manager.get_question_bank_stats(),
-            "collections": self.content_service.get_collection_stats()
-        }
+        return {"status": "healthy"}
 
 
+# Singleton
 _test_service = None
 
 def get_test_service() -> TestService:

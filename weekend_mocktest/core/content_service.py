@@ -1,132 +1,194 @@
 # weekend_mocktest/core/content_service.py
-# Auto routes: dev→Developer collection, non_dev→Non-Developer collection
-# ONLY uses 'summary' field (ignores filename, transcript_text)
+"""
+Content Service - FIXED VERSION
+Reads summaries from MongoDB collections based on user type.
+- dev → Developer collection (Python/Coding)
+- non_dev → Non-Developer collection (SAP/Business)
+
+FIXED: No longer over-filters SAP content for non-dev
+"""
+
 import logging
-import re
-from typing import List, Dict, Any
-from .config import config
+from typing import Optional
 from .database import get_db_manager
 
 logger = logging.getLogger(__name__)
 
 
 class ContentService:
-    """
-    Content service for question generation context.
+    """Service to get context from MongoDB summaries"""
     
-    AUTO ROUTING:
-    - user_type='dev' → Developer collection
-    - user_type='non_dev' → Non-Developer collection
+    # Only block content with CLEAR programming language indicators
+    # NOT generic terms like "function", "module", "data" which are also used in SAP
+    STRICT_PROGRAMMING_INDICATORS = [
+        # Programming languages
+        'python', 'java ', 'javascript', 'c++', 'c#', 'ruby', 'php',
+        # Python-specific syntax
+        'def ', 'import ', 'from ', 'class ', 'return ', 'print(',
+        'lambda', '__init__', '__name__', 'self.', '>>>', 'pip install',
+        # Code patterns
+        'for i in range', 'while true', 'if __name__', 'try:', 'except:',
+        # Framework/library names
+        'pandas', 'numpy', 'tensorflow', 'pytorch', 'django', 'flask',
+        # File extensions in code context
+        '.py', '.js', '.java',
+    ]
     
-    IMPORTANT: Only uses 'summary' field from MongoDB.
-    Ignores 'filename' and 'transcript_text' to avoid mixed content.
-    """
-
+    # SAP-specific terms that should NEVER be filtered
+    SAP_WHITELIST = [
+        'sap', 'erp', 'mm', 'sd', 'fico', 'hr', 'pp', 'wm', 'qm',
+        'abap', 'hana', 'fiori', 's/4hana', 'netweaver',
+        'procurement', 'sales', 'distribution', 'finance', 'controlling',
+        'material', 'vendor', 'customer', 'purchase order', 'sales order',
+        'general ledger', 'accounts payable', 'accounts receivable',
+        'cost center', 'profit center', 'business process',
+        'master data', 'transactional data', 'organizational structure'
+    ]
+    
     def __init__(self):
         self.db_manager = get_db_manager()
-        logger.info("📚 ContentService initialized")
-
-    def get_context_for_questions(self, user_type: str = "dev") -> str:
+    
+    def _is_programming_content(self, text: str) -> bool:
         """
-        Get context for question generation.
-        
-        AUTO ROUTES to correct collection:
-        - 'dev' → Developer collection
-        - 'non_dev' → Non-Developer collection
-        
-        ONLY uses 'summary' field!
+        Check if text contains CLEAR programming content.
+        Returns False for SAP/Business content even if it uses words like 'function'.
         """
-        try:
-            collection_name = "Developer" if user_type == "dev" else "Non-Developer"
-            logger.info(f"🔄 AUTO ROUTING: {user_type} → '{collection_name}' collection")
-            logger.info(f"⚠️ Using ONLY 'summary' field (ignoring filename, transcript_text)")
-
-            # Get summaries (auto-routed by database manager)
-            summaries = self.db_manager.get_weekly_summaries(user_type)
-
-            if not summaries:
-                raise Exception(f"No summaries found in '{collection_name}' collection")
-
-            logger.info(f"✅ Found {len(summaries)} documents in '{collection_name}'")
-
-            context_blocks = []
-            for idx, doc in enumerate(summaries, 1):
-                # ONLY use 'summary' field - ignore everything else!
-                summary_text = doc.get("summary", "")
-                
-                if not summary_text or len(summary_text) < 100:
-                    continue
-
-                # Clean the summary
-                processed = self._clean_text(summary_text)
-                if not processed or len(processed) < 80:
-                    continue
-
-                # Log preview
-                preview = summary_text[:80].replace('\n', ' ')
-                logger.info(f"  📄 Doc {idx}: {preview}...")
-                
-                context_blocks.append(f"=== Content {idx} ===\n{processed}")
-
-            if not context_blocks:
-                raise Exception(f"No valid summaries in '{collection_name}'")
-
-            # Build final context
-            context = f"""COURSE CONTENT FROM {collection_name.upper()} COLLECTION:
-
-Generate questions ONLY from this content. Do NOT include topics not mentioned here.
-
-{'='*60}
-{chr(10).join(context_blocks)}
-{'='*60}
-
-Create questions based ONLY on the content above."""
-
-            logger.info(f"📊 Context ready: {len(context)} chars from {len(context_blocks)} summaries")
-            return context
-
-        except Exception as e:
-            logger.error(f"❌ Context generation failed: {e}")
-            raise
-
-    def _clean_text(self, text: str) -> str:
-        """Clean and normalize text"""
-        if not text:
-            return ""
-        text = re.sub(r'\s+', ' ', text.strip())
-        text = re.sub(r'http[s]?://\S+', '', text)
-        return text.strip()
-
-    def get_collection_stats(self) -> Dict[str, Any]:
-        """Get collection statistics"""
-        try:
-            dev_count = self.db_manager.developer_collection.count_documents(
-                {"summary": {"$exists": True, "$ne": ""}}
-            )
-            non_dev_count = self.db_manager.non_developer_collection.count_documents(
-                {"summary": {"$exists": True, "$ne": ""}}
-            )
+        text_lower = text.lower()
+        
+        # If it contains SAP-specific terms, it's NOT programming content
+        for sap_term in self.SAP_WHITELIST:
+            if sap_term in text_lower:
+                return False
+        
+        # Only flag as programming if it has STRICT programming indicators
+        for indicator in self.STRICT_PROGRAMMING_INDICATORS:
+            if indicator in text_lower:
+                return True
+        
+        return False
+    
+    def get_context_for_questions(self, user_type: str) -> str:
+        """
+        Get context from appropriate MongoDB collection.
+        
+        FIXED: For non-dev, only filters content with CLEAR programming indicators,
+        not generic terms that also appear in SAP context.
+        """
+        logger.info("=" * 60)
+        if user_type == "dev":
+            logger.info("🟢 DEVELOPER TRACK - Reading Python/Coding summaries")
+        else:
+            logger.info("🟠 NON-DEVELOPER TRACK - Reading SAP/Business summaries")
+        logger.info("=" * 60)
+        
+        # Get summaries from correct collection
+        summaries = self.db_manager.get_weekly_summaries(user_type)
+        
+        if not summaries:
+            logger.warning(f"⚠️ No summaries found for {user_type}")
+            return self._get_default_context(user_type)
+        
+        logger.info(f"📄 Found {len(summaries)} documents in collection")
+        
+        # Build context from summaries
+        context_parts = []
+        valid_count = 0
+        
+        for i, doc in enumerate(summaries, 1):
+            summary_text = doc.get("summary", "")
+            if not summary_text:
+                continue
             
-            # Get sample summaries
-            dev_sample = self.db_manager.developer_collection.find_one(
-                {"summary": {"$exists": True, "$ne": ""}}, {"summary": 1}
-            )
-            non_dev_sample = self.db_manager.non_developer_collection.find_one(
-                {"summary": {"$exists": True, "$ne": ""}}, {"summary": 1}
-            )
+            # For dev: use all summaries (they should be Python content)
+            # For non-dev: ONLY filter if it has STRICT programming indicators
+            if user_type == "non_dev":
+                if self._is_programming_content(summary_text):
+                    # Double check - if it mentions SAP, keep it anyway
+                    if 'sap' in summary_text.lower():
+                        logger.info(f"  ✅ Doc {i}: SAP content (keeping despite some code terms)")
+                        context_parts.append(summary_text)
+                        valid_count += 1
+                    else:
+                        logger.warning(f"  🚫 Doc {i}: FILTERED (clear programming content)")
+                        logger.warning(f"      Preview: {summary_text[:50]}...")
+                else:
+                    # Not programming content - use it
+                    logger.info(f"  ✅ Doc {i}: {summary_text[:50]}...")
+                    context_parts.append(summary_text)
+                    valid_count += 1
+            else:
+                # Developer track - use all content
+                logger.info(f"  ✅ Doc {i}: {summary_text[:50]}...")
+                context_parts.append(summary_text)
+                valid_count += 1
+        
+        if not context_parts:
+            logger.warning(f"⚠️ No valid summaries after filtering!")
+            logger.warning(f"⚠️ Using DEFAULT context for {user_type}")
+            return self._get_default_context(user_type)
+        
+        context = "\n\n".join(context_parts)
+        
+        logger.info("=" * 60)
+        if user_type == "dev":
+            logger.info(f"🟢 DEVELOPER Context Ready: {len(context)} chars from {valid_count} Python summaries")
+        else:
+            logger.info(f"🟠 NON-DEVELOPER Context Ready: {len(context)} chars from {valid_count} SAP summaries")
+        logger.info("=" * 60)
+        
+        return context
+    
+    def _get_default_context(self, user_type: str) -> str:
+        """Get default context when no summaries available"""
+        if user_type == "dev":
+            return """
+            Python Programming Fundamentals:
+            - Variables, data types, operators
+            - Control flow: if/else, loops
+            - Functions and modules
+            - Object-oriented programming
+            - File handling
+            - Exception handling
+            - List comprehensions
+            - Decorators and generators
+            """
+        else:
+            # SAP/Business default context
+            return """
+            SAP ERP Fundamentals and Business Processes:
             
-            return {
-                "Developer": {
-                    "count": dev_count,
-                    "sample": dev_sample.get("summary", "")[:100] if dev_sample else "Empty"
-                },
-                "Non-Developer": {
-                    "count": non_dev_count,
-                    "sample": non_dev_sample.get("summary", "")[:100] if non_dev_sample else "Empty"
-                }
-            }
-        except Exception as e:
-            return {"error": str(e)}
+            SAP MM (Materials Management):
+            - Procurement process: Requisition → Purchase Order → Goods Receipt → Invoice → Payment
+            - Vendor management and evaluation
+            - Inventory management and stock movements
+            
+            SAP SD (Sales and Distribution):
+            - Sales cycle: Inquiry → Quotation → Sales Order → Delivery → Billing → Payment
+            - Customer master data management
+            - Pricing and conditions
+            
+            SAP FICO (Finance and Controlling):
+            - General Ledger accounting
+            - Accounts Payable and Receivable
+            - Cost centers and profit centers
+            - Asset accounting
+            
+            SAP HR (Human Resources):
+            - Organizational management
+            - Personnel administration
+            - Time management and payroll
+            
+            SAP PP (Production Planning):
+            - Material Requirements Planning (MRP)
+            - Production orders and scheduling
+            - Capacity planning
+            
+            Key Concepts:
+            - Master data vs Transactional data
+            - Integration between SAP modules
+            - Organizational structure in SAP
+            - Business process workflows
+            """
 
 
 # Singleton
