@@ -2,7 +2,7 @@
 # Unified AI services for: daily_standup, weekly_interview, weekend_mocktest
 # - Keeps weekend_mocktest API names intact (AIService, get_ai_service)
 # - Namespaces overlapping classes for daily_standup (DS_*) and weekly_interview (WI_*)
-# - Weekly Interview UPDATED: Communication -> Technical -> HR with time-based rounds
+# - Weekly Interview UPDATED: Introduction -> Communication -> Technical -> HR with time-based rounds
 
 import os
 import time
@@ -30,9 +30,10 @@ from .config import config
 from .prompts import (
     prompts as ds_prompts,
     # weekly_interview prompt helpers (UPDATED):
-    build_stage_prompt, build_conversation_prompt, build_evaluation_prompt,
-    build_silence_prompt,
+    build_introduction_prompt, build_stage_prompt, build_conversation_prompt, 
+    build_evaluation_prompt, build_silence_prompt, get_round_transition_message,
     ACKNOWLEDGMENT_PHRASES, TRANSITION_PHRASES, ENCOURAGEMENT_PHRASES,
+    COMMUNICATION_FOLLOWUP_PHRASES, COMMUNICATION_TRANSITION_PHRASES,
     CLARIFICATION_PROMPTS, GENTLE_REDIRECT_PROMPTS, SILENCE_GENTLE_PROMPTS,
     SCORING_PROMPT_TEMPLATE,
     # weekend_mocktest templates:
@@ -40,6 +41,65 @@ from .prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# COMMUNICATION QUESTION BANK - Casual questions for Communication round
+# =============================================================================
+
+COMMUNICATION_QUESTION_BANK = {
+    "ice_breakers": [
+        "How are you doing today?",
+        "How's your day been so far?",
+        "Did you have a good week?",
+        "How are you feeling right now?",
+    ],
+    "self_intro": [
+        "Could you tell me a little about yourself?",
+        "Tell me a bit about your background.",
+        "What's your story? How did you end up here?",
+    ],
+    "favorites": [
+        "What's your favorite place - could be a city, a spot, anywhere?",
+        "Do you have a favorite book or movie?",
+        "What kind of music do you enjoy?",
+        "If you could travel anywhere in the world, where would you go?",
+        "What's your favorite thing to do on weekends?",
+    ],
+    "hobbies": [
+        "What do you enjoy doing in your free time?",
+        "Do you have any hobbies or interests you're passionate about?",
+        "What do you like to do to relax and unwind?",
+        "Are you into any sports or outdoor activities?",
+    ],
+    "personality": [
+        "How would your friends describe you?",
+        "What's something that makes you unique?",
+        "What motivates you to get up in the morning?",
+        "What's one thing you're really proud of?",
+    ],
+    "aspirations": [
+        "What's something you'd love to learn or try?",
+        "Where do you see yourself in a few years?",
+        "If you could have any superpower, what would it be?",
+        "What's a goal you're working towards right now?",
+    ],
+    "experiences": [
+        "Tell me about a memorable experience you've had.",
+        "What's the best trip or vacation you've taken?",
+        "Is there a moment in your life that changed your perspective?",
+        "What's the most interesting thing that happened to you recently?",
+    ],
+    "situational": [
+        "How do you usually handle stress or pressure?",
+        "Tell me about a time you had to deal with a difficult situation.",
+        "How do you manage your time when you have a lot going on?",
+    ]
+}
+
+# Flatten for easy random access
+ALL_COMMUNICATION_QUESTIONS = []
+for category, questions in COMMUNICATION_QUESTION_BANK.items():
+    ALL_COMMUNICATION_QUESTIONS.extend(questions)
 
 # =============================================================================
 # DAILY STANDUP NAMESPACE (DS_*) - UNCHANGED
@@ -475,11 +535,12 @@ class DS_OptimizedConversationManager:
             raise Exception(f"Evaluation generation failed: {e}")
 
 # =============================================================================
-# WEEKLY INTERVIEW NAMESPACE (WI_*) - UPDATED
+# WEEKLY INTERVIEW NAMESPACE (WI_*) - UPDATED WITH INTRODUCTION PHASE
 # =============================================================================
 
 class WI_InterviewStage(Enum):
-    """Updated stages: Communication -> Technical -> HR (no greeting)"""
+    """Updated stages: Introduction -> Communication -> Technical -> HR"""
+    INTRODUCTION = "introduction"
     COMMUNICATION = "communication"
     TECHNICAL = "technical"
     HR = "hr"
@@ -500,7 +561,7 @@ class WI_ConversationExchange:
 
 @dataclass
 class WI_InterviewSession:
-    """Updated session with time-based round tracking"""
+    """Updated session with introduction phase and time-based round tracking"""
     session_id: str
     test_id: str
     student_id: int
@@ -508,7 +569,7 @@ class WI_InterviewSession:
     session_key: str
     created_at: float
     last_activity: float
-    current_stage: WI_InterviewStage = WI_InterviewStage.COMMUNICATION  # Start with Communication
+    current_stage: WI_InterviewStage = WI_InterviewStage.INTRODUCTION  # Start with Introduction
     is_active: bool = True
     websocket: Optional[Any] = None
 
@@ -524,7 +585,7 @@ class WI_InterviewSession:
     # Time-based round tracking
     round_start_times: Dict[str, float] = field(default_factory=dict)
     questions_per_round: Dict[str, int] = field(default_factory=lambda: {
-        "communication": 0, "technical": 0, "hr": 0
+        "introduction": 0, "communication": 0, "technical": 0, "hr": 0
     })
     
     # Tracking
@@ -533,6 +594,13 @@ class WI_InterviewSession:
     silence_prompt_count: int = 0
     current_difficulty: str = "medium"  # "easy", "medium", "hard"
     last_answer_quality: str = "neutral"
+    
+    # Communication round question tracking
+    communication_questions_asked: List[str] = field(default_factory=list)
+    communication_topics_covered: List[str] = field(default_factory=list)
+    
+    # Introduction flag
+    introduction_completed: bool = False
 
     def start_round(self, stage: WI_InterviewStage):
         """Mark the start time of a round"""
@@ -587,6 +655,28 @@ class WI_InterviewSession:
             if ex.user_response:
                 parts.append(f"Candidate: {ex.user_response}")
         return "\n".join(parts)
+    
+    def get_next_communication_question(self) -> str:
+        """Get a random question from communication bank that hasn't been asked"""
+        available = [q for q in ALL_COMMUNICATION_QUESTIONS if q not in self.communication_questions_asked]
+        if not available:
+            # Reset if all questions used
+            self.communication_questions_asked = []
+            available = ALL_COMMUNICATION_QUESTIONS
+        question = random.choice(available)
+        self.communication_questions_asked.append(question)
+        return question
+    
+    def get_communication_question_by_category(self, category: str) -> str:
+        """Get a question from a specific category"""
+        if category in COMMUNICATION_QUESTION_BANK:
+            available = [q for q in COMMUNICATION_QUESTION_BANK[category] 
+                        if q not in self.communication_questions_asked]
+            if available:
+                question = random.choice(available)
+                self.communication_questions_asked.append(question)
+                return question
+        return self.get_next_communication_question()
 
 
 class WI_SharedClientManager:
@@ -658,10 +748,10 @@ class WI_EnhancedInterviewFragmentManager:
             self.session.fragment_keys = list(self.fragments.keys())
             self.session.content_context = "\n\n".join(all_content)
 
-            # Start the first round (Communication)
-            self.session.start_round(WI_InterviewStage.COMMUNICATION)
+            # Start with Introduction phase
+            self.session.start_round(WI_InterviewStage.INTRODUCTION)
 
-            logger.info(f"[WI] Initialized {len(self.fragments)} fragments, starting Communication round")
+            logger.info(f"[WI] Initialized {len(self.fragments)} fragments, starting Introduction")
             return True
 
         except Exception as e:
@@ -695,6 +785,10 @@ class WI_EnhancedInterviewFragmentManager:
 
     def should_continue_round(self, stage: WI_InterviewStage) -> bool:
         """Time-based round continuation check"""
+        # Introduction is always just one exchange
+        if stage == WI_InterviewStage.INTRODUCTION:
+            return not self.session.introduction_completed
+        
         # Get round duration from config
         round_duration = config.ROUND_DURATIONS.get(stage.value, 600)
         elapsed_time = self.session.get_round_elapsed_time()
@@ -769,7 +863,7 @@ class WI_OptimizedAudioProcessor:
 
 
 class WI_OptimizedConversationManager:
-    """Weekly-interview conversation flow with adaptive difficulty and time-based rounds"""
+    """Weekly-interview conversation flow with introduction phase and time-based rounds"""
     def __init__(self, client_manager: WI_SharedClientManager):
         self.client_manager = client_manager
 
@@ -782,7 +876,8 @@ class WI_OptimizedConversationManager:
         
         # Strong answer indicators
         strong_keywords = ["because", "therefore", "for example", "specifically", 
-                          "implemented", "designed", "solved", "approach", "strategy"]
+                          "implemented", "designed", "solved", "approach", "strategy",
+                          "enjoy", "love", "passionate", "interesting", "experience"]
         has_strong_indicators = any(k in user_response.lower() for k in strong_keywords)
         
         if word_count >= config.WI_STRONG_ANSWER_MIN_WORDS and has_strong_indicators:
@@ -794,23 +889,29 @@ class WI_OptimizedConversationManager:
 
     def _should_ask_followup(self, user_response: str, session: WI_InterviewSession, answer_quality: str) -> bool:
         """Determine if a follow-up question is appropriate"""
-        if not user_response or len(user_response.split()) < 5:
+        if not user_response or len(user_response.split()) < 3:
             return False
         
-        # In communication round, always follow up on interesting points
+        # In communication round, follow up more often for natural conversation
         if session.current_stage == WI_InterviewStage.COMMUNICATION:
-            return answer_quality == "strong" and random.random() < 0.4
+            # Follow up on strong or neutral answers to keep conversation flowing
+            if answer_quality in ["strong", "neutral"]:
+                return random.random() < 0.6  # 60% chance of follow-up
+            return False
         
         # In technical round, follow up based on answer quality
         if session.current_stage == WI_InterviewStage.TECHNICAL:
             if answer_quality == "strong":
-                return random.random() < 0.3  # Dive deeper
+                return random.random() < 0.4  # Dive deeper
             elif answer_quality == "weak":
                 return random.random() < 0.5  # Probe fundamentals
+            return random.random() < 0.2
         
         # In HR round, follow up for more examples
         if session.current_stage == WI_InterviewStage.HR:
-            return answer_quality == "neutral" and random.random() < 0.3
+            if answer_quality == "strong":
+                return random.random() < 0.3
+            return random.random() < 0.4
         
         return False
 
@@ -832,32 +933,147 @@ class WI_OptimizedConversationManager:
                 session.current_difficulty = "easy"
             logger.info(f"[WI] Difficulty decreased to: {session.current_difficulty}")
 
-    def _add_natural_personality(self, response: str, answer_quality: str, is_followup: bool) -> str:
+    def _generate_communication_followup(self, user_response: str, session: WI_InterviewSession) -> str:
+        """Generate a natural follow-up for communication round based on user's response"""
+        response_lower = user_response.lower()
+        
+        # Detect topics mentioned and generate relevant follow-ups
+        followup_templates = []
+        
+        # Location/place mentioned
+        if any(word in response_lower for word in ["city", "place", "visit", "travel", "country", "home"]):
+            followup_templates = [
+                "Oh nice! What do you like most about it?",
+                "That sounds interesting! Why is it special to you?",
+                "I'd love to hear more - what makes it your favorite?",
+                "That's cool! Have you been there often?",
+            ]
+        
+        # Hobby/activity mentioned
+        elif any(word in response_lower for word in ["play", "watch", "read", "listen", "hobby", "game", "sport", "music"]):
+            followup_templates = [
+                "That's fun! How did you get into that?",
+                "Nice! What do you enjoy most about it?",
+                "Interesting! How long have you been doing that?",
+                "Cool! Is there a particular reason you enjoy it?",
+            ]
+        
+        # People/friends/family mentioned
+        elif any(word in response_lower for word in ["friend", "family", "people", "team", "colleague"]):
+            followup_templates = [
+                "That's nice! It sounds like you value those relationships.",
+                "Great! How did you meet them?",
+                "That's wonderful! What do you enjoy doing together?",
+            ]
+        
+        # Food mentioned
+        elif any(word in response_lower for word in ["food", "eat", "cook", "restaurant", "cuisine"]):
+            followup_templates = [
+                "Yum! What's your favorite dish?",
+                "That sounds delicious! Do you cook it yourself?",
+                "Nice! Is there a particular reason you love it?",
+            ]
+        
+        # General positive response
+        elif any(word in response_lower for word in ["love", "enjoy", "like", "favorite", "best"]):
+            followup_templates = [
+                "That's great! Can you tell me more about why?",
+                "I can tell you're passionate about it! What got you started?",
+                "Nice! What's the best part about it?",
+            ]
+        
+        # Default follow-ups
+        else:
+            followup_templates = COMMUNICATION_FOLLOWUP_PHRASES
+        
+        return random.choice(followup_templates)
+
+    def _ensure_question_in_response(self, response: str, session: WI_InterviewSession, is_followup: bool) -> str:
+        """Ensure the response contains a question - use fallback if needed"""
+        # Check if response already has a question
+        if '?' in response:
+            return response
+        
+        # Add a question based on the stage
+        if session.current_stage == WI_InterviewStage.COMMUNICATION:
+            if is_followup:
+                return f"{response} Can you tell me more about that?"
+            else:
+                fallback_question = session.get_next_communication_question()
+                return f"{response} {fallback_question}"
+        elif session.current_stage == WI_InterviewStage.TECHNICAL:
+            if is_followup:
+                return f"{response} Could you explain that in more detail?"
+            else:
+                return f"{response} What's your understanding of this concept?"
+        elif session.current_stage == WI_InterviewStage.HR:
+            if is_followup:
+                return f"{response} Can you give me a specific example?"
+            else:
+                return f"{response} How would you handle that situation?"
+        
+        return f"{response} What are your thoughts on this?"
+
+    def _add_natural_personality(self, response: str, answer_quality: str, is_followup: bool, session: WI_InterviewSession) -> str:
         """Add natural conversational elements to response"""
         try:
-            # Add acknowledgment based on answer quality
-            if answer_quality == "strong":
-                ack = random.choice(ENCOURAGEMENT_PHRASES)
-            elif answer_quality == "weak":
-                ack = random.choice(CLARIFICATION_PROMPTS[:3])  # Gentler prompts
+            # For communication round, use casual acknowledgments
+            if session.current_stage == WI_InterviewStage.COMMUNICATION:
+                casual_acks = [
+                    "Oh that's nice!",
+                    "That's interesting!",
+                    "I see!",
+                    "That sounds great!",
+                    "Cool!",
+                    "Nice!",
+                    "That's lovely!",
+                ]
+                if not any(a.lower() in response.lower()[:30] for a in ["that's", "great", "nice", "interesting", "cool", "i see"]):
+                    ack = random.choice(casual_acks)
+                    response = f"{ack} {response}"
             else:
-                ack = random.choice(ACKNOWLEDGMENT_PHRASES)
-            
-            # Check if response already has acknowledgment
-            if not any(p.lower() in response.lower()[:30] for p in ["that's", "great", "good", "interesting", "i see"]):
-                response = f"{ack} {response}"
-            
-            # Ensure response ends with a question
-            if not response.strip().endswith('?'):
-                if is_followup:
-                    response += " Could you elaborate on that?"
+                # For other rounds, use professional acknowledgments
+                if answer_quality == "strong":
+                    ack = random.choice(ENCOURAGEMENT_PHRASES)
+                elif answer_quality == "weak":
+                    ack = random.choice(CLARIFICATION_PROMPTS[:3])
                 else:
-                    response += " What are your thoughts?"
+                    ack = random.choice(ACKNOWLEDGMENT_PHRASES)
+                
+                if not any(p.lower() in response.lower()[:30] for p in ["that's", "great", "good", "interesting", "i see"]):
+                    response = f"{ack} {response}"
+            
+            # Ensure response has a question
+            response = self._ensure_question_in_response(response, session, is_followup)
             
             return response
         except Exception as e:
             logger.error(f"[WI] Personality enhancement failed: {e}")
             return response
+
+    async def generate_first_question(self, session: WI_InterviewSession) -> str:
+        """Generate the first question (introduction) for the interview - called by main.py"""
+        return await self.generate_introduction(session)
+
+    async def generate_introduction(self, session: WI_InterviewSession) -> str:
+        """Generate the interview introduction message"""
+        try:
+            await self.client_manager.initialize()
+            
+            introduction = f"""Hello {session.student_name}! Welcome to your weekly interview session. I'm excited to chat with you today!
+
+We'll have three rounds:
+• First, a Communication round (about 10 minutes) where we'll have a casual conversation and get to know each other.
+• Then, a Technical round (about 20 minutes) where we'll discuss your recent work and technical knowledge.
+• Finally, an HR round (about 15 minutes) with some behavioral questions.
+
+So, how are you doing today? Ready to get started?"""
+            
+            return introduction
+            
+        except Exception as e:
+            logger.error(f"[WI] Introduction generation failed: {e}")
+            return f"Hello {session.student_name}! Welcome to your interview. How are you doing today?"
 
     async def generate_silence_response(self, session: WI_InterviewSession) -> str:
         """Generate gentle prompt when candidate is silent"""
@@ -877,16 +1093,32 @@ class WI_OptimizedConversationManager:
         try:
             await self.client_manager.initialize()
             
+            # Handle introduction phase
+            if session.current_stage == WI_InterviewStage.INTRODUCTION:
+                # User responded to introduction, now transition to Communication
+                session.introduction_completed = True
+                session.start_round(WI_InterviewStage.COMMUNICATION)
+                
+                # Generate first communication question based on their response
+                first_question = session.get_communication_question_by_category("favorites")
+                
+                # Acknowledge their response and ask first question
+                response = f"Great to hear! I'm glad you're ready. Let's start with getting to know you a bit. {first_question}"
+                return response
+            
             # Assess answer quality
             answer_quality = self._assess_answer_quality(user_response)
+            logger.info(f"[WI] Answer quality assessed: {answer_quality}")
             
             # Adjust difficulty for technical round
             self._adjust_difficulty(session, answer_quality)
             
             # Determine if we should ask a follow-up
             should_followup = self._should_ask_followup(user_response, session, answer_quality)
+            logger.info(f"[WI] Should followup: {should_followup}")
             
-            if not should_followup and session.current_stage != WI_InterviewStage.COMMUNICATION:
+            # Get next concept for non-communication rounds
+            if not should_followup and session.current_stage not in [WI_InterviewStage.COMMUNICATION, WI_InterviewStage.INTRODUCTION]:
                 next_concept = session.fragment_manager.get_next_concept(session.current_stage)
                 session.current_concept = next_concept
 
@@ -894,7 +1126,32 @@ class WI_OptimizedConversationManager:
             round_duration = config.ROUND_DURATIONS.get(session.current_stage.value, 600) // 60
             time_elapsed = session.get_round_elapsed_minutes()
             questions_asked = session.questions_per_round.get(session.current_stage.value, 0)
+            
+            logger.info(f"[WI] Round: {session.current_stage.value}, Time elapsed: {time_elapsed:.1f}min, Questions: {questions_asked}")
 
+            # For communication round, handle more naturally
+            if session.current_stage == WI_InterviewStage.COMMUNICATION:
+                if should_followup:
+                    # Generate natural follow-up based on what they said
+                    followup = self._generate_communication_followup(user_response, session)
+                    response = self._add_natural_personality(followup, answer_quality, True, session)
+                else:
+                    # Ask a new question from a different category
+                    # Vary the categories to keep conversation interesting
+                    categories = ["favorites", "hobbies", "personality", "aspirations", "experiences"]
+                    category = random.choice(categories)
+                    new_question = session.get_communication_question_by_category(category)
+                    
+                    # Add a transition
+                    transition = random.choice(COMMUNICATION_TRANSITION_PHRASES)
+                    response = f"{transition} {new_question}"
+                    response = self._add_natural_personality(response, answer_quality, False, session)
+                
+                # Reset silence counter
+                session.silence_prompt_count = 0
+                return response
+
+            # For technical and HR rounds, use AI
             conversation_history = session.get_conversation_history(3)
             stage_prompt = build_stage_prompt(session.current_stage.value, session.content_context)
             
@@ -909,8 +1166,7 @@ class WI_OptimizedConversationManager:
                 answer_quality=answer_quality
             )
             
-            logger.info(f"[WI] OpenAI model: {config.OPENAI_MODEL}, Stage: {session.current_stage.value}, "
-                       f"Difficulty: {session.current_difficulty}, Answer Quality: {answer_quality}")
+            logger.info(f"[WI] Calling OpenAI model: {config.OPENAI_MODEL}")
             
             resp = await self.client_manager.openai_client.chat.completions.create(
                 model=config.OPENAI_MODEL,
@@ -921,69 +1177,60 @@ class WI_OptimizedConversationManager:
             )
             
             ai_response = resp.choices[0].message.content.strip()
-            if not ai_response:
-                raise Exception("OpenAI returned empty response")
+            logger.info(f"[WI] Raw AI response: {ai_response[:100]}...")
             
-            ai_response = self._add_natural_personality(ai_response, answer_quality, should_followup)
+            if not ai_response:
+                logger.warning("[WI] Empty AI response, using fallback")
+                ai_response = "That's interesting. Could you tell me more about your experience with this?"
+            
+            ai_response = self._add_natural_personality(ai_response, answer_quality, should_followup, session)
             
             # Reset silence counter on successful response
             session.silence_prompt_count = 0
             
+            logger.info(f"[WI] Final response: {ai_response[:100]}...")
             return ai_response
             
         except Exception as e:
             logger.error(f"[WI] Response generation failed: {e}")
+            # Return a fallback question
+            if session.current_stage == WI_InterviewStage.COMMUNICATION:
+                fallback = session.get_next_communication_question()
+                return f"That's interesting! {fallback}"
             raise Exception(f"AI Response Generation Failed: {e}")
-
-    async def generate_first_question(self, session: WI_InterviewSession) -> str:
-        """Generate the first confidence-building question for Communication round"""
-        try:
-            await self.client_manager.initialize()
-            
-            first_questions = [
-                f"Hello {session.student_name}! Welcome to your interview. To start off, could you tell me a little about yourself?",
-                f"Hi {session.student_name}! It's great to meet you. Let's begin with something simple - what are you currently studying or working on?",
-                f"Welcome {session.student_name}! I'm excited to learn about you today. Could you start by telling me what brought you to this field?",
-            ]
-            
-            return random.choice(first_questions)
-            
-        except Exception as e:
-            logger.error(f"[WI] First question generation failed: {e}")
-            return f"Hello {session.student_name}! Welcome to your interview. Could you tell me a little about yourself?"
 
     async def generate_round_transition(self, session: WI_InterviewSession, next_stage: WI_InterviewStage) -> str:
         """Generate smooth transition message between rounds"""
-        transitions = {
-            WI_InterviewStage.TECHNICAL: [
-                "Thank you for sharing that. Now let's move on to the technical portion of our interview.",
-                "Great conversation! Let's transition to discussing some technical topics now.",
-                "I've enjoyed learning about you. Now I'd like to explore your technical knowledge."
-            ],
-            WI_InterviewStage.HR: [
-                "Excellent technical discussion! For our final round, I'd like to learn more about you as a person and professional.",
-                "Thank you for those technical insights. Let's conclude with some behavioral questions.",
-                "Great job on the technical portion. Now let's discuss some situations and experiences."
-            ],
-            WI_InterviewStage.COMPLETE: [
-                "We've covered all the rounds. Thank you for your time and thoughtful responses.",
-                "That concludes our interview. I appreciate your participation today.",
-                "We've reached the end of our interview. Thank you for being so engaged."
-            ]
-        }
-        
-        options = transitions.get(next_stage, ["Let's continue with the next section."])
-        return random.choice(options)
+        return get_round_transition_message(next_stage.value)
 
     async def generate_fast_evaluation(self, session: WI_InterviewSession) -> Tuple[str, Dict[str, float]]:
-        """Generate comprehensive evaluation with 5 criteria"""
+        """Generate comprehensive evaluation with 5 criteria, structured by rounds"""
         try:
             await self.client_manager.initialize()
             
-            conversation_log = "\n".join([
-                f"[{ex.stage.value.upper()}] Interviewer: {ex.ai_message}\nCandidate: {ex.user_response}\n"
-                for ex in session.exchanges if ex.user_response
-            ])
+            # Build conversation log grouped by rounds
+            communication_log = []
+            technical_log = []
+            hr_log = []
+            
+            for ex in session.exchanges:
+                if ex.user_response:
+                    entry = f"Interviewer: {ex.ai_message}\nCandidate: {ex.user_response}\n"
+                    if ex.stage == WI_InterviewStage.COMMUNICATION:
+                        communication_log.append(entry)
+                    elif ex.stage == WI_InterviewStage.TECHNICAL:
+                        technical_log.append(entry)
+                    elif ex.stage == WI_InterviewStage.HR:
+                        hr_log.append(entry)
+            
+            # Format conversation log with round headers
+            conversation_log = ""
+            if communication_log:
+                conversation_log += "=== COMMUNICATION ROUND ===\n" + "\n".join(communication_log) + "\n\n"
+            if technical_log:
+                conversation_log += "=== TECHNICAL ROUND ===\n" + "\n".join(technical_log) + "\n\n"
+            if hr_log:
+                conversation_log += "=== HR ROUND ===\n" + "\n".join(hr_log) + "\n"
             
             if not conversation_log:
                 raise Exception("No conversation data for evaluation")
@@ -991,7 +1238,7 @@ class WI_OptimizedConversationManager:
             evaluation_prompt = build_evaluation_prompt(
                 student_name=session.student_name,
                 duration=(time.time() - session.created_at) / 60,
-                stages_completed=[s for s, c in session.questions_per_round.items() if c > 0],
+                stages_completed=[s for s, c in session.questions_per_round.items() if c > 0 and s != "introduction"],
                 conversation_log=conversation_log,
                 content_context=session.content_context
             )
@@ -999,11 +1246,11 @@ class WI_OptimizedConversationManager:
             ev = await self.client_manager.openai_client.chat.completions.create(
                 model=config.OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are an experienced interviewer providing detailed, constructive feedback."},
+                    {"role": "system", "content": "You are an experienced interviewer providing detailed, constructive feedback structured by interview rounds."},
                     {"role": "user", "content": evaluation_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=1000
+                max_tokens=2000
             )
             
             evaluation = ev.choices[0].message.content.strip()
@@ -1043,9 +1290,9 @@ class WI_OptimizedConversationManager:
                     if 0 <= val <= 10:
                         scores[key] = val
                     else:
-                        scores[key] = 5.0  # Default
+                        scores[key] = 5.0
                 else:
-                    scores[key] = 5.0  # Default
+                    scores[key] = 5.0
             
             # Calculate weighted overall if not present
             if "weighted_overall" not in scores or scores["weighted_overall"] == 5.0:

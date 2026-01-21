@@ -5,7 +5,7 @@ AI Services - UPDATED with AI Explanations for Evaluation
 Features:
 - Generates AI explanations for wrong answers
 - Section-wise evaluation with detailed feedback
-- Proper answer comparison logic
+- Dynamic code generation for coding questions
 """
 
 import json
@@ -241,6 +241,176 @@ class AIService:
         return []
 
     # ════════════════════════════════════════════════════════════
+    # AI CODE GENERATION FOR CODING QUESTIONS
+    # ════════════════════════════════════════════════════════════
+    
+    def generate_correct_code(self, question: str) -> Dict[str, str]:
+        """
+        Generate correct code solution for a coding question.
+        
+        Returns:
+            {
+                "code": "actual working code with proper line breaks",
+                "explanation": "brief explanation of the code"
+            }
+        """
+        try:
+            prompt = f"""You are a Python programming expert. Generate the correct, complete, working Python code for this question.
+
+Question: {question}
+
+Requirements:
+1. Write clean, correct Python code
+2. Always include print() to show output
+3. Keep it simple and beginner-friendly
+
+Write ONLY the Python code inside ```python``` block. No explanations."""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a Python expert. Return only code in ```python``` block."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=600
+            )
+            
+            content = response.choices[0].message.content.strip()
+            
+            # Extract code from markdown block
+            code = ""
+            code_block_match = re.search(r'```python\s*(.*?)\s*```', content, re.DOTALL)
+            if code_block_match:
+                code = code_block_match.group(1).strip()
+            else:
+                code_block_match = re.search(r'```\s*(.*?)\s*```', content, re.DOTALL)
+                if code_block_match:
+                    code = code_block_match.group(1).strip()
+                else:
+                    code = content
+            
+            # FORCE proper formatting - this is the key fix
+            code = self._force_code_formatting(code)
+            
+            # Generate explanation
+            explanation = self._generate_code_explanation(question, code)
+            
+            return {
+                "code": code,
+                "explanation": explanation
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to generate code solution: {e}")
+            return {
+                "code": "# Unable to generate code",
+                "explanation": "Code generation failed. Please review the question manually."
+            }
+    
+    def _force_code_formatting(self, code: str) -> str:
+        """
+        FORCE proper line breaks in code.
+        This handles cases where AI returns single-line code.
+        """
+        if not code:
+            return code
+        
+        # If already has good formatting (more than 3 lines), just clean up
+        if code.count('\n') >= 3:
+            lines = [line.rstrip() for line in code.split('\n')]
+            return '\n'.join(lines)
+        
+        # FORCE line breaks - split on Python keywords
+        # Step 1: Add markers before keywords
+        formatted = code
+        
+        # Keywords that should start on new line (with space before them in single-line code)
+        keywords = [
+            ' def ', ' class ', ' if ', ' elif ', ' else:', ' for ', ' while ',
+            ' try:', ' except ', ' except:', ' finally:', ' with ',
+            ' return ', ' import ', ' from ', ' print(', ' raise ',
+            ' break', ' continue', ' pass', ' yield '
+        ]
+        
+        # Replace space+keyword with newline+keyword
+        for kw in keywords:
+            formatted = formatted.replace(kw, '\n' + kw.strip() + ' ' if not kw.endswith('(') else '\n' + kw.strip())
+        
+        # Fix print( specifically
+        formatted = formatted.replace(' print(', '\nprint(')
+        
+        # Handle colon followed by code (def xxx(): code -> def xxx():\n    code)
+        # Match pattern: ): followed by letter/word
+        formatted = re.sub(r'\):\s*([a-zA-Z_])', r'):\n    \1', formatted)
+        
+        # Handle for/while/if with colon: "for x in y: code" -> "for x in y:\n    code"
+        formatted = re.sub(r':\s+([a-zA-Z_]\w*\s*=)', r':\n    \1', formatted)
+        
+        # Variable assignments that follow other statements
+        # Match: word = (but not ==)
+        formatted = re.sub(r'\s+([a-zA-Z_]\w*)\s*=\s*(?!=)', r'\n\1 = ', formatted)
+        
+        # Clean up and apply proper indentation
+        lines = formatted.split('\n')
+        final_lines = []
+        indent_level = 0
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            
+            # Decrease indent before else/elif/except/finally
+            if stripped.startswith(('elif ', 'else:', 'except', 'finally:')):
+                indent_level = max(0, indent_level - 1)
+            
+            # Determine this line's indent
+            if indent_level > 0 and not stripped.startswith(('def ', 'class ')):
+                final_lines.append('    ' * indent_level + stripped)
+            else:
+                final_lines.append(stripped)
+            
+            # Increase indent after def/class/if/for/while/try/with/elif/else/except/finally
+            if stripped.endswith(':'):
+                indent_level += 1
+            
+            # Decrease indent after return (usually ends a block)
+            if stripped.startswith('return '):
+                indent_level = max(0, indent_level - 1)
+        
+        result = '\n'.join(final_lines)
+        
+        # Final cleanup - remove any double newlines
+        result = re.sub(r'\n\n+', '\n\n', result)
+        
+        return result.strip()
+    
+    def _generate_code_explanation(self, question: str, code: str) -> str:
+        """Generate a brief explanation for the code"""
+        try:
+            prompt = f"""Question: {question}
+
+Code:
+{code}
+
+Write a 1-2 sentence explanation of what this code does. Be brief and clear."""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Give very brief code explanations."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=100
+            )
+            
+            return response.choices[0].message.content.strip()
+        except:
+            return "This code solves the given problem correctly."
+
+    # ════════════════════════════════════════════════════════════
     # AI EXPLANATION GENERATION
     # ════════════════════════════════════════════════════════════
     
@@ -292,6 +462,56 @@ Response format: Just the explanation text, no labels or formatting."""
             else:
                 return f"The correct answer is: {correct_answer}"
 
+    def generate_coding_explanation(self, question: str, user_code: str, correct_code: str, 
+                                    is_correct: bool) -> str:
+        """
+        Generate explanation for coding questions with code comparison.
+        """
+        try:
+            if is_correct:
+                prompt = f"""You are a Python tutor. The student wrote correct code.
+
+Question: {question}
+
+Student's Code:
+{user_code}
+
+Give brief positive feedback (1-2 sentences) about their solution."""
+            else:
+                prompt = f"""You are a Python tutor. Explain what's wrong with the student's code.
+
+Question: {question}
+
+Student's Code:
+{user_code}
+
+Correct Code:
+{correct_code}
+
+Provide a brief explanation (2-3 sentences) that:
+1. Points out the issue in their code
+2. Explains why the correct code works
+Keep it educational and encouraging."""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful Python programming tutor."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=200
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate coding explanation: {e}")
+            if is_correct:
+                return "Correct! Your code works as expected."
+            else:
+                return "Your code has some issues. Please review the correct solution."
+
     def generate_batch_explanations(self, qa_pairs: List[Dict], question_type: str) -> List[str]:
         """
         Generate explanations for a batch of questions.
@@ -306,7 +526,18 @@ Response format: Just the explanation text, no labels or formatting."""
             options = qa.get("options", [])
             is_correct = qa.get("is_correct", False)
             
-            if is_correct:
+            # For coding questions, get the generated correct code
+            correct_code = qa.get("generated_correct_code", "")
+            
+            if question_type == "coding":
+                # Generate coding-specific explanation
+                explanation = self.generate_coding_explanation(
+                    question=question,
+                    user_code=user_answer,
+                    correct_code=correct_code,
+                    is_correct=is_correct
+                )
+            elif is_correct:
                 # For correct answers, give brief positive feedback
                 explanation = self._get_correct_answer_feedback(question_type)
             else:
@@ -337,15 +568,107 @@ Response format: Just the explanation text, no labels or formatting."""
                 "Excellent! You understood this topic well."
             ],
             "coding": [
-                "Correct! Your solution approach was right.",
-                "Well done! Your code logic is sound.",
-                "Excellent! Good problem-solving skills."
+                "Correct! Your code solution is right.",
+                "Well done! Your code works as expected.",
+                "Excellent! Good programming skills."
             ]
         }
         
         import random
         options = feedbacks.get(question_type, feedbacks["mcq"])
         return random.choice(options)
+
+    # ════════════════════════════════════════════════════════════
+    # CODING ANSWER EVALUATION
+    # ════════════════════════════════════════════════════════════
+    
+    def evaluate_code_answer(self, question: str, user_code: str) -> Dict:
+        """
+        Evaluate a coding answer and generate correct code.
+        
+        Returns:
+            {
+                "is_correct": bool,
+                "correct_code": "actual correct code",
+                "explanation": "explanation text",
+                "user_issues": ["list of issues found"] 
+            }
+        """
+        try:
+            # First, generate the correct code
+            correct_solution = self.generate_correct_code(question)
+            correct_code = correct_solution["code"]
+            
+            # Now evaluate user's code
+            prompt = f"""You are a Python code evaluator. Compare the student's code with the correct solution.
+
+Question: {question}
+
+Student's Code:
+{user_code if user_code else "(No answer provided)"}
+
+Correct Code:
+{correct_code}
+
+Evaluate if the student's code would produce the correct output and solve the problem.
+Consider:
+1. Does it have correct logic?
+2. Does it produce the expected output?
+3. Are there syntax errors?
+
+Respond in this EXACT format:
+IS_CORRECT: YES or NO
+ISSUES: List any issues (or "None" if correct)
+"""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a strict but fair code evaluator."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=300
+            )
+            
+            content = response.choices[0].message.content.strip()
+            
+            # Parse response
+            is_correct = "IS_CORRECT: YES" in content.upper() or "IS_CORRECT:YES" in content.upper()
+            
+            # Extract issues
+            issues = []
+            issues_match = re.search(r'ISSUES:\s*(.+?)(?=$|\n\n)', content, re.DOTALL | re.IGNORECASE)
+            if issues_match:
+                issues_text = issues_match.group(1).strip()
+                if issues_text.lower() != "none":
+                    issues = [i.strip() for i in issues_text.split('\n') if i.strip()]
+            
+            # Generate explanation
+            explanation = self.generate_coding_explanation(
+                question=question,
+                user_code=user_code,
+                correct_code=correct_code,
+                is_correct=is_correct
+            )
+            
+            return {
+                "is_correct": is_correct,
+                "correct_code": correct_code,
+                "explanation": explanation,
+                "user_issues": issues
+            }
+            
+        except Exception as e:
+            logger.error(f"Code evaluation failed: {e}")
+            # Fallback
+            correct_solution = self.generate_correct_code(question)
+            return {
+                "is_correct": False,
+                "correct_code": correct_solution["code"],
+                "explanation": "Unable to evaluate. Please review the correct solution.",
+                "user_issues": ["Evaluation error"]
+            }
 
     # ════════════════════════════════════════════════════════════
     # SECTION-WISE EVALUATION WITH AI EXPLANATIONS
@@ -359,11 +682,12 @@ Response format: Just the explanation text, no labels or formatting."""
         - Section scores
         - Question-by-question results
         - AI explanations for each answer
+        - Correct code for coding questions
         """
         all_scores = []
         all_feedbacks = []
         section_scores = {}
-        section_details = {}  # NEW: Detailed results per section
+        section_details = {}  # Detailed results per section
         
         for section_name, qa_pairs in sections.items():
             if not qa_pairs:
@@ -382,44 +706,91 @@ Response format: Just the explanation text, no labels or formatting."""
                 question_text = qa.get("question", "")
                 options = qa.get("options", [])
                 
-                # Determine if answer is correct
-                is_correct = self._check_answer_correct(
-                    user_answer=user_answer,
-                    correct_letter=correct_letter,
-                    correct_text=correct_text,
-                    options=options
-                )
+                # ════════════════════════════════════════════════════════
+                # CODING QUESTIONS: Generate correct code
+                # ════════════════════════════════════════════════════════
+                if section_name == "coding":
+                    logger.info(f"💻 Evaluating coding question {idx + 1}...")
+                    
+                    # Evaluate code and get correct solution
+                    code_eval = self.evaluate_code_answer(question_text, user_answer)
+                    
+                    is_correct = code_eval["is_correct"]
+                    correct_code = code_eval["correct_code"]
+                    explanation = code_eval["explanation"]
+                    
+                    # Store generated correct code for batch explanation
+                    qa["generated_correct_code"] = correct_code
+                    qa["is_correct"] = is_correct
+                    
+                    all_scores.append(1 if is_correct else 0)
+                    
+                    if is_correct:
+                        section_correct += 1
+                    
+                    # Build result entry for coding question
+                    result_entry = {
+                        "question_number": idx + 1,
+                        "question": question_text[:200] + "..." if len(question_text) > 200 else question_text,
+                        "user_answer": user_answer if user_answer else "No answer provided",
+                        "correct_answer": correct_code,  # This is now actual code!
+                        "is_correct": is_correct,
+                        "options": None,  # Coding questions don't have options
+                        "explanation": explanation,
+                        "user_issues": code_eval.get("user_issues", [])
+                    }
+                    
+                    section_results.append(result_entry)
                 
-                # Mark for explanation generation
-                qa["is_correct"] = is_correct
-                
-                all_scores.append(1 if is_correct else 0)
-                
-                if is_correct:
-                    section_correct += 1
-                
-                # Build result entry for this question
-                result_entry = {
-                    "question_number": idx + 1,
-                    "question": question_text[:200] + "..." if len(question_text) > 200 else question_text,
-                    "user_answer": user_answer if user_answer else "No answer provided",
-                    "correct_answer": correct_text if correct_text else correct_letter,
-                    "is_correct": is_correct,
-                    "options": options,
-                    "explanation": ""  # Will be filled below
-                }
-                
-                section_results.append(result_entry)
+                # ════════════════════════════════════════════════════════
+                # MCQ/APTITUDE QUESTIONS: Standard evaluation
+                # ════════════════════════════════════════════════════════
+                else:
+                    # Determine if answer is correct
+                    is_correct = self._check_answer_correct(
+                        user_answer=user_answer,
+                        correct_letter=correct_letter,
+                        correct_text=correct_text,
+                        options=options
+                    )
+                    
+                    # Mark for explanation generation
+                    qa["is_correct"] = is_correct
+                    
+                    all_scores.append(1 if is_correct else 0)
+                    
+                    if is_correct:
+                        section_correct += 1
+                    
+                    # Build result entry for this question
+                    result_entry = {
+                        "question_number": idx + 1,
+                        "question": question_text[:200] + "..." if len(question_text) > 200 else question_text,
+                        "user_answer": user_answer if user_answer else "No answer provided",
+                        "correct_answer": correct_text if correct_text else correct_letter,
+                        "is_correct": is_correct,
+                        "options": options,
+                        "explanation": ""  # Will be filled below
+                    }
+                    
+                    section_results.append(result_entry)
             
-            # Generate AI explanations for this section
-            logger.info(f"🤖 Generating AI explanations for {section_name}...")
-            explanations = self.generate_batch_explanations(qa_pairs, section_name)
-            
-            # Add explanations to results
-            for i, explanation in enumerate(explanations):
-                if i < len(section_results):
-                    section_results[i]["explanation"] = explanation
-                    all_feedbacks.append(explanation)
+            # ════════════════════════════════════════════════════════
+            # Generate AI explanations (for non-coding sections)
+            # ════════════════════════════════════════════════════════
+            if section_name != "coding":
+                logger.info(f"🤖 Generating AI explanations for {section_name}...")
+                explanations = self.generate_batch_explanations(qa_pairs, section_name)
+                
+                # Add explanations to results
+                for i, explanation in enumerate(explanations):
+                    if i < len(section_results):
+                        section_results[i]["explanation"] = explanation
+                        all_feedbacks.append(explanation)
+            else:
+                # For coding, explanations already added
+                for result in section_results:
+                    all_feedbacks.append(result.get("explanation", ""))
             
             # Calculate section score
             section_pct = round((section_correct / section_total) * 100, 1) if section_total > 0 else 0
@@ -455,7 +826,7 @@ Response format: Just the explanation text, no labels or formatting."""
             "total_questions": total_questions,
             "overall_percentage": overall_pct,
             "section_scores": section_scores,
-            "section_details": section_details,  # NEW: Detailed per-section results
+            "section_details": section_details,
             "evaluation_report": report
         }
     
@@ -558,7 +929,15 @@ Response format: Just the explanation text, no labels or formatting."""
                 report += f"\nQ{q['question_number']}. {status}\n"
                 report += f"   Question: {q['question'][:100]}...\n" if len(q['question']) > 100 else f"   Question: {q['question']}\n"
                 report += f"   Your Answer: {q['user_answer']}\n"
-                report += f"   Correct Answer: {q['correct_answer']}\n"
+                
+                # For coding questions, format code nicely
+                if section_name == "coding":
+                    report += f"   Correct Code:\n"
+                    for line in q['correct_answer'].split('\n'):
+                        report += f"      {line}\n"
+                else:
+                    report += f"   Correct Answer: {q['correct_answer']}\n"
+                
                 report += f"   📝 {q['explanation']}\n"
         
         # Recommendations

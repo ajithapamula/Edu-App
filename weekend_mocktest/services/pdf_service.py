@@ -5,7 +5,7 @@ PDF Service - Generate Professional Test Result PDFs
 Features:
 - Section-wise breakdown (Aptitude → MCQ → Coding)
 - Question-by-question analysis
-- User Answer vs Correct Answer
+- User Answer vs Correct Answer with PROPER CODE FORMATTING
 - AI-generated explanations
 - ✅/❌ status indicators
 - Professional formatting
@@ -31,17 +31,53 @@ class PDFService:
         self.output_dir = "static/pdf_reports"
         os.makedirs(self.output_dir, exist_ok=True)
         
-        logger.info("📄 PDF Service initialized with AI Explanations support")
+        logger.info("📄 PDF Service initialized with Code Formatting support")
+
+    def _is_code_content(self, text: str) -> bool:
+        """Check if text looks like code"""
+        if not text:
+            return False
+        code_indicators = [
+            'def ', 'class ', 'import ', 'from ', 'return ',
+            'print(', 'if ', 'for ', 'while ', 'try:', 'except',
+            '= ', '==', '!=', '>=', '<=', '+=', '-=',
+            'function', 'const ', 'let ', 'var ',
+            '=>', '__init__', 'self.'
+        ]
+        return any(indicator in text for indicator in code_indicators)
+
+    def _format_code_for_pdf(self, code: str) -> str:
+        """
+        Format code for PDF display with proper line breaks.
+        Converts \n to <br/> and escapes HTML characters.
+        """
+        if not code:
+            return code
+        
+        # Escape HTML special characters
+        code = code.replace('&', '&amp;')
+        code = code.replace('<', '&lt;')
+        code = code.replace('>', '&gt;')
+        
+        # Replace newlines with HTML breaks
+        code = code.replace('\n', '<br/>')
+        
+        # Replace multiple spaces with non-breaking spaces for indentation
+        # This preserves Python indentation
+        code = code.replace('    ', '&nbsp;&nbsp;&nbsp;&nbsp;')
+        code = code.replace('  ', '&nbsp;&nbsp;')
+        
+        return code
 
     async def generate_test_results_pdf(self, test_id: str) -> bytes:
-        """Generate comprehensive PDF report with AI explanations"""
+        """Generate comprehensive PDF report with AI explanations and proper code formatting"""
         try:
             from reportlab.lib.pagesizes import A4
             from reportlab.lib import colors
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
             from reportlab.platypus import (
                 SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-                PageBreak, HRFlowable, ListFlowable, ListItem
+                PageBreak, HRFlowable, ListFlowable, ListItem, Preformatted
             )
             from reportlab.lib.units import inch, cm
             from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -130,6 +166,52 @@ class PDFService:
             fontSize=9,
             leftIndent=20,
             textColor=colors.HexColor('#dc2626')
+        )
+        
+        # CODE STYLE - Monospace font with proper formatting
+        code_style = ParagraphStyle(
+            'CodeStyle',
+            parent=styles['Normal'],
+            fontSize=8,
+            fontName='Courier',
+            leftIndent=25,
+            rightIndent=10,
+            spaceBefore=5,
+            spaceAfter=5,
+            backColor=colors.HexColor('#1e293b'),
+            textColor=colors.HexColor('#4ade80'),
+            borderColor=colors.HexColor('#334155'),
+            borderWidth=1,
+            borderPadding=8,
+            leading=12  # Line height
+        )
+        
+        code_label_style = ParagraphStyle(
+            'CodeLabelStyle',
+            parent=styles['Normal'],
+            fontSize=8,
+            fontName='Helvetica-Bold',
+            leftIndent=20,
+            spaceBefore=5,
+            spaceAfter=2,
+            textColor=colors.HexColor('#059669')
+        )
+        
+        user_code_style = ParagraphStyle(
+            'UserCodeStyle',
+            parent=styles['Normal'],
+            fontSize=8,
+            fontName='Courier',
+            leftIndent=25,
+            rightIndent=10,
+            spaceBefore=5,
+            spaceAfter=5,
+            backColor=colors.HexColor('#fef2f2'),
+            textColor=colors.HexColor('#991b1b'),
+            borderColor=colors.HexColor('#fecaca'),
+            borderWidth=1,
+            borderPadding=8,
+            leading=12
         )
         
         elements = []
@@ -269,6 +351,8 @@ class PDFService:
                 section_score = details.get("score", {})
                 questions = details.get("questions", [])
                 
+                is_coding_section = section_name == "coding"
+                
                 # Section header
                 elements.append(Paragraph(
                     f"{section_icon} {section_name.upper()} SECTION ({section_score.get('correct', 0)}/{section_score.get('total', 0)} - {section_score.get('percentage', 0)}%)",
@@ -283,6 +367,9 @@ class PDFService:
                     correct_answer = q.get("correct_answer", "N/A")
                     explanation = q.get("explanation", "")
                     
+                    # Check if answers are code
+                    is_code_answer = is_coding_section or self._is_code_content(correct_answer) or self._is_code_content(user_answer)
+                    
                     # Status icon
                     status = "✅" if is_correct else "❌"
                     status_color = colors.HexColor('#059669') if is_correct else colors.HexColor('#dc2626')
@@ -294,24 +381,59 @@ class PDFService:
                         fontSize=10,
                         fontName='Helvetica-Bold',
                         textColor=status_color,
-                        spaceBefore=10,
+                        spaceBefore=12,
                         spaceAfter=4
                     )
                     
-                    elements.append(Paragraph(f"{status} Q{q_num}. {question_text[:150]}{'...' if len(question_text) > 150 else ''}", q_header_style))
+                    # Truncate question for header
+                    q_display = question_text[:150] + '...' if len(question_text) > 150 else question_text
+                    q_display = q_display.replace('<', '&lt;').replace('>', '&gt;')
                     
-                    # User answer
-                    if is_correct:
-                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", correct_style))
+                    elements.append(Paragraph(f"{status} Q{q_num}. {q_display}", q_header_style))
+                    
+                    # ════════════════════════════════════════════════════════
+                    # CODE ANSWERS - Special formatting
+                    # ════════════════════════════════════════════════════════
+                    if is_code_answer:
+                        # User Answer Label
+                        elements.append(Paragraph("Your Answer:", code_label_style if is_correct else ParagraphStyle(
+                            'WrongLabel', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold',
+                            leftIndent=20, spaceBefore=5, spaceAfter=2, textColor=colors.HexColor('#dc2626')
+                        )))
+                        
+                        # Format user code
+                        user_code_formatted = self._format_code_for_pdf(user_answer)
+                        if is_correct:
+                            elements.append(Paragraph(user_code_formatted, code_style))
+                        else:
+                            elements.append(Paragraph(user_code_formatted, user_code_style))
+                        
+                        # Correct Answer (if wrong)
+                        if not is_correct:
+                            elements.append(Paragraph("Correct Answer:", code_label_style))
+                            correct_code_formatted = self._format_code_for_pdf(correct_answer)
+                            elements.append(Paragraph(correct_code_formatted, code_style))
+                    
+                    # ════════════════════════════════════════════════════════
+                    # NON-CODE ANSWERS - Simple text
+                    # ════════════════════════════════════════════════════════
                     else:
-                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", wrong_style))
-                        elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer}", correct_style))
+                        # Escape HTML in answers
+                        user_answer_safe = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
+                        correct_answer_safe = str(correct_answer).replace('<', '&lt;').replace('>', '&gt;')
+                        
+                        if is_correct:
+                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", correct_style))
+                        else:
+                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", wrong_style))
+                            elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style))
                     
                     # AI Explanation
                     if explanation:
-                        elements.append(Paragraph(f"💡 <i>{explanation}</i>", explanation_style))
+                        explanation_safe = str(explanation).replace('<', '&lt;').replace('>', '&gt;')
+                        elements.append(Paragraph(f"💡 <i>{explanation_safe}</i>", explanation_style))
                     
-                    elements.append(Spacer(1, 5))
+                    elements.append(Spacer(1, 8))
                 
                 elements.append(Spacer(1, 10))
                 elements.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#e2e8f0')))
@@ -334,6 +456,7 @@ class PDFService:
                 
                 section_icon = "🧮" if section_name == "aptitude" else "📚" if section_name == "mcq" else "💻"
                 correct_in_section = sum(1 for q in questions if q.get("correct", False))
+                is_coding_section = section_name == "coding"
                 
                 # Section header
                 elements.append(Paragraph(
@@ -349,6 +472,8 @@ class PDFService:
                     correct_answer = qa.get("correct_answer", "N/A")
                     feedback = qa.get("feedback", "")
                     
+                    is_code_answer = is_coding_section or self._is_code_content(correct_answer)
+                    
                     status = "✅" if is_correct else "❌"
                     status_color = colors.HexColor('#059669') if is_correct else colors.HexColor('#dc2626')
                     
@@ -358,22 +483,45 @@ class PDFService:
                         fontSize=10,
                         fontName='Helvetica-Bold',
                         textColor=status_color,
-                        spaceBefore=10,
+                        spaceBefore=12,
                         spaceAfter=4
                     )
                     
-                    elements.append(Paragraph(f"{status} Q{q_num}. {question_text}{'...' if len(question_text) >= 150 else ''}", q_header_style))
+                    q_display = question_text.replace('<', '&lt;').replace('>', '&gt;')
+                    elements.append(Paragraph(f"{status} Q{q_num}. {q_display}{'...' if len(question_text) >= 150 else ''}", q_header_style))
                     
-                    if is_correct:
-                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", correct_style))
+                    if is_code_answer:
+                        # Code formatting
+                        elements.append(Paragraph("Your Answer:", code_label_style if is_correct else ParagraphStyle(
+                            'WrongLabel', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold',
+                            leftIndent=20, spaceBefore=5, spaceAfter=2, textColor=colors.HexColor('#dc2626')
+                        )))
+                        
+                        user_code_formatted = self._format_code_for_pdf(user_answer)
+                        if is_correct:
+                            elements.append(Paragraph(user_code_formatted, code_style))
+                        else:
+                            elements.append(Paragraph(user_code_formatted, user_code_style))
+                        
+                        if not is_correct:
+                            elements.append(Paragraph("Correct Answer:", code_label_style))
+                            correct_code_formatted = self._format_code_for_pdf(correct_answer)
+                            elements.append(Paragraph(correct_code_formatted, code_style))
                     else:
-                        elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer}", wrong_style))
-                        elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer}", correct_style))
+                        user_answer_safe = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
+                        correct_answer_safe = str(correct_answer).replace('<', '&lt;').replace('>', '&gt;')
+                        
+                        if is_correct:
+                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", correct_style))
+                        else:
+                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", wrong_style))
+                            elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style))
                     
                     if feedback:
-                        elements.append(Paragraph(f"💡 <i>{feedback}</i>", explanation_style))
+                        feedback_safe = str(feedback).replace('<', '&lt;').replace('>', '&gt;')
+                        elements.append(Paragraph(f"💡 <i>{feedback_safe}</i>", explanation_style))
                     
-                    elements.append(Spacer(1, 5))
+                    elements.append(Spacer(1, 8))
                 
                 elements.append(Spacer(1, 10))
         

@@ -190,51 +190,90 @@ DO NOT include any programming questions."""
     @staticmethod
     def _non_dev_mcq_prompt(context: str, count: int) -> str:
         """Non-dev MCQ - from SAP/Business summaries, NO PYTHON"""
-        return f"""Generate exactly {count} MCQ questions for NON-TECHNICAL professionals.
+        return f"""You are an expert SAP/Business instructor. Generate exactly {count} MCQ questions STRICTLY based on the summary content provided below.
 
-╔════════════════════════════════════════════════════════════════╗
-║  CRITICAL: ABSOLUTELY NO PROGRAMMING QUESTIONS!                 ║
-║                                                                 ║
-║  FORBIDDEN (do not mention):                                    ║
-║  - Python, Java, JavaScript, C++, any programming language      ║
-║  - Coding, functions, variables, loops, arrays, classes         ║
-║  - GIL, interpreter, compiler, debugging, syntax                ║
-║  - Algorithms, data structures, API                             ║
-║                                                                 ║
-║  If content below has programming topics, SKIP them completely! ║
-╚════════════════════════════════════════════════════════════════╝
+══════════════════════════════════════════════════════════════════
+CRITICAL RULE: ALL QUESTIONS MUST COME FROM THE SUMMARY BELOW!
+- Read the summary carefully
+- Extract ALL key facts, numbers, T-codes, terms, processes
+- Create questions that test knowledge of THAT SPECIFIC content
+- Do NOT create generic business questions
+══════════════════════════════════════════════════════════════════
 
-ONLY create questions about:
-- SAP modules (MM, SD, FICO, HR, PP)
-- Business processes, ERP concepts
-- Sales, procurement, inventory, finance, HR
-- Management, organizational topics
-- Any NON-PROGRAMMING topics from the content
+FORBIDDEN (never use):
+❌ "What is the primary goal of...?"
+❌ "What is the main purpose of...?"
+❌ Generic options like "maximize/minimize/optimize X"
+❌ Python, Java, coding, programming questions
 
-=== COURSE CONTENT (from MongoDB summaries) ===
+══════════════════════════════════════════════════════════════════
+HOW TO CREATE QUESTIONS FROM THE SUMMARY:
+══════════════════════════════════════════════════════════════════
+
+Step 1: EXTRACT from summary:
+- Definitions (What is X?)
+- Numbers/Ranges (How many? What range?)
+- T-codes/Transactions (Which T-code for X?)
+- Types/Categories (What are the types of X?)
+- Steps/Processes (What is step 1/2/3?)
+- Tools/Prerequisites (What is required for X?)
+- Best Practices (Why is X recommended?)
+- Troubleshooting (What causes X? How to fix?)
+
+Step 2: CREATE one question for each extracted fact
+
+Example - If summary says:
+"SAP supports up to 1,000 clients per system, identified by a three-digit number ranging from 000 to 999"
+
+Generate questions like:
+- "How many clients can SAP support per system?" → Answer: 1,000
+- "What is the valid range for SAP client numbers?" → Answer: 000 to 999
+- "How many digits are used to identify an SAP client?" → Answer: Three digits
+
+Example - If summary says:
+"Use T-code SCC4 to access client administration"
+
+Generate:
+- "Which transaction code is used for client administration?" → Answer: SCC4
+- "What is T-code SCC4 used for?" → Answer: Client administration
+
+══════════════════════════════════════════════════════════════════
+SUMMARY CONTENT (Generate questions ONLY from this):
+══════════════════════════════════════════════════════════════════
 {context}
-=== END CONTENT ===
+══════════════════════════════════════════════════════════════════
 
-FORMAT:
+FORMAT (follow exactly):
 
 === QUESTION 1 ===
-## Title: [Business/SAP Topic]
+## Title: [Topic from summary]
 ## Difficulty: Easy
 ## Type: mcq
 ## Question:
-[Question about business/SAP - NOT programming]
+[Question based on SPECIFIC fact from summary above]
 ## Options:
-A) [Option]
-B) [Option]
-C) [Option]
-D) [Option]
+A) [Correct or incorrect specific answer]
+B) [Correct or incorrect specific answer]
+C) [Correct or incorrect specific answer]
+D) [Correct or incorrect specific answer]
 ## Correct: [A/B/C/D]
 
-Generate {count} business/SAP MCQ questions.
-Use === QUESTION N === markers.
-If no valid non-programming content, create general business questions.
+=== QUESTION 2 ===
+...continue...
 
-FINAL CHECK: Delete any question mentioning Python, coding, functions, or programming!"""
+Generate exactly {count} questions using === QUESTION N === markers.
+
+CHECKLIST before responding:
+✓ Every question is based on a SPECIFIC fact from the summary
+✓ No two questions test the same concept
+✓ If summary has numbers → include number questions
+✓ If summary has T-codes → include T-code questions  
+✓ If summary has types/categories → include type questions
+✓ If summary has steps → include 1-2 process questions (not more)
+✓ If summary has troubleshooting → include troubleshooting questions
+✓ If summary has best practices → include best practice questions
+✓ NO "primary goal" or "main purpose" questions
+✓ Options are specific facts, not vague phrases"""
 
     # ================================================================
     # EVALUATION PROMPTS
