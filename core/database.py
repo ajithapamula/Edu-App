@@ -11,6 +11,7 @@ Handles:
 - MySQL connections
 - MongoDB connections (async + sync)
 - Summaries, test results, interview results, session results
+- HR question tracking (cross-session)
 
 Each method retains its original name and behavior to avoid breaking imports.
 """
@@ -33,9 +34,6 @@ from pymongo import MongoClient
 from .config import config
 
 logger = logging.getLogger(__name__)
-
-# =====================================================
-
 
 # ============================================================================
 # CORE CLASS
@@ -266,8 +264,6 @@ class DatabaseManager:
     def _sync_get_recent_summaries(self, days: int, limit: int) -> List[Dict[str, Any]]:
         """Synchronous 7-day summaries retrieval with smart filtering"""
         try:
-            from pymongo import MongoClient
-            
             client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
             db = client[config.MONGODB_DATABASE]
             collection = db[config.SUMMARIES_COLLECTION]
@@ -359,6 +355,228 @@ class DatabaseManager:
             logger.error(f"❌ Sync 7-day summary retrieval error: {e}")
             raise Exception(f"MongoDB 7-day summary retrieval failed: {e}")
 
+    # ------------------------------------------------------------------------
+    # WEEKLY INTERVIEW - SAVE/RETRIEVE RESULTS
+    # ------------------------------------------------------------------------
+    async def save_interview_result_fast(self, interview_data: Dict[str, Any]) -> bool:
+        """Save weekly interview result to MongoDB asynchronously."""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_save_interview_result,
+                interview_data
+            )
+        except Exception as e:
+            logger.error(f"❌ Error saving interview result: {e}")
+            return False
+
+    def _sync_save_interview_result(self, interview_data: Dict[str, Any]) -> bool:
+        """Synchronous helper to save interview result to MongoDB"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["weekly_interview_results"]
+            
+            interview_data["created_at"] = datetime.utcnow()
+            interview_data["updated_at"] = datetime.utcnow()
+            interview_data["timestamp"] = time.time()
+            
+            result = collection.insert_one(interview_data)
+            client.close()
+            
+            if result.inserted_id:
+                logger.info(f"✅ Interview result saved with ID: {result.inserted_id}")
+                return True
+            else:
+                logger.error("❌ Failed to save interview result - no inserted_id returned")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error saving interview result to MongoDB: {e}")
+            return False
+
+    async def get_interview_result(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a specific interview result by session_id."""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_get_interview_result,
+                session_id
+            )
+        except Exception as e:
+            logger.error(f"❌ Error retrieving interview result: {e}")
+            return None
+
+    def _sync_get_interview_result(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Synchronous helper to retrieve interview result"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["weekly_interview_results"]
+            
+            result = collection.find_one({"session_id": session_id})
+            client.close()
+            
+            if result:
+                result["_id"] = str(result["_id"])
+                logger.info(f"✅ Retrieved interview result for session: {session_id}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving interview result from MongoDB: {e}")
+            return None
+
+    async def get_student_interview_history(self, student_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+        """Retrieve interview history for a specific student."""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_get_student_interview_history,
+                student_id,
+                limit
+            )
+        except Exception as e:
+            logger.error(f"❌ Error retrieving student interview history: {e}")
+            return []
+
+    def _sync_get_student_interview_history(self, student_id: int, limit: int) -> List[Dict[str, Any]]:
+        """Synchronous helper to retrieve student's interview history"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["weekly_interview_results"]
+            
+            cursor = collection.find(
+                {"student_id": student_id}
+            ).sort("timestamp", -1).limit(limit)
+            
+            results = []
+            for doc in cursor:
+                doc["_id"] = str(doc["_id"])
+                results.append(doc)
+            
+            client.close()
+            
+            logger.info(f"✅ Retrieved {len(results)} interview records for student: {student_id}")
+            return results
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving student interview history from MongoDB: {e}")
+            return []
+
+    # ------------------------------------------------------------------------
+    # HR QUESTION TRACKING - Prevent repeating questions across sessions
+    # ------------------------------------------------------------------------
+    async def get_hr_questions_asked(self, student_id: int, limit: int = 50) -> List[str]:
+        """Get list of HR questions previously asked to this student across all sessions"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_get_hr_questions_asked,
+                student_id,
+                limit
+            )
+        except Exception as e:
+            logger.error(f"❌ Error getting HR questions: {e}")
+            return []
+
+    def _sync_get_hr_questions_asked(self, student_id: int, limit: int) -> List[str]:
+        """Sync helper to get previously asked HR questions"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["hr_questions_history"]
+            
+            cursor = collection.find(
+                {"student_id": student_id},
+                {"question": 1, "_id": 0}
+            ).sort("asked_at", -1).limit(limit)
+            
+            questions = [doc["question"] for doc in cursor if doc.get("question")]
+            
+            client.close()
+            logger.info(f"✅ Found {len(questions)} previous HR questions for student {student_id}")
+            return questions
+            
+        except Exception as e:
+            logger.error(f"❌ Error fetching HR questions: {e}")
+            return []
+
+    async def store_hr_question_asked(self, student_id: int, question: str, session_id: str = None) -> bool:
+        """Store an HR question that was asked to prevent future repetition"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_store_hr_question,
+                student_id,
+                question,
+                session_id
+            )
+        except Exception as e:
+            logger.error(f"❌ Error storing HR question: {e}")
+            return False
+
+    def _sync_store_hr_question(self, student_id: int, question: str, session_id: str) -> bool:
+        """Sync helper to store HR question"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["hr_questions_history"]
+            
+            doc = {
+                "student_id": student_id,
+                "question": question,
+                "session_id": session_id,
+                "asked_at": datetime.utcnow()
+            }
+            
+            result = collection.insert_one(doc)
+            client.close()
+            
+            if result.inserted_id:
+                logger.info(f"✅ Stored HR question for student {student_id}")
+                return True
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error storing HR question: {e}")
+            return False
+
+    async def clear_hr_questions_for_student(self, student_id: int) -> bool:
+        """Clear HR question history for a student (for testing/reset)"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_clear_hr_questions,
+                student_id
+            )
+        except Exception as e:
+            logger.error(f"❌ Error clearing HR questions: {e}")
+            return False
+
+    def _sync_clear_hr_questions(self, student_id: int) -> bool:
+        """Sync helper to clear HR questions"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["hr_questions_history"]
+            
+            result = collection.delete_many({"student_id": student_id})
+            client.close()
+            
+            logger.info(f"✅ Cleared {result.deleted_count} HR questions for student {student_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error clearing HR questions: {e}")
+            return False
 
     # ------------------------------------------------------------------------
     # COMMON UTILITIES

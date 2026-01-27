@@ -1,14 +1,7 @@
 # core/prompts.py
 """
-Unified prompts module for all three modules:
-- Daily Standup (creative, varied conversation flow) - UNCHANGED
-- Weekend Mocktest (question generation + evaluation) - UNCHANGED
-- Weekly Interview (UPDATED: Introduction -> Communication -> Technical -> HR flow with time-based rounds)
-
-Backwards compatibility:
-- daily_standup: uses `prompts` or `Prompts` → provided via DailyStandupPrompts + alias
-- weekend_mocktest: uses `PromptTemplates`, `PromptValidator` → preserved
-- weekly_interview: uses constants + build_* + validate_prompts() → UPDATED
+Unified prompts module - ALL questions generated dynamically via LLM
+NO hardcoded questions anywhere - everything is generated fresh each time
 """
 
 from __future__ import annotations
@@ -16,7 +9,7 @@ from __future__ import annotations
 from typing import List, Dict, Any
 from .config import config
 
-# ---- Reusable boundary policy appended to Daily Standup prompts ----
+# ---- Reusable boundary policy for Daily Standup ----
 BOUNDARY_POLICY = f"""
 BOUNDARIES:
 - Stay strictly on the CURRENT project/work topics in this conversation.
@@ -28,6 +21,44 @@ BOUNDARIES:
 
 def _append_boundaries(block: str) -> str:
     return f"{block.rstrip()}\n\n{BOUNDARY_POLICY}"
+
+# =============================================================================
+# RESPONSE PHRASES FOR DIFFERENT SITUATIONS
+# =============================================================================
+
+# When user gives wrong/unclear answer
+WRONG_ANSWER_RESPONSES = [
+    "No worries, that's okay.",
+    "That's alright, let me ask it differently.",
+    "No problem, try to explain a bit more clearly.",
+    "That's fine, take your time.",
+    "Okay, don't worry about that.",
+    "That's okay, let's try another approach.",
+    "No issues, we can move on.",
+    "Alright, no problem at all.",
+]
+
+# When user is silent
+SILENCE_ENCOURAGEMENT_RESPONSES = [
+    "Take your time, there's no rush.",
+    "I noticed you're quiet - would you like me to rephrase?",
+    "No pressure, just share what comes to mind.",
+    "It's okay to think out loud.",
+    "Would you like to skip this one?",
+    "Take a moment if you need.",
+    "Feel free to ask if you need clarification.",
+    "No worries, we can come back to this.",
+]
+
+# When user says "I don't know" / "can't answer" / "skip"
+CANT_ANSWER_RESPONSES = [
+    "No worries, let's move to a different question.",
+    "That's perfectly fine, let me ask something else.",
+    "No problem at all, here's another one.",
+    "Okay, let's try a different topic.",
+    "That's alright, moving on.",
+    "No issues, let's continue with something else.",
+]
 
 # =============================================================================
 # DAILY STANDUP PROMPTS (UNCHANGED)
@@ -341,28 +372,12 @@ Max 20 words. Be original every time."""
     @staticmethod
     def dynamic_silence_response(session_context: Dict) -> str:
         domain = session_context.get("domain", "your topic")
-        name = session_context.get("name", "")
-        time_of_day = session_context.get("time_of_day", "")
-
         core = f"""The user has been silent for a while in this standup session.
-
-        You are the AI standup assistant.
         Be gentle and encouraging.
-
         - Ask if they are comfortable or okay to continue.
         - Use very simple and polite language.
-        - Mention you're ready when they are.
-        - If context available, mention domain or topic briefly.
         - Keep it short and friendly (max 18 words).
-
-        EXAMPLES:
-        - "Are you feeling okay to continue? We can start whenever you're ready."
-        - "If you're comfortable, let's begin with your {domain} update. Just let me know."
-        - "No rush! When you're ready, we can start with {domain}."
-        - "Just checking in—shall we go ahead with {domain}?"
-
-        Respond with just ONE line like above, keeping it warm and professional.
-        """
+        Respond with just ONE line, keeping it warm and professional."""
         return _append_boundaries(core)
     
     @staticmethod
@@ -406,7 +421,7 @@ Max 20 words. Be original every time."""
     def harassment_block_and_redirect(topic: str) -> str:
         return f"That language isn't okay here. Please share your concrete update on {topic}—progress, blockers, next steps."
 
-# Backward compatibility aliases for daily_standup:
+# Backward compatibility aliases
 Prompts = DailyStandupPrompts
 prompts = DailyStandupPrompts()
 
@@ -428,7 +443,7 @@ class PromptTemplates:
 
     @staticmethod
     def _dev_batch_prompt(context: str, question_count: int) -> str:
-        return f"""Generate {question_count} high-quality programming questions based on the provided context. Create practical, challenging questions that test real development skills and problem-solving abilities.
+        return f"""Generate {question_count} high-quality programming questions based on the provided context.
 
 CONTEXT:
 {context}
@@ -438,9 +453,6 @@ REQUIREMENTS:
 - Mix question types: 40% practical coding, 30% system design, 30% debugging/optimization
 - Progressive difficulty: start easier, increase complexity
 - Each question must be complete and standalone
-- Include clear requirements, constraints, and expected outcomes
-- Base questions on concepts and technologies mentioned in the context
-- Make questions realistic and industry-relevant
 
 FORMAT each question exactly as shown:
 === QUESTION 1 ===
@@ -448,29 +460,13 @@ FORMAT each question exactly as shown:
 ## Difficulty: [Easy/Medium/Hard]
 ## Type: [Practical/Algorithm/System Design/Debugging]
 ## Question:
-[Complete question with detailed requirements, constraints, input/output examples, and any code snippets needed. Include specific technical requirements and success criteria.]
+[Complete question with detailed requirements]
 
-=== QUESTION 2 ===
-## Title: [Clear, descriptive title]
-## Difficulty: [Easy/Medium/Hard]
-## Type: [Practical/Algorithm/System Design/Debugging]
-## Question:
-[Complete question with detailed requirements...]
-
-Continue this exact pattern for all {question_count} questions.
-
-IMPORTANT:
-- Each question should test different aspects of development
-- Include code examples where relevant
-- Specify performance requirements when applicable
-- Make questions challenging but solvable by a competent developer
-- Ensure questions relate to the provided context
-
-Generate all {question_count} questions now:"""
+Continue this exact pattern for all {question_count} questions."""
 
     @staticmethod
     def _non_dev_batch_prompt(context: str, question_count: int) -> str:
-        return f"""Generate {question_count} high-quality multiple-choice questions based on the provided context. Focus on conceptual understanding, analytical thinking, and practical application of technical concepts for non-technical professionals.
+        return f"""Generate {question_count} high-quality multiple-choice questions based on the provided context.
 
 CONTEXT:
 {context}
@@ -478,11 +474,7 @@ CONTEXT:
 REQUIREMENTS:
 - Generate exactly {question_count} questions numbered sequentially
 - Each question must have exactly 4 options (A, B, C, D) with only 1 correct answer
-- Mix question types: 40% conceptual understanding, 30% analytical reasoning, 30% practical application
-- Progressive difficulty: start with fundamental concepts, advance to complex analysis
-- Create sophisticated distractors based on common misconceptions
-- Test deep understanding rather than memorization
-- Base questions on concepts and scenarios from the provided context
+- Mix question types: 40% conceptual, 30% analytical, 30% practical application
 
 FORMAT each question exactly as shown:
 === QUESTION 1 ===
@@ -490,35 +482,14 @@ FORMAT each question exactly as shown:
 ## Difficulty: [Easy/Medium/Hard]
 ## Type: [Conceptual/Analytical/Applied]
 ## Question:
-[Clear, specific question that tests understanding of concepts from the context. Include scenario or case study if relevant.]
-## Options:
-A) [First option - could be correct or plausible distractor]
-B) [Second option - could be correct or plausible distractor]
-C) [Third option - could be correct or plausible distractor]
-D) [Fourth option - could be correct or plausible distractor]
-
-=== QUESTION 2 ===
-## Title: [Clear, descriptive title]
-## Difficulty: [Easy/Medium/Hard]
-## Type: [Conceptual/Analytical/Applied]
-## Question:
-[Clear question testing different concept...]
+[Clear, specific question]
 ## Options:
 A) [Option A]
 B) [Option B]
 C) [Option C]
 D) [Option D]
 
-Continue this exact pattern for all {question_count} questions.
-
-IMPORTANT:
-- Only one option should be clearly correct for each question
-- Distractors should be plausible but clearly wrong to someone who understands the concept
-- Questions should test understanding, not just recall
-- Relate all questions to concepts mentioned in the provided context
-- Avoid trick questions or ambiguous wording
-
-Generate all {question_count} questions now:"""
+Continue this exact pattern for all {question_count} questions."""
 
     @staticmethod
     def create_evaluation_prompt(user_type: str, qa_pairs: List[Dict[str, Any]]) -> str:
@@ -535,415 +506,286 @@ Generate all {question_count} questions now:"""
 
     @staticmethod
     def _dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
-        return f"""Evaluate this developer assessment comprehensively. Analyze code quality, problem-solving approach, technical accuracy, and software engineering best practices.
+        return f"""Evaluate this developer assessment.
 
 ASSESSMENT CONTENT:
 {qa_content}
 
-EVALUATION CRITERIA:
-- Code correctness and functionality (30%)
-- Algorithm efficiency and optimization (25%)
-- Code readability and structure (20%)
-- Best practices and conventions (15%)
-- Problem-solving approach and explanation (10%)
-
 INSTRUCTIONS:
-1. Score each question as 1 (acceptable/correct) or 0 (unacceptable/incorrect)
-2. Be strict but fair - partial credit should round to 1 if approach is sound
-3. Consider: Does the answer demonstrate competent programming skills?
-4. Evaluate explanations and reasoning, not just code
-5. Look for understanding of time/space complexity where relevant
+1. Score each question as 1 (correct) or 0 (incorrect)
+2. Provide feedback for each question
 
 REQUIRED OUTPUT FORMAT:
 SCORES: [1,0,1,1,0]
-FEEDBACK: [Question 1: Detailed feedback|Question 2: Detailed feedback|Question 3: Detailed feedback|Question 4: Detailed feedback|Question 5: Detailed feedback]
+FEEDBACK: [Question 1: feedback|Question 2: feedback|...]
 
-DETAILED ANALYSIS:
-Provide comprehensive analysis covering:
-- Overall programming competency level
-- Strengths observed in coding approach
-- Areas needing improvement
-- Specific technical recommendations
-- Assessment of problem-solving methodology
-
-Score each of the {question_count} questions and provide detailed feedback. Be thorough and constructive."""
+Score each of the {question_count} questions."""
 
     @staticmethod
     def _non_dev_evaluation_prompt(qa_content: str, question_count: int) -> str:
-        return f"""Evaluate this non-developer assessment comprehensively. Focus on conceptual understanding, analytical reasoning, and practical knowledge application.
+        return f"""Evaluate this non-developer assessment.
 
 ASSESSMENT CONTENT:
 {qa_content}
-
-EVALUATION CRITERIA:
-- Conceptual accuracy and understanding (40%)
-- Analytical reasoning quality (30%)
-- Practical application knowledge (20%)
-- Communication and explanation clarity (10%)
 
 INSTRUCTIONS:
 1. Score each question as 1 (correct) or 0 (incorrect)
 2. For multiple choice: only exact correct answers get 1 point
-3. Evaluate understanding demonstrated in any explanations provided
-4. Consider partial understanding but be consistent with scoring
-5. Look for evidence of genuine comprehension vs. guessing
 
 REQUIRED OUTPUT FORMAT:
 SCORES: [1,0,1,1,0]
-FEEDBACK: [Question 1: Clear feedback on answer|Question 2: Clear feedback on answer|Question 3: Clear feedback on answer|Question 4: Clear feedback on answer|Question 5: Clear feedback on answer]
+FEEDBACK: [Question 1: feedback|Question 2: feedback|...]
 
-DETAILED ANALYSIS:
-Provide comprehensive analysis covering:
-- Overall conceptual understanding level
-- Analytical thinking capabilities
-- Knowledge gaps identified
-- Recommendations for further learning
-- Assessment of technical awareness
-
-Score each of the {question_count} questions and provide specific feedback. Focus on understanding rather than memorization."""
+Score each of the {question_count} questions."""
 
     @staticmethod
     def optimize_context_prompt(context: str) -> str:
-        return f"""Analyze and enhance this technical content to make it optimal for generating high-quality assessment questions.
+        return f"""Analyze and enhance this technical content for question generation.
 
 ORIGINAL CONTEXT:
 {context}
 
-ENHANCEMENT REQUIREMENTS:
-- Identify key technical concepts and learning objectives
-- Extract practical scenarios and real-world applications
-- Highlight different difficulty levels of concepts
-- Organize information for question generation
-- Ensure context supports both conceptual and practical questions
+Provide enhanced context with key concepts, practical applications, and difficulty progression."""
 
-ENHANCED CONTEXT FORMAT:
-## Key Concepts:
-[List main technical concepts]
-
-## Practical Applications:
-[Real-world scenarios and use cases]
-
-## Difficulty Progression:
-- Beginner: [Fundamental concepts]
-- Intermediate: [Applied knowledge]
-- Advanced: [Complex analysis and synthesis]
-
-## Question Opportunities:
-[Specific areas suitable for different question types]
-
-Provide the enhanced context optimized for question generation:"""
 
 class PromptValidator:
     """Validation utilities for prompts and responses"""
 
     @staticmethod
     def validate_question_response(response: str, user_type: str, expected_count: int) -> Dict[str, Any]:
-        validation = {
-            "valid": True,
-            "issues": [],
-            "question_count": 0,
-            "format_correct": True
-        }
+        validation = {"valid": True, "issues": [], "question_count": 0, "format_correct": True}
         question_markers = response.count("=== QUESTION")
         validation["question_count"] = question_markers
-
         if question_markers != expected_count:
             validation["valid"] = False
             validation["issues"].append(f"Expected {expected_count} questions, found {question_markers}")
-
-        required_sections = ["## Title:", "## Difficulty:", "## Type:", "## Question:"]
-        if user_type == "non_dev":
-            required_sections.append("## Options:")
-
-        for section in required_sections:
-            if response.count(section) < expected_count:
-                validation["valid"] = False
-                validation["issues"].append(f"Missing {section} sections")
-
-        if user_type == "non_dev":
-            option_patterns = [f"{letter})" for letter in "ABCD"]
-            for pattern in option_patterns:
-                if response.count(pattern) < expected_count:
-                    validation["format_correct"] = False
-                    validation["issues"].append(f"Inconsistent option format: {pattern}")
-
         return validation
 
     @staticmethod
     def validate_evaluation_response(response: str, expected_count: int) -> Dict[str, Any]:
-        validation = {
-            "valid": True,
-            "issues": [],
-            "has_scores": False,
-            "has_feedback": False,
-            "score_count": 0
-        }
+        validation = {"valid": True, "issues": [], "has_scores": False, "has_feedback": False}
         if "SCORES:" in response:
             validation["has_scores"] = True
-            import re
-            score_match = re.search(r'SCORES:\s*\[(.*?)\]', response)
-            if score_match:
-                scores = score_match.group(1).split(',')
-                validation["score_count"] = len([s for s in scores if s.strip() in ['0', '1']])
-                if validation["score_count"] != expected_count:
-                    validation["valid"] = False
-                    validation["issues"].append(f"Expected {expected_count} scores, found {validation['score_count']}")
         else:
             validation["valid"] = False
             validation["issues"].append("Missing SCORES section")
-
         if "FEEDBACK:" in response:
             validation["has_feedback"] = True
-        else:
-            validation["valid"] = False
-            validation["issues"].append("Missing FEEDBACK section")
-
         return validation
 
 # =============================================================================
-# WEEKLY INTERVIEW PROMPTS (UPDATED - Introduction -> Communication -> Technical -> HR)
+# WEEKLY INTERVIEW - DYNAMIC QUESTION GENERATION PROMPTS
 # =============================================================================
 
-SYSTEM_CONTEXT_BASE = """You are a professional AI interviewer conducting a Weekly Interview session for students. Your goal is to simulate a real-world interview, evaluate the candidate fairly, and provide structured feedback that helps them improve.
+SYSTEM_CONTEXT_BASE = """You are a professional AI interviewer conducting a Weekly Interview session. Your goal is to simulate a real-world interview with natural conversation flow.
 
-PERSONALITY TRAITS:
-- Professional, calm, and supportive tone
-- Genuinely interested in the candidate's responses
-- Patient - allow reasonable pauses without rushing
-- Encouraging but objective in assessment
+PERSONALITY:
+- Professional, calm, supportive
+- Genuinely interested in responses
+- Patient and encouraging
 - Natural conversational flow
 
-INTERVIEW STYLE:
+STYLE:
 - Ask ONE clear question at a time
-- Listen actively and respond to what the candidate actually says
-- Build contextual follow-up questions based on their answers
-- Do not repeat questions unless clarification is needed
-- Do not reveal evaluation scores during the interview
+- Listen actively and respond to what was said
+- Build contextual follow-ups
+- Keep responses concise (2-3 sentences max)"""
 
-COMMUNICATION GUIDELINES:
-- Keep responses concise (2-3 sentences max)
-- Use natural language, avoid robotic phrases
-- Acknowledge good answers appropriately
-- Be supportive when candidates need clarification
-- If candidate is silent, gently prompt them to continue"""
 
-# =============================================================================
-# NEW: INTRODUCTION PROMPT (explains the 3 rounds to the candidate)
-# =============================================================================
+def build_communication_question_prompt(
+    student_name: str,
+    conversation_history: str,
+    topics_already_covered: List[str],
+    questions_already_asked: List[str],
+    is_first_question: bool = False
+) -> str:
+    """Build prompt for generating dynamic communication questions"""
+    
+    topics_str = ", ".join(topics_already_covered) if topics_already_covered else "none yet"
+    questions_str = "\n".join([f"- {q}" for q in questions_already_asked[-5:]]) if questions_already_asked else "none yet"
+    
+    if is_first_question:
+        return f"""Generate a friendly, casual FIRST question to start a conversation with {student_name}.
 
-INTRODUCTION_PROMPT_TEMPLATE = """You are starting a Weekly Interview session with {student_name}.
+This is the COMMUNICATION round - we want to get to know them personally, NOT test technical skills.
 
-YOUR TASK: Deliver a warm, professional introduction that:
-1. Greets the candidate by name
-2. Explains the interview structure (3 rounds)
-3. Sets a comfortable tone
-4. Asks how they're doing today
-
-INTERVIEW STRUCTURE TO EXPLAIN:
-- Communication Round: 10 minutes (casual conversation, getting to know you)
-- Technical Round: 20 minutes (based on your recent work and knowledge)
-- HR Round: 15 minutes (behavioral and situational questions)
-
-TONE: Warm, friendly, professional. Make them feel comfortable.
-
-EXAMPLE OUTPUT:
-"Hello {student_name}! Welcome to your weekly interview session. I'm excited to chat with you today!
-
-We'll have three rounds:
-• First, a Communication round (about 10 minutes) where we'll just have a casual conversation and get to know each other.
-• Then, a Technical round (about 20 minutes) where we'll discuss your recent work and technical knowledge.
-• Finally, an HR round (about 15 minutes) with some behavioral questions.
-
-So, how are you doing today? Ready to get started?"
-
-Generate a similar warm introduction. Keep it natural and encouraging."""
-
-# =============================================================================
-# UPDATED: Communication Round - Pure Conversational (NO technical questions)
-# =============================================================================
-
-COMMUNICATION_INTERVIEWER_PROMPT = f"""{SYSTEM_CONTEXT_BASE}
-
-CURRENT STAGE: Communication Round (Round 1 of 3) - 10 minutes
-
-PURPOSE: Build rapport, assess communication skills through CASUAL CONVERSATION.
-This is NOT a technical round - keep it friendly and conversational!
-
-ASSESSMENT FOCUS:
-- Clarity and articulation
-- Fluency and vocabulary
-- Confidence in expression
-- Ability to explain thoughts coherently
-- Listening and responding appropriately
-- Personality and interpersonal skills
-
-⚠️ CRITICAL RULE - NO TECHNICAL QUESTIONS:
-- Do NOT ask about programming, coding, or software
-- Do NOT ask about specific technologies (Python, SAP, databases, etc.)
-- Do NOT ask about technical concepts or tools
-- Do NOT ask deep follow-ups about HOW something was built
-- If candidate mentions a project, ask about their EXPERIENCE and FEELINGS, not technical details
-
-CONVERSATION STYLE:
-- Be like a friendly interviewer having a coffee chat
-- Show genuine interest in their responses
-- Build natural follow-ups based on what they say
-- Keep it light and engaging
+RULES:
+- Ask about their interests, hobbies, favorites, or personality
+- Be warm and welcoming
 - Make them feel comfortable
+- DO NOT ask technical questions
+- Keep it casual and friendly
 
-APPROVED CONVERSATION TOPICS:
+GOOD TOPICS: favorite places, hobbies, interests, music, movies, travel, food, weekend activities, personality traits
 
-**Ice-breakers & Casual:**
-- "How are you doing today?"
-- "How's your day been so far?"
-- "Did you have a good week?"
+Generate ONE casual, friendly opening question (MAX 12 words):"""
+    
+    return f"""Generate a NEW casual conversation question for the COMMUNICATION round.
 
-**Personal Interests & Hobbies:**
-- "What do you enjoy doing in your free time?"
-- "Tell me about a hobby or interest you're passionate about"
-- "What do you like to do to relax?"
-- "Are you into any sports or activities?"
+CONVERSATION SO FAR:
+{conversation_history if conversation_history else "Just started"}
 
-**Favorites & Preferences:**
-- "What's your favorite place you've visited or would like to visit?"
-- "Do you have a favorite book, movie, or TV show?"
-- "What kind of music do you enjoy?"
-- "If you could travel anywhere, where would you go?"
+TOPICS ALREADY COVERED: {topics_str}
+QUESTIONS ALREADY ASKED:
+{questions_str}
 
-**Background & Journey:**
-- "Tell me a bit about yourself"
-- "Where are you from originally?"
-- "What drew you to your current field of study/work?"
-- "How would your friends describe you?"
+RULES:
+1. Ask about something DIFFERENT from topics already covered
+2. Keep it casual and friendly - this is NOT a technical round
+3. DO NOT ask about work, coding, programming, or technical topics
+4. Ask about personal interests, hobbies, favorites, experiences, or personality
+5. Generate a UNIQUE question not similar to ones already asked
+6. Make it natural and conversational
 
-**Goals & Aspirations:**
-- "What motivates you in life?"
-- "What's something you'd love to learn or try?"
-- "What achievement are you most proud of?"
-- "What are you looking forward to this year?"
+GOOD TOPICS TO EXPLORE:
+- Favorite places, cities, travel destinations
+- Hobbies and interests
+- Music, movies, books
+- Food and cuisine
+- Weekend activities
+- Personal goals and dreams
+- Memorable experiences
+- How they relax or unwind
 
-**Situational (Non-Technical):**
-- "Tell me about a challenging situation you handled well"
-- "Describe a time you had to work with someone difficult"
-- "How do you handle stress or pressure?"
+Generate ONE new, casual question (MAX 12 words):"""
 
-FOLLOW-UP APPROACH:
-When the candidate shares something, show interest and dig deeper:
-- "Oh interesting! Why do you like that?"
-- "That sounds fun! How did you get into it?"
-- "Nice! What do you enjoy most about that?"
-- "Tell me more about that experience"
 
-EXAMPLE CONVERSATION FLOW:
-1. "So tell me, what's your favorite place - could be a city, a spot, anywhere?"
-2. User: "I really like Hyderabad"
-3. "Oh nice! What do you like about Hyderabad? Is it the food, the culture, or something else?"
-4. User: "The food is amazing and I have friends there"
-5. "That's great! Having good friends and good food is the best combination. Do you visit often?"
+def build_communication_followup_prompt(
+    user_response: str,
+    original_question: str,
+    current_topic: str,
+    followup_count: int
+) -> str:
+    """Build prompt for generating natural follow-up on same topic"""
+    
+    return f"""The candidate just answered a question. Generate a NATURAL follow-up that shows interest.
 
-SILENCE HANDLING:
-If candidate is quiet:
-- "Take your time, no rush"
-- "Would you like me to ask something different?"
+ORIGINAL QUESTION: "{original_question}"
+TOPIC: {current_topic}
+CANDIDATE'S RESPONSE: "{user_response}"
+FOLLOW-UPS ALREADY ASKED ON THIS TOPIC: {followup_count}
 
-Remember: Keep it CASUAL and CONVERSATIONAL. This round is about building rapport!"""
+YOUR TASK:
+Generate ONE natural follow-up question that:
+1. Shows GENUINE interest in what they said
+2. Digs deeper into the SAME topic (don't change topics)
+3. References something SPECIFIC they mentioned
+4. Is casual and friendly, not formal
+5. Is short (under 15 words)
 
-# Round 2: Technical (20 minutes)
-TECHNICAL_INTERVIEWER_PROMPT = f"""{SYSTEM_CONTEXT_BASE}
+EXAMPLE GOOD FOLLOW-UPS:
+- If they mentioned a place: "What do you like most about it?"
+- If they mentioned an activity: "How did you get into that?"
+- If they mentioned people: "That sounds fun! Do you do that often?"
+- If they shared a feeling: "What makes it so special to you?"
 
-CURRENT STAGE: Technical Round (Round 2 of 3) - 20 minutes
+BAD FOLLOW-UPS (avoid):
+- Changing to a completely different topic
+- Asking technical questions
+- Being too formal or interview-like
+- Generic questions that ignore what they said
 
-ASSESSMENT FOCUS:
-- Conceptual understanding
-- Problem-solving approach
-- Ability to explain technical concepts
-- Reasoning and analytical thinking
+Generate ONE short, natural follow-up question that BUILDS ON what they said:"""
 
-INTERVIEW APPROACH:
-1. Ask questions aligned with the candidate's syllabus and experience level
-2. Adapt difficulty dynamically based on responses:
-   - Strong, detailed answers → Increase difficulty, ask deeper questions
-   - Weak or unclear answers → Probe fundamentals, give hints if needed
-3. Encourage candidates to explain their thinking out loud
-4. Evaluate BOTH correctness AND reasoning process
-5. Ask follow-up questions based on their specific answers
 
-ADAPTIVE DIFFICULTY RULES:
-- If answer shows strong understanding: "Great explanation! Let me ask something more challenging..."
-- If answer is partially correct: "You're on the right track. Can you elaborate on [specific part]?"
-- If answer shows confusion: "Let's step back. What do you understand about [fundamental concept]?"
+def build_technical_question_prompt(
+    content_context: str,
+    previous_questions: List[str],
+    user_last_response: str,
+    difficulty: str,
+    conversation_history: str
+) -> str:
+    """Build prompt for generating dynamic technical questions from summaries"""
+    
+    prev_q_text = "\n".join([f"- {q}" for q in previous_questions[-5:]]) if previous_questions else "None yet"
+    
+    # If no content context, provide fallback technical topics
+    if not content_context or len(content_context) < 50:
+        content_context = "General software development, coding, debugging, databases, APIs, web development"
+    
+    return f"""Generate ONE TECHNICAL interview question based on the candidate's work.
 
-QUESTION TYPES:
-- Conceptual: "Explain how [X] works and why it's important"
-- Problem-solving: "How would you approach [specific scenario]?"
-- Application: "Where would you use [concept] in a real project?"
-- Comparison: "What's the difference between [A] and [B]?"
+CANDIDATE'S TECHNICAL WORK:
+{content_context[:2000]}
 
-EVALUATION CRITERIA:
-- Correctness of technical knowledge
-- Depth of understanding (not just memorization)
-- Problem-solving methodology
-- Ability to explain technical concepts clearly
+QUESTIONS ALREADY ASKED (DO NOT REPEAT):
+{prev_q_text}
 
-Remember: Assess both the answer AND the reasoning process."""
+DIFFICULTY: {difficulty}
 
-# Round 3: HR/Behavioral (15 minutes)
-HR_BEHAVIORAL_INTERVIEWER_PROMPT = f"""{SYSTEM_CONTEXT_BASE}
+⚠️ CRITICAL RULES - MUST FOLLOW:
+1. Ask ONLY about technical topics: programming, coding, databases, APIs, frameworks, debugging
+2. Base question on technologies mentioned in their work above
+3. DO NOT REPEAT previous questions
+4. Match difficulty: easy=basics, medium=how/why, hard=optimization
 
-CURRENT STAGE: HR/Behavioral Round (Round 3 of 3) - 15 minutes
+❌ FORBIDDEN - NEVER ASK ABOUT:
+- Movies, TV shows, books, music
+- Hobbies, free time, relaxation
+- Favorites, preferences, feelings
+- Travel, places, food
+- Personal life, friends, family
+- Anything NOT related to their technical work
 
-ASSESSMENT FOCUS:
-- Behavioral patterns and responses
-- Leadership traits and potential
-- Ethical judgment and professionalism
-- Confidence and self-awareness
-- Communication style in professional contexts
+✅ GOOD TECHNICAL QUESTIONS:
+- "How did you handle authentication in your project?"
+- "What database did you use and why?"
+- "How would you optimize this query?"
+- "Explain your approach to error handling."
 
-INTERVIEW APPROACH:
-1. Ask behavioral and situational questions
-2. Encourage real examples from academics, projects, or personal experience
-3. Use STAR method probing (Situation, Task, Action, Result)
-4. Look for authentic stories and genuine responses
-5. Assess cultural fit and professional maturity
+Generate ONE TECHNICAL question (MAX 15 words only):"""
 
-QUESTION CATEGORIES:
 
-Leadership & Teamwork:
-- "Describe a time when you led a team or took initiative"
-- "How do you handle disagreements within a team?"
-- "Tell me about a group project and your role in it"
+def build_hr_question_prompt(
+    previously_asked_questions: List[str],
+    conversation_history: str,
+    student_context: str
+) -> str:
+    """Build prompt for generating unique HR/behavioral questions"""
+    
+    prev_q_text = "\n".join([f"- {q}" for q in previously_asked_questions[-15:]]) if previously_asked_questions else "None"
+    
+    return f"""Generate ONE unique behavioral/HR interview question.
 
-Problem-Solving & Challenges:
-- "Describe a challenging situation you faced and how you handled it"
-- "Tell me about a time you failed and what you learned"
-- "How do you handle pressure or tight deadlines?"
+QUESTIONS ALREADY ASKED (DO NOT REPEAT OR ASK SIMILAR):
+{prev_q_text}
 
-Ethics & Professionalism:
-- "What would you do if you disagreed with a senior's decision?"
-- "How do you prioritize when everything seems urgent?"
-- "Describe a situation where you had to make a difficult ethical choice"
+RECENT CONVERSATION:
+{conversation_history[-400:] if conversation_history else 'Starting HR round'}
 
-Self-Awareness & Growth:
-- "What are your strengths and areas for improvement?"
-- "Where do you see yourself in 5 years?"
-- "What feedback have you received that helped you grow?"
+CANDIDATE BACKGROUND:
+{student_context[:300] if student_context else 'General candidate'}
 
-Skills & Experience:
-- "Tell me about your key skills"
-- "What makes you unique as a candidate?"
-- "What's your greatest professional achievement?"
+QUESTION GENERATION RULES:
+1. Generate a COMPLETELY NEW question not similar to any in the list
+2. Focus on behavioral situations, leadership, teamwork, or personal growth
+3. Ask for SPECIFIC examples (use STAR method style)
+4. Make it professional but conversational
+5. Avoid generic yes/no questions
 
-EVALUATION CRITERIA:
-- Authenticity and genuineness of responses
-- Leadership potential and initiative
-- Professional maturity and ethical judgment
-- Self-awareness and growth mindset
-- Confidence without arrogance
+QUESTION CATEGORIES TO VARY:
+- Leadership: "Tell me about a time you led/took initiative..."
+- Teamwork: "Describe a situation where you collaborated/worked with others..."
+- Challenges: "Share an experience where you faced a difficult situation..."
+- Conflict: "Tell me about a time you had a disagreement..."
+- Growth: "What feedback have you received that helped you improve..."
+- Motivation: "What drives you / what are you passionate about..."
+- Ethics: "What would you do if..."
+- Strengths/Weaknesses: Different angles on self-awareness
+- Goals: Career aspirations and personal development
+- Failure: Learning from mistakes
 
-Remember: Look for genuine examples and authentic responses, not rehearsed answers."""
+AVOID:
+- Questions already in the list above
+- Questions too similar to asked ones
+- Generic questions without asking for examples
+- Technical questions (this is HR round)
+
+Generate ONE short HR/behavioral question (MAX 15 words only):"""
+
 
 # =============================================================================
-# ROUND TRANSITION PROMPTS
+# ROUND TRANSITION MESSAGES
 # =============================================================================
 
 ROUND_TRANSITION_TO_TECHNICAL = """Great conversation! I've enjoyed getting to know you better.
@@ -964,224 +806,9 @@ Thank you so much for your time and thoughtful responses. You did a great job en
 
 I'll now generate your detailed feedback covering all three rounds. Give me just a moment..."""
 
-# Conversation prompt template - UPDATED with better follow-up handling
-CONVERSATION_PROMPT_TEMPLATE = """INTERVIEW CONTEXT:
-Stage: {stage}
-Round Duration: {round_duration} minutes
-Time Elapsed in Round: {time_elapsed} minutes
-Questions Asked This Round: {questions_asked}
-Candidate Response: "{user_response}"
-Recent Work Context: {content_context}
-
-CONVERSATION HISTORY:
-{conversation_history}
-
-PREVIOUS ANSWER QUALITY: {answer_quality}
-
-As the interviewer, respond naturally to the candidate's answer. Your response should:
-
-1. **Acknowledge** their response appropriately (show active listening)
-2. **Build on what they said** - reference specific things they mentioned
-3. **Ask ONE** clear, relevant follow-up or new question
-4. **Keep it conversational** - like a real human conversation
-
-STAGE-SPECIFIC RULES:
-- Communication Round: 
-  * Ask ONLY about soft skills, personality, interests, and experiences
-  * NO technical questions at all
-  * Be casual and friendly
-  * Build natural follow-ups: "Oh that's interesting, why do you like that?"
-  
-- Technical Round: 
-  * Focus on technical concepts, problem-solving, and reasoning
-  * Adapt difficulty based on their answers
-  * Probe deeper on interesting points
-  
-- HR Round: 
-  * Focus on behavioral examples, leadership, and professionalism
-  * Ask for specific examples using STAR method
-  * Explore their motivations and goals
-
-RESPONSE FORMAT:
-- Start with a brief acknowledgment of what they said
-- Then ask your follow-up question
-- Keep total response under 3 sentences
-- Must end with a question
-
-Generate a natural, conversational follow-up:
-
-INTERVIEWER RESPONSE:"""
-
-# Silence prompt template
-SILENCE_PROMPT_TEMPLATE = """The candidate has been silent for a while.
-
-CURRENT STAGE: {stage}
-LAST QUESTION: "{last_question}"
-SILENCE PROMPTS GIVEN: {silence_count}
-
-Generate a gentle, encouraging prompt to help the candidate continue. Options:
-- Offer to rephrase the question
-- Remind them there's no rush
-- Suggest they think out loud
-- Ask if they need clarification
-
-Keep it brief, warm, and supportive (max 15 words).
-
-GENTLE PROMPT:"""
 
 # =============================================================================
-# UPDATED EVALUATION PROMPT - Structured by Rounds
-# =============================================================================
-
-EVALUATION_PROMPT_TEMPLATE = """COMPREHENSIVE INTERVIEW EVALUATION
-
-CANDIDATE: {student_name}
-TOTAL INTERVIEW DURATION: {duration} minutes
-ROUNDS COMPLETED: {stages_completed}
-
-FULL CONVERSATION LOG:
-{conversation_log}
-
-CANDIDATE'S BACKGROUND (for Technical context):
-{content_context}
-
-=============================================================================
-GENERATE A STRUCTURED EVALUATION REPORT
-=============================================================================
-
-Please provide a comprehensive evaluation following this EXACT structure:
-
-**OVERALL IMPRESSION:**
-Write 2-3 sentences summarizing your overall impression of the candidate across all rounds.
-
----
-
-**ROUND 1: COMMUNICATION ASSESSMENT** (10 minutes)
-Evaluate the candidate's performance in the casual conversation round.
-
-Key Areas:
-- Clarity and articulation of thoughts
-- Fluency and vocabulary usage
-- Confidence in expression
-- Personality and interpersonal skills
-- Ability to engage in natural conversation
-
-Question-wise Feedback:
-For each question asked in this round, provide:
-- Question: [The question asked]
-- Candidate's Response: [Brief summary]
-- Feedback: [What was good, what could improve]
-
-Round Summary: [2-3 sentences on overall communication performance]
-
----
-
-**ROUND 2: TECHNICAL ASSESSMENT** (20 minutes)
-Evaluate the candidate's technical knowledge and problem-solving abilities.
-
-Key Areas:
-- Depth of technical knowledge
-- Problem-solving approach
-- Ability to explain concepts clearly
-- Handling of difficult questions
-- Reasoning and analytical thinking
-
-Question-wise Feedback:
-For each technical question, provide:
-- Question: [The question asked]
-- Candidate's Response: [Brief summary]
-- Correct/Expected Answer: [If applicable]
-- Feedback: [Accuracy, depth, areas to improve]
-
-Round Summary: [2-3 sentences on overall technical performance]
-
----
-
-**ROUND 3: HR/BEHAVIORAL ASSESSMENT** (15 minutes)
-Evaluate the candidate's behavioral responses and professional maturity.
-
-Key Areas:
-- Leadership potential demonstrated
-- Professional maturity
-- Ethical judgment
-- Self-awareness and authenticity
-- Communication in professional contexts
-
-Question-wise Feedback:
-For each HR question, provide:
-- Question: [The question asked]
-- Candidate's Response: [Brief summary]
-- Feedback: [Quality of example, authenticity, areas to improve]
-
-Round Summary: [2-3 sentences on overall HR round performance]
-
----
-
-**KEY STRENGTHS:**
-List 4-5 specific strengths observed across all three rounds.
-
-**AREAS FOR IMPROVEMENT:**
-List 4-5 specific areas where the candidate can improve, with actionable suggestions.
-
-**RECOMMENDATIONS:**
-Provide 3-4 specific recommendations for the candidate to become more interview-ready.
-
----
-
-Write this evaluation as constructive, helpful feedback that will genuinely help the candidate improve."""
-
-# Updated scoring with 5 criteria
-SCORING_PROMPT_TEMPLATE = """INTERVIEW SCORING RUBRIC
-
-Based on the complete interview conversation, provide numerical scores (1-10 scale) for each dimension:
-
-COMMUNICATION SKILLS (Weight: 25%):
-- Clarity and articulation
-- Fluency and vocabulary
-- Confidence in expression
-- Ability to explain thoughts
-Score: Assess how effectively they communicate across all rounds
-
-TECHNICAL KNOWLEDGE (Weight: 30%):
-- Conceptual understanding
-- Problem-solving ability
-- Depth of knowledge
-- Explanation of technical concepts
-Score: Focus on demonstrated technical competence
-
-LEADERSHIP POTENTIAL (Weight: 15%):
-- Initiative and proactiveness
-- Team collaboration examples
-- Decision-making ability
-- Influence and persuasion
-Score: Evaluate leadership traits and potential
-
-BEHAVIOUR & PROFESSIONALISM (Weight: 15%):
-- Professional maturity
-- Ethical judgment
-- Handling of challenges
-- Authenticity of responses
-Score: Assess behavioral patterns and professionalism
-
-CONFIDENCE & SELF-AWARENESS (Weight: 15%):
-- Overall confidence level
-- Self-awareness of strengths/weaknesses
-- Growth mindset
-- Composure under pressure
-Score: Evaluate confidence without arrogance
-
-Provide realistic scores that reflect genuine interview performance. Most candidates score between 5-8, with exceptional performance reaching 9-10.
-
-OUTPUT FORMAT:
-COMMUNICATION: X/10
-TECHNICAL: X/10
-LEADERSHIP: X/10
-BEHAVIOUR: X/10
-CONFIDENCE: X/10
-WEIGHTED_OVERALL: X/10"""
-
-# =============================================================================
-# PHRASE COLLECTIONS FOR NATURAL CONVERSATION
+# STANDARD PHRASE COLLECTIONS
 # =============================================================================
 
 ACKNOWLEDGMENT_PHRASES = [
@@ -1191,23 +818,15 @@ ACKNOWLEDGMENT_PHRASES = [
     "Thank you for sharing that.",
     "That's helpful to understand.",
     "Good explanation.",
-    "I appreciate that detail.",
     "That makes sense.",
-    "Nice example.",
-    "Well articulated."
 ]
 
 TRANSITION_PHRASES = [
     "Building on that,",
     "Following up on what you mentioned,",
-    "I'd like to explore further:",
     "That brings up an interesting question:",
     "Related to that,",
-    "Now, considering what you said,",
     "Given your experience with that,",
-    "Moving forward,",
-    "On a related note,",
-    "Let me ask about"
 ]
 
 ENCOURAGEMENT_PHRASES = [
@@ -1215,61 +834,20 @@ ENCOURAGEMENT_PHRASES = [
     "Great explanation.",
     "You've clearly thought about this.",
     "Good problem-solving approach.",
-    "Nice way to break that down.",
     "Your reasoning is sound.",
-    "That shows good understanding.",
-    "Well-structured response.",
-    "Good analytical thinking.",
-    "You explained that clearly."
-]
-
-# Communication round specific phrases
-COMMUNICATION_FOLLOWUP_PHRASES = [
-    "Oh interesting! Tell me more about that.",
-    "That's nice! Why do you enjoy that?",
-    "I'd love to hear more - what draws you to it?",
-    "That sounds fun! How did you get into that?",
-    "Cool! What do you like most about it?",
-    "That's great! Is there a particular reason?",
-    "Nice! What's your favorite part about that?",
-    "Oh really? What made you choose that?",
-    "That's fascinating! Can you elaborate?",
-    "Sounds wonderful! What got you interested?"
-]
-
-COMMUNICATION_TRANSITION_PHRASES = [
-    "That's lovely to hear. Let me ask you something different -",
-    "Thanks for sharing that! I'm curious about something else -",
-    "Great! Switching gears a bit -",
-    "That's interesting! On a different note -",
-    "Nice! I'd also like to know -",
-    "Thanks for that! Here's another thing I'm curious about -"
 ]
 
 CLARIFICATION_PROMPTS = [
     "Could you elaborate on that a bit more?",
     "Can you give me a specific example?",
     "What was your reasoning there?",
-    "How did you arrive at that conclusion?",
     "Could you walk me through your thought process?",
-    "What factors did you consider?",
-    "Can you break that down for me?",
-    "What do you mean by that specifically?",
-    "Could you explain that in simpler terms?",
-    "What challenges did you face with that?"
 ]
 
 GENTLE_REDIRECT_PROMPTS = [
     "That's helpful context. Let me ask about",
-    "I appreciate that. Now, regarding",
     "Good to know. Moving on to",
     "Thanks for sharing. Let's explore",
-    "That's interesting. I'd also like to understand",
-    "Okay, shifting gears a bit,",
-    "That makes sense. On another topic,",
-    "Got it. Let me ask you about",
-    "Thanks. Now I'm curious about",
-    "Understood. Let's discuss"
 ]
 
 SILENCE_GENTLE_PROMPTS = [
@@ -1277,126 +855,210 @@ SILENCE_GENTLE_PROMPTS = [
     "Would you like me to rephrase the question?",
     "Feel free to think out loud if that helps.",
     "No pressure - take a moment if you need.",
-    "Would it help if I gave an example?",
-    "It's okay to take a moment to gather your thoughts.",
-    "Would you like me to clarify anything?",
-    "Don't worry, you can think through this.",
 ]
+
+
+# =============================================================================
+# EVALUATION PROMPTS
+# =============================================================================
+
+EVALUATION_PROMPT_TEMPLATE = """Evaluate interview for {student_name}.
+Duration: {duration} minutes | Rounds: {stages_completed}
+
+TRANSCRIPT:
+{conversation_log}
+
+BACKGROUND:
+{content_context}
+
+Generate evaluation with QUESTION-BY-QUESTION feedback in this EXACT format:
+
+=== OVERALL SUMMARY ===
+(2-3 sentences about overall performance)
+
+=== COMMUNICATION ROUND ===
+For EACH question in communication round:
+
+Q1: [AI's question]
+A1: [User's answer]
+Feedback: [1 sentence - what was good or needs improvement]
+
+Q2: [AI's question]
+A2: [User's answer]
+Feedback: [1 sentence feedback]
+
+(continue for all communication questions...)
+
+Round Summary: [1 sentence overall communication assessment]
+
+=== TECHNICAL ROUND ===
+For EACH question in technical round:
+
+Q1: [AI's question]
+A1: [User's answer]
+Feedback: [Was answer correct? What was missing? 1-2 sentences]
+
+Q2: [AI's question]
+A2: [User's answer]
+Feedback: [1-2 sentences]
+
+(continue for all technical questions...)
+
+Round Summary: [1 sentence overall technical assessment]
+
+=== HR ROUND ===
+For EACH question in HR round:
+
+Q1: [AI's question]
+A1: [User's answer]
+Feedback: [Did they give specific example? Quality of response? 1-2 sentences]
+
+Q2: [AI's question]
+A2: [User's answer]
+Feedback: [1-2 sentences]
+
+(continue for all HR questions...)
+
+Round Summary: [1 sentence overall HR assessment]
+
+=== KEY STRENGTHS ===
+1. [strength 1]
+2. [strength 2]
+3. [strength 3]
+
+=== AREAS TO IMPROVE ===
+1. [improvement 1]
+2. [improvement 2]
+3. [improvement 3]
+
+=== TIPS FOR NEXT TIME ===
+1. [actionable tip 1]
+2. [actionable tip 2]
+
+IMPORTANT: Include EVERY question and answer from the transcript. If user's answer was unclear or garbage text, mention that in feedback."""
+
+
+SCORING_PROMPT_TEMPLATE = """Score this interview (1-10 scale):
+
+COMMUNICATION (25%): Clarity, fluency, confidence
+TECHNICAL (30%): Knowledge, problem-solving, explanations
+LEADERSHIP (15%): Initiative, collaboration, decision-making
+BEHAVIOUR (15%): Professionalism, ethics, maturity
+CONFIDENCE (15%): Self-awareness, composure, growth mindset
+
+OUTPUT FORMAT:
+COMMUNICATION: X/10
+TECHNICAL: X/10
+LEADERSHIP: X/10
+BEHAVIOUR: X/10
+CONFIDENCE: X/10
+WEIGHTED_OVERALL: X/10"""
+
+
+SILENCE_PROMPT_TEMPLATE = """The candidate has been silent.
+STAGE: {stage}
+LAST QUESTION: "{last_question}"
+SILENCE PROMPTS GIVEN: {silence_count}
+
+Generate a gentle, encouraging prompt (max 15 words):"""
+
+
+CONVERSATION_PROMPT_TEMPLATE = """Stage: {stage}
+Time Elapsed: {time_elapsed} minutes
+Questions Asked: {questions_asked}
+Response: "{user_response}"
+
+History:
+{conversation_history}
+
+Answer Quality: {answer_quality}
+
+Generate a natural response that acknowledges what they said and asks ONE follow-up question."""
+
+
+INTRODUCTION_PROMPT_TEMPLATE = """Generate a warm introduction for {student_name}'s interview.
+Explain the 3 rounds: Communication (10min), Technical (20min), HR (15min).
+Ask how they're doing today."""
+
 
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
 def build_introduction_prompt(student_name: str) -> str:
-    """Build the introduction prompt for starting the interview"""
     return INTRODUCTION_PROMPT_TEMPLATE.format(student_name=student_name)
 
+
 def build_stage_prompt(stage: str, content_context: str = "") -> str:
-    """Build the appropriate prompt for the current interview stage"""
-    stage_prompts = {
-        "communication": COMMUNICATION_INTERVIEWER_PROMPT,
-        "technical": TECHNICAL_INTERVIEWER_PROMPT,
-        "hr": HR_BEHAVIORAL_INTERVIEWER_PROMPT
-    }
-    base_prompt = stage_prompts.get(stage, COMMUNICATION_INTERVIEWER_PROMPT)
+    """Build stage-specific system prompt"""
+    base = SYSTEM_CONTEXT_BASE
     
-    # Only add content context for Technical round, NOT for Communication
-    if content_context and stage == "technical":
-        base_prompt += (
-            f"\n\nCANDIDATE'S TECHNICAL BACKGROUND:\n{content_context}\n\n"
-            "Use this context to ask relevant technical questions about their actual work and experience."
-        )
-    elif content_context and stage == "hr":
-        base_prompt += (
-            f"\n\nCANDIDATE'S BACKGROUND CONTEXT:\n{content_context}\n\n"
-            "Use this context to ask relevant behavioral questions about their projects and experiences."
-        )
-    # For communication stage, do NOT add technical context
+    if stage == "communication":
+        base += "\n\nCURRENT STAGE: Communication Round - casual conversation, NO technical questions."
+    elif stage == "technical":
+        base += f"\n\nCURRENT STAGE: Technical Round\nCANDIDATE'S WORK:\n{content_context[:1500]}"
+    elif stage == "hr":
+        base += "\n\nCURRENT STAGE: HR/Behavioral Round - focus on experiences and situational questions."
     
-    return base_prompt
+    return base
+
 
 def build_conversation_prompt(
-    stage: str, 
-    user_response: str, 
-    content_context: str, 
-    conversation_history: str,
-    round_duration: int = 10,
-    time_elapsed: float = 0,
-    questions_asked: int = 0,
+    stage: str, user_response: str, content_context: str, conversation_history: str,
+    round_duration: int = 10, time_elapsed: float = 0, questions_asked: int = 0,
     answer_quality: str = "neutral"
 ) -> str:
-    """Build conversation prompt with time and quality context"""
-    trimmed_history = conversation_history[-1500:] if len(conversation_history) > 1500 else conversation_history
-    
-    # Only include content context for Technical round
-    if stage == "communication":
-        trimmed_context = "[Communication round - casual conversation only, no technical context needed]"
-    else:
-        trimmed_context = content_context[:500] + "..." if len(content_context) > 500 else content_context
-    
     return CONVERSATION_PROMPT_TEMPLATE.format(
         stage=stage,
         round_duration=round_duration,
         time_elapsed=round(time_elapsed, 1),
         questions_asked=questions_asked,
         user_response=user_response,
-        content_context=trimmed_context,
-        conversation_history=trimmed_history,
+        content_context=content_context[:500] if stage == "technical" else "",
+        conversation_history=conversation_history[-1000:],
         answer_quality=answer_quality
     )
 
+
 def build_silence_prompt(stage: str, last_question: str, silence_count: int) -> str:
-    """Build prompt for handling candidate silence"""
     return SILENCE_PROMPT_TEMPLATE.format(
         stage=stage,
         last_question=last_question,
         silence_count=silence_count
     )
 
+
 def build_evaluation_prompt(
-    student_name: str, 
-    duration: float, 
-    stages_completed: list, 
-    conversation_log: str, 
-    content_context: str
+    student_name: str, duration: float, stages_completed: list,
+    conversation_log: str, content_context: str
 ) -> str:
-    """Build comprehensive evaluation prompt"""
-    trimmed_context = content_context[:800] + "..." if len(content_context) > 800 else content_context
     return EVALUATION_PROMPT_TEMPLATE.format(
         student_name=student_name,
         duration=f"{duration:.1f}",
         stages_completed=", ".join(stages_completed),
         conversation_log=conversation_log,
-        content_context=trimmed_context
+        content_context=content_context[:800]
     )
 
+
 def get_round_transition_message(next_stage: str) -> str:
-    """Get the appropriate transition message for moving to next round"""
     transitions = {
         "technical": ROUND_TRANSITION_TO_TECHNICAL,
         "hr": ROUND_TRANSITION_TO_HR,
         "complete": INTERVIEW_COMPLETION_MESSAGE
     }
-    return transitions.get(next_stage, "Let's continue with the next section.")
+    return transitions.get(next_stage, "Let's continue.")
+
 
 def validate_prompts() -> bool:
-    """Validate all required prompts are properly defined"""
-    prompts_to_check = [
-        SYSTEM_CONTEXT_BASE,
-        INTRODUCTION_PROMPT_TEMPLATE,
-        COMMUNICATION_INTERVIEWER_PROMPT,
-        TECHNICAL_INTERVIEWER_PROMPT,
-        HR_BEHAVIORAL_INTERVIEWER_PROMPT,
-        CONVERSATION_PROMPT_TEMPLATE,
-        EVALUATION_PROMPT_TEMPLATE,
-        SCORING_PROMPT_TEMPLATE
-    ]
-    for i, prompt in enumerate(prompts_to_check):
-        if not prompt or len(prompt.strip()) < 50:
-            raise ValueError(f"Prompt {i} is invalid or too short")
+    """Validate required prompts exist"""
+    required = [SYSTEM_CONTEXT_BASE, EVALUATION_PROMPT_TEMPLATE, SCORING_PROMPT_TEMPLATE]
+    for p in required:
+        if not p or len(p.strip()) < 50:
+            raise ValueError("Invalid prompt detected")
     return True
 
-# Validate on import
+
 validate_prompts()
 
 __all__ = [
@@ -1405,15 +1067,16 @@ __all__ = [
     # Weekend mocktest
     "PromptTemplates", "PromptValidator",
     # Weekly interview
-    "SYSTEM_CONTEXT_BASE", "INTRODUCTION_PROMPT_TEMPLATE",
-    "COMMUNICATION_INTERVIEWER_PROMPT", "TECHNICAL_INTERVIEWER_PROMPT",
-    "HR_BEHAVIORAL_INTERVIEWER_PROMPT", "CONVERSATION_PROMPT_TEMPLATE", 
-    "EVALUATION_PROMPT_TEMPLATE", "SCORING_PROMPT_TEMPLATE", "SILENCE_PROMPT_TEMPLATE",
+    "SYSTEM_CONTEXT_BASE", "EVALUATION_PROMPT_TEMPLATE", "SCORING_PROMPT_TEMPLATE",
     "ROUND_TRANSITION_TO_TECHNICAL", "ROUND_TRANSITION_TO_HR", "INTERVIEW_COMPLETION_MESSAGE",
     "ACKNOWLEDGMENT_PHRASES", "TRANSITION_PHRASES", "ENCOURAGEMENT_PHRASES",
-    "COMMUNICATION_FOLLOWUP_PHRASES", "COMMUNICATION_TRANSITION_PHRASES",
     "CLARIFICATION_PROMPTS", "GENTLE_REDIRECT_PROMPTS", "SILENCE_GENTLE_PROMPTS",
-    "build_introduction_prompt", "build_stage_prompt", "build_conversation_prompt", 
+    # Dynamic generation
+    "WRONG_ANSWER_RESPONSES", "SILENCE_ENCOURAGEMENT_RESPONSES", "CANT_ANSWER_RESPONSES",
+    "build_communication_question_prompt", "build_communication_followup_prompt",
+    "build_technical_question_prompt", "build_hr_question_prompt",
+    # Helpers
+    "build_introduction_prompt", "build_stage_prompt", "build_conversation_prompt",
     "build_evaluation_prompt", "build_silence_prompt", "get_round_transition_message",
     "validate_prompts",
 ]
