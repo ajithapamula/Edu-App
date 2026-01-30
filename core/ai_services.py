@@ -34,45 +34,122 @@ ROUND_DURATIONS = {
 }
 
 # =============================================================================
-# TECHNICAL BEHAVIORAL QUESTIONS - Mix with pure technical questions
+# 40 QUESTION TEMPLATES - Works for ANY subject (SAP, Python, Java, etc.)
+# {tech} = technology/topic from user's MongoDB summary
+# {project} = project context from summary
 # =============================================================================
-TECHNICAL_BEHAVIORAL_QUESTIONS = [
-    "Tell me about a challenging technical problem you solved recently.",
-    "Describe a time when you had to learn a new technology quickly.",
-    "How do you approach debugging a complex issue?",
-    "Tell me about a project where you had to collaborate with others.",
-    "Describe a time you had to meet a tight deadline.",
-    "How do you stay updated with new technologies?",
-    "Tell me about a time you improved an existing process.",
-    "Describe a situation where you had to explain technical concepts to non-technical people.",
-    "How do you handle disagreements about technical decisions?",
-    "Tell me about a time you received critical feedback on your work.",
-    "Describe your approach to code reviews.",
-    "How do you prioritize tasks when working on multiple projects?",
-    "Tell me about a time you made a mistake and how you handled it.",
-    "Describe a successful project you're proud of.",
-    "How do you ensure quality in your work?",
+
+# TECHNICAL QUESTIONS (25 templates) - Practical experience with {tech}
+TECHNICAL_QUESTION_TEMPLATES = [
+    # ===== Basic Understanding (Q1-Q5) =====
+    "Can you explain what {tech} is and how you've used it in your work?",
+    "What are the key components or features of {tech} that you worked with?",
+    "How does {tech} fit into the overall architecture of your projects?",
+    "Walk me through the basic workflow when working with {tech}.",
+    "What's the purpose of {tech} and why is it important in your domain?",
+    
+    # ===== Practical Experience (Q6-Q10) =====
+    "Describe a specific project where you implemented {tech}.",
+    "What was your day-to-day work with {tech} like?",
+    "How did you configure or set up {tech} in your environment?",
+    "What tools, commands, or transactions did you use when working with {tech}?",
+    "Can you give me an example of how you used {tech} to solve a real business problem?",
+    
+    # ===== Problem Solving (Q11-Q15) =====
+    "What was the most challenging issue you faced with {tech} and how did you resolve it?",
+    "Describe a bug or error you encountered in {tech} and your debugging approach.",
+    "How do you troubleshoot problems when {tech} isn't working correctly?",
+    "Tell me about a time when {tech} failed unexpectedly. How did you handle it?",
+    "What's the most complex problem you solved using {tech}?",
+    
+    # ===== Best Practices (Q16-Q20) =====
+    "What best practices do you follow when working with {tech}?",
+    "How do you ensure quality and avoid errors when implementing {tech}?",
+    "What documentation or standards do you follow for {tech}?",
+    "How do you test your work with {tech} before deploying to production?",
+    "What common mistakes should be avoided when working with {tech}?",
+    
+    # ===== Advanced & Integration (Q21-Q25) =====
+    "How does {tech} integrate with other systems or components you've worked with?",
+    "What performance considerations do you keep in mind when using {tech}?",
+    "How do you handle security aspects when working with {tech}?",
+    "What improvements or optimizations have you made to {tech} processes?",
+    "How do you train or guide others on using {tech}?",
 ]
 
-# =============================================================================
-# HR BEHAVIORAL QUESTIONS POOL - Never repeat
-# =============================================================================
+# BEHAVIORAL QUESTIONS (15 templates) - Soft skills in context of {tech}
+TECHNICAL_BEHAVIORAL_QUESTIONS = [
+    # ===== Problem Solving & Challenges (Q26-Q30) =====
+    "Tell me about a challenging problem you solved while working on {tech}.",
+    "Describe a situation where you had to learn {tech} quickly under pressure.",
+    "Tell me about a time when your {tech} implementation didn't go as planned. What did you do?",
+    "Describe a difficult decision you had to make regarding {tech}.",
+    "Tell me about a time you identified and fixed a critical issue in {tech}.",
+    
+    # ===== Teamwork & Communication (Q31-Q35) =====
+    "Describe a time when you had to explain {tech} concepts to someone non-technical.",
+    "Tell me about a project where you collaborated with others on {tech}.",
+    "How did you handle a disagreement with a colleague about {tech} implementation?",
+    "Describe a time when you received feedback on your {tech} work. How did you respond?",
+    "Tell me about a time you helped a team member who was struggling with {tech}.",
+    
+    # ===== Initiative & Growth (Q36-Q40) =====
+    "Tell me about a time you took initiative to improve a {tech} process.",
+    "Describe how you stay updated with new developments in {tech}.",
+    "Tell me about a time you went beyond your responsibilities for a {tech} project.",
+    "Describe a {tech} skill you developed on your own. How did you learn it?",
+    "Tell me about a time you proposed a new approach or solution for {tech}.",
+]
+
+# HR/SOFT SKILL QUESTIONS (15 templates) - General professional questions
 HR_QUESTIONS_POOL = [
-    "Describe a time you overcame a significant challenge at work.",
-    "Tell me about a time you demonstrated leadership.",
-    "How do you handle conflict with a colleague?",
-    "Describe a situation where you had to adapt to change.",
-    "What motivates you at work?",
-    "How do you handle criticism?",
-    "Where do you see yourself in 5 years?",
-    "Describe a time you took initiative.",
-    "How do you manage stress?",
-    "Tell me about a time you failed and what you learned.",
-    "What's your biggest strength?",
-    "What's an area you're working to improve?",
+    # ===== Leadership & Initiative =====
+    "Describe a time when you took the lead on a project.",
+    "Tell me about a situation where you motivated your team during a difficult time.",
+    "How do you prioritize tasks when you have multiple deadlines?",
+    "Describe a time when you had to make a decision without all the information you needed.",
+    "Tell me about a time you took ownership of a mistake and fixed it.",
+    
+    # ===== Adaptability & Growth =====
+    "How do you handle sudden changes in project requirements?",
+    "Describe a time when you had to adapt to a new technology or process quickly.",
+    "Tell me about a failure you experienced and what you learned from it.",
+    "How do you handle criticism about your work?",
+    "Where do you see yourself professionally in 5 years?",
+    
+    # ===== Work Style & Values =====
+    "How do you maintain work-life balance during demanding projects?",
     "Describe your ideal work environment.",
-    "How do you prioritize work-life balance?",
-    "Tell me about a time you went above and beyond.",
+    "What motivates you to do your best work?",
+    "How do you handle stress when facing tight deadlines?",
+    "Tell me about a time you went above and beyond for a project or client.",
+]
+
+# GENERIC FALLBACK QUESTIONS - When no specific tech context
+GENERIC_TECHNICAL_QUESTIONS = [
+    "Can you describe your typical day at work?",
+    "What technical skills are you most proud of?",
+    "Tell me about a project you're particularly proud of.",
+    "How do you approach learning new technologies?",
+    "What's the most interesting technical problem you've solved recently?",
+    "How do you stay current with industry trends?",
+    "Describe your experience with system troubleshooting.",
+    "What development or administration tools are you most comfortable with?",
+    "How do you document your work?",
+    "What's your approach to testing and quality assurance?",
+]
+
+GENERIC_BEHAVIORAL_QUESTIONS = [
+    "Tell me about a time you overcame a significant challenge at work.",
+    "Describe a situation where you had to work with a difficult team member.",
+    "Tell me about a time you had to meet a very tight deadline.",
+    "Describe a project that didn't go as planned and how you handled it.",
+    "Tell me about a time you received constructive criticism.",
+    "How do you approach debugging a complex issue?",
+    "Tell me about a project where you had to collaborate with others.",
+    "Describe a time you had to explain technical concepts to non-technical people.",
+    "How do you handle disagreements about technical decisions?",
+    "Tell me about a time you improved an existing process.",
 ]
 
 # =============================================================================
@@ -314,16 +391,23 @@ class WI_InterviewSession:
     behavioral_questions_in_technical: int = 0
     last_was_repeat: bool = False
     
-    # NEW: Track topics where user was silent - skip these entirely
+    # Track topics where user was silent - skip these entirely
     silent_topics: List[str] = field(default_factory=list)
-    topic_attempt_count: Dict[str, int] = field(default_factory=dict)  # Track attempts per topic
-    used_behavioral_questions: List[str] = field(default_factory=list)  # Track used behavioral Q's
-    used_hr_questions: List[str] = field(default_factory=list)  # Track used HR Q's
-    technical_question_count: int = 0  # Count pure technical questions
-    behavioral_question_count: int = 0  # Count behavioral questions in technical
+    topic_attempt_count: Dict[str, int] = field(default_factory=dict)
+    used_behavioral_questions: List[str] = field(default_factory=list)
+    used_hr_questions: List[str] = field(default_factory=list)
+    technical_question_count: int = 0
+    behavioral_question_count: int = 0
     
-    # Extracted from summaries
+    # SEQUENTIAL TRACKING - ensures no repeats and ordered coverage
+    current_tech_index: int = 0  # Index for sequential technology selection
+    current_hr_index: int = 0    # Index for sequential HR question selection
+    current_topic_index: int = 0  # Index for sequential topic selection from summaries
+    tech_question_types_used: Dict[str, List[str]] = field(default_factory=dict)  # Track question types per tech
+    
+    # Extracted from summaries - DETAILED TOPICS
     extracted_technologies: List[str] = field(default_factory=list)
+    extracted_topics_for_questions: List[str] = field(default_factory=list)  # Specific topics from summary sections
     extracted_projects: List[str] = field(default_factory=list)
     extracted_challenges: List[str] = field(default_factory=list)
     extracted_team_info: List[str] = field(default_factory=list)
@@ -333,6 +417,9 @@ class WI_InterviewSession:
     correct_answers: int = 0
     partial_answers: int = 0
     wrong_answers: int = 0
+    
+    # Flag to prevent double finalization
+    is_finalized: bool = False
     
     def __post_init__(self):
         """Initialize time tracking after object creation"""
@@ -456,50 +543,119 @@ class WI_EnhancedInterviewFragmentManager:
         return True
 
     def _extract_summary_info(self, content: str):
-        """Extract technologies, projects, challenges from summaries for personalized questions"""
+        """
+        Extract DETAILED topics from summaries for personalized questions.
+        This parses the actual content to find specific things the user worked on.
+        """
         content_lower = content.lower()
         
-        # Detect user type: SAP/Non-Developer vs Developer
-        sap_keywords = ["sap", "abap", "fiori", "hana", "s/4hana", "s4hana", "mm", "sd", "fico", "pp", "wm", "ewm", "ariba", "successfactors", "bw", "btp", "t-code", "tcode", "transaction", "idoc", "bapi", "rfc", "smartforms", "sapscript", "odata"]
+        # =====================================================================
+        # STEP 1: Detect user type (SAP vs Developer)
+        # =====================================================================
+        sap_keywords = ["sap", "abap", "fiori", "hana", "s/4hana", "s4hana", "mm", "sd", "fico", "pp", "wm", "ewm", "ariba", "successfactors", "bw", "btp", "t-code", "tcode", "transaction", "idoc", "bapi", "rfc", "smartforms", "sapscript", "odata", "client administration", "scc4", "sccl", "scc3", "basis"]
         developer_keywords = ["python", "javascript", "react", "node", "fastapi", "django", "flask", "mongodb", "mysql", "postgresql", "docker", "kubernetes", "aws", "azure", "java", "spring", "typescript", "angular", "vue", "express", "api", "rest", "graphql"]
         
-        # Count matches to determine user type
         sap_matches = [k for k in sap_keywords if k in content_lower]
         dev_matches = [k for k in developer_keywords if k in content_lower]
         
-        # Determine primary track based on what's ACTUALLY in their summary
+        # =====================================================================
+        # STEP 2: Extract SPECIFIC topics from the summary content
+        # These become the basis for questions
+        # =====================================================================
+        self.session.extracted_topics_for_questions = []
+        
+        # Extract section headings and key concepts
+        lines = content.split('\n')
+        for line in lines:
+            line = line.strip()
+            # Look for numbered sections, headings, or key phrases
+            if line and (
+                line[0].isdigit() or 
+                line.startswith('#') or 
+                line.endswith(':') or
+                any(word in line.lower() for word in ['understanding', 'creating', 'configuring', 'implementing', 'troubleshooting', 'best practices', 'types of', 'step-by-step'])
+            ):
+                # Clean up the topic
+                topic = line.strip('#').strip('0123456789.').strip(':').strip()
+                if len(topic) > 5 and len(topic) < 100:
+                    self.session.extracted_topics_for_questions.append(topic)
+        
+        # Also extract key concepts mentioned after "about", "for", "using"
+        concept_patterns = [
+            r"(?:about|understand|learn)\s+(.+?)(?:\.|,|and|$)",
+            r"(?:creating|configuring|implementing)\s+(.+?)(?:\.|,|and|$)",
+            r"(?:using|with)\s+([A-Z][a-zA-Z0-9\s]+)(?:\.|,|and|$)",
+            r"(?:T-code|transaction)\s+([A-Z0-9]+)",
+        ]
+        
+        for pattern in concept_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            for match in matches:
+                if len(match) > 3 and len(match) < 50:
+                    self.session.extracted_topics_for_questions.append(match.strip())
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_topics = []
+        for topic in self.session.extracted_topics_for_questions:
+            topic_lower = topic.lower()
+            if topic_lower not in seen and len(topic) > 5:
+                seen.add(topic_lower)
+                unique_topics.append(topic)
+        self.session.extracted_topics_for_questions = unique_topics[:20]
+        
+        # =====================================================================
+        # STEP 3: Set technologies based on track
+        # =====================================================================
         if len(sap_matches) > len(dev_matches):
-            # SAP/Non-Developer track - ONLY use SAP technologies
-            self.session.extracted_technologies = sap_matches[:10]
+            self.session.extracted_technologies = list(set(sap_matches))[:15]
             logger.info(f"[WI] Detected SAP track - Technologies: {self.session.extracted_technologies}")
         elif len(dev_matches) > 0:
-            # Developer track - ONLY use developer technologies
-            self.session.extracted_technologies = dev_matches[:10]
+            self.session.extracted_technologies = list(set(dev_matches))[:15]
             logger.info(f"[WI] Detected Developer track - Technologies: {self.session.extracted_technologies}")
         else:
-            # Fallback: extract any mentioned tech from content
             self.session.extracted_technologies = []
-            logger.info(f"[WI] No specific tech detected, will use general questions")
+            logger.info(f"[WI] No specific tech detected")
         
-        # Projects - extract from summary
-        project_patterns = [r"worked on (.+?)(?:\.|,|and)", r"built (.+?)(?:\.|,|and)", r"developed (.+?)(?:\.|,|and)", r"implemented (.+?)(?:\.|,|and)", r"created (.+?)(?:\.|,|and)", r"configured (.+?)(?:\.|,|and)"]
+        # =====================================================================
+        # STEP 4: Extract projects/implementations
+        # =====================================================================
+        project_patterns = [
+            r"worked on (.+?)(?:\.|,|and)", 
+            r"built (.+?)(?:\.|,|and)", 
+            r"developed (.+?)(?:\.|,|and)", 
+            r"implemented (.+?)(?:\.|,|and)", 
+            r"created (.+?)(?:\.|,|and)", 
+            r"configured (.+?)(?:\.|,|and)",
+            r"managed (.+?)(?:\.|,|and)",
+        ]
         projects = []
         for pattern in project_patterns:
             projects.extend(re.findall(pattern, content_lower))
-        self.session.extracted_projects = list(set(projects))[:5]
+        self.session.extracted_projects = list(set(projects))[:10]
         
-        # Challenges
-        challenge_patterns = [r"challenge.*?was (.+?)(?:\.|,)", r"difficult.*?(.+?)(?:\.|,)", r"problem.*?(.+?)(?:\.|,)", r"issue.*?was (.+?)(?:\.|,)"]
+        # =====================================================================
+        # STEP 5: Extract challenges mentioned
+        # =====================================================================
+        challenge_patterns = [
+            r"challenge.*?was (.+?)(?:\.|,)", 
+            r"difficult.*?(.+?)(?:\.|,)", 
+            r"problem.*?(.+?)(?:\.|,)", 
+            r"issue.*?was (.+?)(?:\.|,)",
+            r"troubleshoot.*?(.+?)(?:\.|,)",
+        ]
         challenges = []
         for pattern in challenge_patterns:
             challenges.extend(re.findall(pattern, content_lower))
-        self.session.extracted_challenges = list(set(challenges))[:3]
+        self.session.extracted_challenges = list(set(challenges))[:5]
         
         # Team info
         if any(word in content_lower for word in ["team", "collaborate", "together", "group", "lead"]):
             self.session.extracted_team_info = ["worked in team"]
         
-        logger.info(f"[WI] Final Extracted - Tech: {self.session.extracted_technologies}, Projects: {self.session.extracted_projects[:3]}")
+        logger.info(f"[WI] Extracted Topics for Questions: {self.session.extracted_topics_for_questions[:5]}")
+        logger.info(f"[WI] Extracted Technologies: {self.session.extracted_technologies[:5]}")
+        logger.info(f"[WI] Extracted Projects: {self.session.extracted_projects[:3]}")
 
     def should_continue_round(self, stage) -> bool:
         if stage == WI_InterviewStage.INTRODUCTION:
@@ -518,23 +674,210 @@ class WI_EnhancedInterviewFragmentManager:
 class WI_OptimizedAudioProcessor:
     def __init__(self, client_manager):
         self.client_manager = client_manager
+        
+        # Known Whisper hallucinations - these appear when audio is unclear
+        self.HALLUCINATION_PHRASES = [
+            "thank you for watching",
+            "thanks for watching", 
+            "please subscribe",
+            "like and subscribe",
+            "see you in the next",
+            "bye bye",
+            "goodbye",
+            "thank you for listening",
+            "the end",
+            "music",
+            "applause",
+            "laughter",
+            "silence",
+            "inaudible",
+            "unintelligible",
+            "foreign",
+            "speaking foreign language",
+            # YouTube/podcast hallucinations
+            "don't forget to subscribe",
+            "hit the bell",
+            "leave a comment",
+            "check out my",
+            "link in description",
+            "sponsored by",
+        ]
 
     async def transcribe_audio_fast(self, audio_data: bytes) -> Tuple[str, float]:
+        """
+        Transcribe audio with STRONG hallucination prevention.
+        
+        STRATEGY:
+        1. Check audio size (too small = no real speech)
+        2. Use context prompt to guide Whisper
+        3. Clean known hallucination phrases
+        4. Validate result is meaningful
+        5. Return empty string if confidence too low (triggers "please repeat")
+        """
         await self.client_manager.initialize()
+        
+        # ===== CHECK 1: Minimum audio size =====
+        if len(audio_data) < 2000:  # ~0.1 seconds of audio
+            logger.warning(f"[WI] Audio too small: {len(audio_data)} bytes - likely no speech")
+            return "", 0.0
+        
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
             tf.write(audio_data)
             temp_path = tf.name
+        
         try:
             with open(temp_path, "rb") as f:
-                tr = await self.client_manager.groq_client.audio.transcriptions.create(file=(temp_path, f.read()), model="whisper-large-v3-turbo", language="en")
-            txt = tr.text.strip() if hasattr(tr, 'text') else ""
-            logger.info(f"[WI] Transcript: {txt}")
-            return txt, min(len(txt.split()) / 10, 1.0)
+                audio_bytes = f.read()
+            
+            # ===== TRANSCRIBE with context prompt =====
+            # The prompt helps Whisper understand expected content
+            tr = await self.client_manager.groq_client.audio.transcriptions.create(
+                file=(temp_path, audio_bytes), 
+                model="whisper-large-v3-turbo", 
+                language="en",
+                prompt="Interview response. The speaker is answering questions about their work experience, technical skills, and projects."
+            )
+            
+            raw_text = tr.text.strip() if hasattr(tr, 'text') else ""
+            logger.info(f"[WI] Raw transcript: {raw_text[:150]}...")
+            
+            # ===== CHECK 2: Empty result =====
+            if not raw_text:
+                return "", 0.0
+            
+            # ===== CHECK 3: Remove hallucinations =====
+            cleaned_text = self._remove_hallucinations(raw_text)
+            
+            # ===== CHECK 4: Validate result =====
+            confidence = self._calculate_confidence(cleaned_text)
+            
+            if confidence < 0.3:
+                logger.warning(f"[WI] Low confidence ({confidence:.2f}), treating as no response: {raw_text[:80]}")
+                return "", confidence
+            
+            # ===== CHECK 5: Final cleanup =====
+            final_text = self._final_cleanup(cleaned_text)
+            
+            if len(final_text.split()) < 2:
+                logger.warning(f"[WI] Too short after cleanup: '{final_text}'")
+                return "", 0.2
+            
+            logger.info(f"[WI] Final transcript (conf={confidence:.2f}): {final_text[:100]}")
+            return final_text, confidence
+            
+        except Exception as e:
+            logger.error(f"[WI] Transcription error: {e}")
+            return "", 0.0
         finally:
             try:
                 os.unlink(temp_path)
             except:
                 pass
+
+    def _remove_hallucinations(self, text: str) -> str:
+        """Remove known Whisper hallucination phrases"""
+        if not text:
+            return ""
+        
+        result = text.lower()
+        
+        # Remove known hallucination phrases
+        for phrase in self.HALLUCINATION_PHRASES:
+            result = result.replace(phrase, "")
+        
+        # Remove non-English characters (Cyrillic, Chinese, Japanese, Korean, Arabic)
+        # Keep only ASCII letters, numbers, spaces, and basic punctuation
+        cleaned = ""
+        for char in result:
+            if char.isascii() or char in ".,?!'\"- ":
+                cleaned += char
+        
+        # Remove excessive punctuation
+        cleaned = re.sub(r'[.]{2,}', '.', cleaned)  # Multiple dots
+        cleaned = re.sub(r'[,]{2,}', ',', cleaned)  # Multiple commas
+        cleaned = re.sub(r'\s+', ' ', cleaned)       # Multiple spaces
+        
+        # Remove repeated words (like "hello hello hello hello")
+        words = cleaned.split()
+        if len(words) > 3:
+            deduped = []
+            repeat_count = 0
+            last_word = ""
+            for word in words:
+                if word.lower() == last_word.lower():
+                    repeat_count += 1
+                    if repeat_count <= 1:  # Allow max 1 repetition
+                        deduped.append(word)
+                else:
+                    repeat_count = 0
+                    deduped.append(word)
+                last_word = word
+            cleaned = " ".join(deduped)
+        
+        return cleaned.strip()
+
+    def _calculate_confidence(self, text: str) -> float:
+        """Calculate confidence that this is real speech, not hallucination"""
+        if not text:
+            return 0.0
+        
+        words = text.split()
+        word_count = len(words)
+        
+        # Too short = low confidence
+        if word_count < 2:
+            return 0.1
+        
+        # Check for meaningful content
+        # Common English words that indicate real speech
+        real_speech_indicators = {
+            'i', 'we', 'my', 'our', 'the', 'this', 'that', 'is', 'are', 'was', 'were',
+            'have', 'has', 'had', 'do', 'did', 'work', 'worked', 'use', 'used',
+            'project', 'system', 'data', 'client', 'team', 'experience', 'years',
+            'developed', 'created', 'managed', 'handled', 'implemented', 'configured',
+            'learned', 'know', 'think', 'believe', 'like', 'want', 'need',
+            'yes', 'no', 'because', 'so', 'and', 'but', 'or', 'for', 'with'
+        }
+        
+        text_lower = text.lower()
+        indicator_count = sum(1 for word in real_speech_indicators if word in text_lower)
+        
+        # Calculate scores
+        indicator_score = min(indicator_count / 5, 1.0)  # Max 1.0 if 5+ indicators
+        length_score = min(word_count / 10, 1.0)         # Max 1.0 if 10+ words
+        
+        # Check for gibberish patterns
+        gibberish_penalty = 0.0
+        
+        # Repeated words penalty
+        unique_ratio = len(set(words)) / len(words) if words else 0
+        if unique_ratio < 0.5:
+            gibberish_penalty += 0.3
+        
+        # Random character sequences penalty
+        if re.search(r'[a-z]{10,}', text_lower):  # 10+ consecutive letters without space
+            gibberish_penalty += 0.2
+        
+        # Calculate final confidence
+        confidence = (indicator_score * 0.5 + length_score * 0.5) - gibberish_penalty
+        
+        return max(0.0, min(1.0, confidence))
+
+    def _final_cleanup(self, text: str) -> str:
+        """Final cleanup of transcription"""
+        if not text:
+            return ""
+        
+        # Capitalize first letter
+        text = text.strip()
+        if text:
+            text = text[0].upper() + text[1:] if len(text) > 1 else text.upper()
+        
+        # Ensure ends with punctuation
+        if text and text[-1] not in '.?!':
+            text += '.'
+        
+        return text
 
 # =============================================================================
 # WI CONVERSATION MANAGER - Main Logic
@@ -554,16 +897,63 @@ class WI_OptimizedConversationManager:
             return "dont_know"
         return "normal"
 
+    def _is_gibberish(self, text: str) -> bool:
+        """Check if text is gibberish (bad transcription)"""
+        if not text:
+            return True
+        
+        # Check for non-ASCII ratio
+        ascii_chars = sum(1 for c in text if c.isascii())
+        if len(text) > 0 and (ascii_chars / len(text)) < 0.8:
+            return True
+        
+        # Check for excessive repetition
+        words = text.lower().split()
+        if len(words) > 5:
+            unique_ratio = len(set(words)) / len(words)
+            if unique_ratio < 0.3:  # Less than 30% unique words
+                return True
+        
+        # Check for nonsense patterns
+        nonsense_patterns = [
+            r'(.)\1{4,}',  # Same character 5+ times (like "aaaaa")
+            r'\b(\w+)\s+\1\s+\1\s+\1',  # Same word 4+ times
+        ]
+        for pattern in nonsense_patterns:
+            if re.search(pattern, text.lower()):
+                return True
+        
+        # Check for known hallucination phrases
+        hallucinations = [
+            "thank you for watching", "please subscribe", "like and subscribe",
+            "see you next time", "bye bye bye", "youtube", "mcdonald"
+        ]
+        text_lower = text.lower()
+        if any(h in text_lower for h in hallucinations):
+            return True
+        
+        return False
+
     def _assess_answer_quality(self, user_response: str) -> str:
         if not user_response:
             return "silence"
+        
+        # Check for gibberish FIRST
+        if self._is_gibberish(user_response):
+            logger.warning(f"[WI] Detected gibberish: {user_response[:100]}...")
+            return "gibberish"
+        
         intent = self._detect_user_intent(user_response)
         if intent != "normal":
             return "skip" if intent == "skip" else ("repeat" if intent == "repeat" else "cant_answer")
+        
         words = len(user_response.split())
         if words <= 3:
             return "weak"
-        strong = ["because", "therefore", "for example", "specifically", "implemented", "experience", "i think", "used", "worked", "built", "designed"]
+        
+        strong = ["because", "therefore", "for example", "specifically", "implemented", 
+                  "experience", "i think", "used", "worked", "built", "designed", 
+                  "configured", "created", "developed", "managed", "handled"]
         if words >= 20 and any(k in user_response.lower() for k in strong):
             return "strong"
         return "neutral" if words >= 10 else "weak"
@@ -778,219 +1168,708 @@ Generate a short follow-up question. MAX 12 words."""
         return q if '?' in q else q + "?"
 
     async def _generate_technical_question(self, session, user_response: str = "", include_behavioral: bool = False) -> Tuple[str, List[str]]:
-        """Generate technical question - NEVER repeat, enforce behavioral mix"""
+        """
+        Generate technical question using 40 TEMPLATES based on MongoDB summary.
+        
+        TEMPLATE POOLS:
+        - 25 Technical templates (TECHNICAL_QUESTION_TEMPLATES)
+        - 15 Behavioral templates (TECHNICAL_BEHAVIORAL_QUESTIONS)
+        
+        RULES:
+        1. Use templates filled with {tech} from user's summary
+        2. Rotate through ALL templates before repeating
+        3. If user gives wrong answer → Skip that topic
+        4. If user gives correct answer → Encourage + Follow-up
+        5. 70% technical, 30% behavioral mix
+        """
         await self.client_manager.initialize()
         
-        # Calculate behavioral ratio: aim for 40% behavioral, 60% pure technical
-        total_tech_questions = session.technical_question_count + session.behavioral_question_count
-        current_behavioral_ratio = session.behavioral_question_count / max(total_tech_questions, 1)
+        # Track total technical questions
+        if not hasattr(session, 'total_technical_questions_generated'):
+            session.total_technical_questions_generated = 0
+        session.total_technical_questions_generated += 1
         
-        # Force behavioral if ratio is too low and we haven't used all behavioral questions
+        # Initialize template tracking
+        if not hasattr(session, 'used_technical_templates'):
+            session.used_technical_templates = []  # List of (template_index, tech) tuples
+        if not hasattr(session, 'used_behavioral_templates'):
+            session.used_behavioral_templates = []
+        if not hasattr(session, 'current_tech_index'):
+            session.current_tech_index = 0
+        if not hasattr(session, 'current_template_index'):
+            session.current_template_index = 0
+        
+        # Get questions asked
+        all_asked_questions = list(session.questions_asked)
+        
+        # =====================================================================
+        # STEP 1: Analyze user's last response
+        # =====================================================================
+        response_quality = "none"
+        should_followup = False
+        prefix = ""
+        
+        if user_response:
+            response_lower = user_response.lower().strip()
+            word_count = len(response_lower.split())
+            
+            # Bad answer indicators
+            bad_indicators = [
+                "thank you", "skip", "next", "i don't know", "no idea", 
+                "can't answer", "pass", "move on", "bye", "i can't", 
+                "don't understand", "not sure", "no clue", "don't remember",
+                "hello", "hi", "okay", "ok", "yes", "no"
+            ]
+            
+            # Check for repetitive/gibberish
+            words = response_lower.split()
+            unique_words = set(words)
+            is_repetitive = len(words) > 3 and len(unique_words) < len(words) * 0.4
+            
+            # Tech keywords for good answer detection
+            tech_keywords = ['sap', 'client', 'transaction', 't-code', 'config', 'system', 
+                           'data', 'user', 'table', 'module', 'basis', 'abap', 'fiori',
+                           'report', 'program', 'function', 'process', 'implement', 
+                           'configure', 'setup', 'install', 'error', 'issue', 'problem',
+                           'solution', 'project', 'team', 'work', 'experience', 'used',
+                           'created', 'developed', 'managed', 'handled', 'deployed']
+            has_tech_content = any(kw in response_lower for kw in tech_keywords)
+            
+            # Irrelevant content
+            irrelevant = ['mcdonald', 'youtube', 'google', 'phone', 'rupee', 'otp', 
+                         'video', 'movie', 'song', 'food', 'hospital', 'cookie']
+            has_irrelevant = any(irr in response_lower for irr in irrelevant)
+            
+            is_bad_answer = (
+                word_count < 8 or
+                is_repetitive or
+                has_irrelevant or
+                any(indicator == response_lower.strip() for indicator in bad_indicators) or
+                (word_count < 15 and not has_tech_content)
+            )
+            
+            if is_bad_answer:
+                response_quality = "bad"
+                prefix = "I think you might not be familiar with that topic. No worries, let me ask you something different. "
+                # Mark topic to skip
+                if session.exchanges:
+                    last_q = session.exchanges[-1].ai_message.lower()
+                    for tech in (session.extracted_technologies or []):
+                        if tech.lower() in last_q and tech not in session.silent_topics:
+                            session.silent_topics.append(tech)
+                            logger.info(f"[WI] Skipping topic '{tech}' - user doesn't know it")
+                            break
+            elif word_count >= 20 and has_tech_content:
+                response_quality = "good"
+                should_followup = True
+                prefix = self._get_encouragement() + " "
+        
+        # =====================================================================
+        # STEP 2: If good answer, ask follow-up based on their response
+        # =====================================================================
+        if should_followup and user_response:
+            follow_up = await self._generate_followup_from_answer(session, user_response, all_asked_questions)
+            if follow_up:
+                return f"{prefix}{follow_up}", ["followup"]
+        
+        # =====================================================================
+        # STEP 3: Get available technologies from summary
+        # =====================================================================
+        technologies = [t for t in (session.extracted_technologies or []) if t not in session.silent_topics]
+        
+        if not technologies:
+            technologies = ["your work experience", "your daily tasks", "your technical skills"]
+        
+        # =====================================================================
+        # STEP 4: Decide - Technical (70%) or Behavioral (30%)
+        # =====================================================================
+        total_qs = session.technical_question_count + session.behavioral_question_count
+        
+        # Every 4th question is behavioral (Q4, Q8, Q12...)
         should_be_behavioral = (
             include_behavioral and 
-            current_behavioral_ratio < 0.4 and 
-            len(session.used_behavioral_questions) < len(TECHNICAL_BEHAVIORAL_QUESTIONS) and
-            random.random() < 0.5  # 50% chance when below ratio
+            total_qs > 0 and 
+            total_qs % 4 == 3 and
+            len(session.used_behavioral_templates) < len(TECHNICAL_BEHAVIORAL_QUESTIONS)
         )
-        
-        # Also random 25% chance for behavioral
-        if include_behavioral and random.random() < 0.25 and len(session.used_behavioral_questions) < len(TECHNICAL_BEHAVIORAL_QUESTIONS):
-            should_be_behavioral = True
         
         if should_be_behavioral:
-            return await self._generate_technical_behavioral_question(session)
+            session.behavioral_question_count += 1
+            return await self._generate_behavioral_from_template(session, technologies, all_asked_questions, prefix)
         
-        # Pure technical question
+        # =====================================================================
+        # STEP 5: Generate TECHNICAL question from template
+        # =====================================================================
         session.technical_question_count += 1
-        asked = session.get_questions_asked_in_round(WI_InterviewStage.TECHNICAL)
-        all_asked = session.questions_asked  # ALL questions across entire interview
         
-        # Build tech list, excluding topics where user was silent
-        tech_list = session.extracted_technologies if session.extracted_technologies else ["general concepts"]
-        available_tech = [t for t in tech_list if t not in session.silent_topics]
+        # Rotate through technologies
+        tech_idx = session.current_tech_index % len(technologies)
+        chosen_tech = technologies[tech_idx]
+        session.current_tech_index += 1
         
-        if not available_tech:
-            # All topics exhausted, reset but avoid recently asked
-            available_tech = tech_list
-        
-        # Pick a technology not recently asked about (last 3 questions)
-        recent_tech_asked = []
-        for q in asked[-3:]:
-            for t in available_tech:
-                if t.lower() in q.lower():
-                    recent_tech_asked.append(t)
-        
-        final_available = [t for t in available_tech if t not in recent_tech_asked]
-        if not final_available:
-            final_available = available_tech
-        
-        chosen_tech = random.choice(final_available)
-        session.technical_topics_covered.append(chosen_tech)
-        
-        # Track attempt on this topic
-        session.topic_attempt_count[chosen_tech] = session.topic_attempt_count.get(chosen_tech, 0) + 1
-        
-        # Different question types - rotate through them
-        question_types = [
-            f"explain the purpose of {chosen_tech}",
-            f"how you implemented {chosen_tech}",
-            f"benefits of using {chosen_tech}",
-            f"challenges you faced with {chosen_tech}",
-            f"when to use {chosen_tech}",
-            f"key features of {chosen_tech}",
-            f"how {chosen_tech} works",
-            f"your experience configuring {chosen_tech}",
-        ]
-        
-        # Remove question types already asked for this tech
-        used_types_for_tech = []
-        for q in all_asked:
-            if chosen_tech.lower() in q.lower():
-                for qt in question_types:
-                    if any(word in q.lower() for word in qt.lower().split()[:3]):
-                        used_types_for_tech.append(qt)
-        
-        available_types = [qt for qt in question_types if qt not in used_types_for_tech]
-        if not available_types:
-            available_types = question_types
-        
-        chosen_type = random.choice(available_types)
-        
-        prompt = f"""Generate ONE short technical question about: {chosen_type}
-User's context: {session.content_context[:200] if session.content_context else 'General'}
-NEVER ask these exact questions: {asked[-3:]}
-Difficulty: {session.current_difficulty}
-MAX 15 words. Just the question, no preamble."""
-
-        resp = await self.client_manager.openai_client.chat.completions.create(
-            model=config.OPENAI_MODEL, 
-            messages=[{"role": "user", "content": prompt}], 
-            temperature=0.8, max_tokens=40
-        )
-        
-        question = resp.choices[0].message.content.strip()
-        
-        # Validate not casual topic
-        casual_words = ["movie", "music", "hobby", "food", "travel", "weekend", "favorite"]
-        if any(w in question.lower() for w in casual_words):
-            question = f"Can you explain {chosen_tech} in simple terms?"
-        
-        # STRICT duplicate check against ALL questions
-        is_duplicate = False
-        for asked_q in all_asked:
-            if self._is_similar_question(question.lower(), asked_q.lower()):
-                is_duplicate = True
-                break
-        
-        if is_duplicate:
-            # Generate completely unique fallback
-            fallback_templates = [
-                f"What are the key steps in {chosen_tech}?",
-                f"How did you configure {chosen_tech}?",
-                f"What problems does {chosen_tech} solve?",
-                f"Describe your workflow with {chosen_tech}.",
-                f"What's important to know about {chosen_tech}?",
-            ]
-            # Find unused fallback
-            for fb in fallback_templates:
-                if not any(self._is_similar_question(fb.lower(), aq.lower()) for aq in all_asked):
-                    question = fb
+        # Find unused template for this tech
+        question = None
+        for i, template in enumerate(TECHNICAL_QUESTION_TEMPLATES):
+            template_key = (i, chosen_tech.lower())
+            if template_key not in session.used_technical_templates:
+                question = template.format(tech=chosen_tech)
+                
+                # Check not duplicate
+                if not any(self._is_similar_question(question.lower(), aq.lower()) for aq in all_asked_questions):
+                    session.used_technical_templates.append(template_key)
                     break
-            else:
-                # All fallbacks used, create unique one
-                question = f"Tell me something new about {chosen_tech} that we haven't discussed."
+                else:
+                    question = None
         
-        if '?' not in question:
-            question += "?"
-        
-        keywords = [chosen_tech] if chosen_tech != "general concepts" else ["implementation"]
-        return question, keywords
-
-    async def _generate_technical_behavioral_question(self, session) -> Tuple[str, List[str]]:
-        """Generate behavioral question for technical round - NEVER repeat"""
-        session.behavioral_question_count += 1
-        
-        # Find unused behavioral question
-        available_questions = [q for q in TECHNICAL_BEHAVIORAL_QUESTIONS if q not in session.used_behavioral_questions]
-        
-        if not available_questions:
-            # All used, generate dynamic one
-            await self.client_manager.initialize()
-            tech = session.extracted_technologies[0] if session.extracted_technologies else "your work"
+        # If all templates used for this tech, try next tech or generate dynamic
+        if not question:
+            # Reset template index and try another tech
+            session.current_template_index = 0
             
-            prompt = f"""Generate ONE unique behavioral question about {tech} experience.
-NEVER ask: {session.used_behavioral_questions[-3:]}
-MAX 15 words. Just the question."""
+            # Try other technologies
+            for tech in technologies:
+                if tech != chosen_tech:
+                    for i, template in enumerate(TECHNICAL_QUESTION_TEMPLATES):
+                        template_key = (i, tech.lower())
+                        if template_key not in session.used_technical_templates:
+                            question = template.format(tech=tech)
+                            chosen_tech = tech
+                            if not any(self._is_similar_question(question.lower(), aq.lower()) for aq in all_asked_questions):
+                                session.used_technical_templates.append(template_key)
+                                break
+                            else:
+                                question = None
+                    if question:
+                        break
+        
+        # If still no question, generate dynamic one from summary
+        if not question:
+            question = await self._generate_dynamic_question_from_summary(session, chosen_tech, all_asked_questions)
+        
+        # Add prefix if needed
+        full_question = f"{prefix}{question}" if prefix else question
+        
+        if chosen_tech not in session.technical_topics_covered:
+            session.technical_topics_covered.append(chosen_tech)
+        
+        return full_question, [chosen_tech]
 
+    async def _generate_behavioral_from_template(self, session, technologies: List[str], all_asked: List[str], prefix: str = "") -> Tuple[str, List[str]]:
+        """Generate behavioral question from template pool"""
+        
+        # Pick a technology
+        tech_idx = session.current_tech_index % len(technologies)
+        chosen_tech = technologies[tech_idx]
+        
+        # Find unused behavioral template
+        question = None
+        for i, template in enumerate(TECHNICAL_BEHAVIORAL_QUESTIONS):
+            if i not in session.used_behavioral_templates:
+                question = template.format(tech=chosen_tech, project=chosen_tech)
+                
+                if not any(self._is_similar_question(question.lower(), aq.lower()) for aq in all_asked):
+                    session.used_behavioral_templates.append(i)
+                    break
+                else:
+                    question = None
+        
+        # Fallback
+        if not question:
+            question = f"Tell me about a challenging experience you had while working with {chosen_tech}."
+        
+        full_question = f"{prefix}{question}" if prefix else question
+        return full_question, [chosen_tech]
+
+    async def _generate_dynamic_question_from_summary(self, session, tech: str, all_asked: List[str]) -> str:
+        """Generate dynamic question when templates are exhausted"""
+        await self.client_manager.initialize()
+        
+        summary = session.content_context or "General technical work"
+        
+        prompt = f"""Generate ONE unique technical interview question.
+
+CANDIDATE'S WORK SUMMARY:
+{summary[:1500]}
+
+TOPIC: {tech}
+
+ALREADY ASKED (DO NOT REPEAT):
+{chr(10).join(all_asked[-10:])}
+
+Generate a specific question about their practical experience.
+MAX 20 words. Just the question:"""
+
+        try:
             resp = await self.client_manager.openai_client.chat.completions.create(
-                model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.9, max_tokens=40)
+                model=config.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.8,
+                max_tokens=50
+            )
+            question = resp.choices[0].message.content.strip().strip('"').strip("'")
+            if not question.endswith('?'):
+                question += '?'
+            return question
+        except Exception as e:
+            logger.error(f"Error generating dynamic question: {e}")
+            return f"Tell me more about your experience with {tech}?"
+        
+        # =====================================================================
+        # STEP 1: Analyze user's last response - STRICT VALIDATION
+        # =====================================================================
+        response_quality = "none"
+        should_followup = False
+        encouragement = ""
+        
+        if user_response:
+            response_lower = user_response.lower().strip()
+            word_count = len(response_lower.split())
             
-            question = resp.choices[0].message.content.strip()
-        else:
-            question = random.choice(available_questions)
-        
-        session.used_behavioral_questions.append(question)
-        
-        if '?' not in question:
-            question += "?"
-        
-        keywords = ["experience", "challenge", "learned", "approach"]
-        return question, keywords
-
-    async def _generate_hr_question(self, session, db_manager=None) -> Tuple[str, List[str]]:
-        """Generate HR question - NEVER repeat, use pool first"""
-        
-        # First, try to use questions from the pool that haven't been used
-        available_pool = [q for q in HR_QUESTIONS_POOL if q not in session.used_hr_questions]
-        
-        if available_pool:
-            question = random.choice(available_pool)
-            session.used_hr_questions.append(question)
-        else:
-            # Pool exhausted, generate dynamic question
-            await self.client_manager.initialize()
-            asked = session.get_questions_asked_in_round(WI_InterviewStage.HR)
-            all_hr_asked = session.used_hr_questions
+            # Detect bad/unrelated answer
+            bad_indicators = [
+                "thank you", "skip", "next", "i don't know", "no idea", 
+                "can't answer", "pass", "move on", "bye", "i can't", 
+                "don't understand", "not sure", "no clue", "don't remember",
+                "hello", "hi", "okay", "ok", "yes", "no", "good", "fine"
+            ]
             
-            prompt = f"""Generate ONE unique HR/behavioral question.
-NEVER ask these: {all_hr_asked[-5:]}
-MAX 12 words. Just the question, no preamble."""
+            # Check for repetitive words (like "java java java" or "hello hello")
+            words = response_lower.split()
+            unique_words = set(words)
+            is_repetitive = len(words) > 3 and len(unique_words) < len(words) * 0.4
+            
+            # Check for gibberish - too many non-ASCII or random characters
+            ascii_chars = sum(1 for c in response_lower if c.isascii() and c.isalpha())
+            total_alpha = sum(1 for c in response_lower if c.isalpha())
+            is_gibberish = total_alpha > 0 and (ascii_chars / max(total_alpha, 1)) < 0.7
+            
+            # Check for meaningful content - must have actual SAP/tech related words
+            tech_keywords = ['sap', 'client', 'transaction', 't-code', 'config', 'system', 
+                           'data', 'user', 'table', 'module', 'basis', 'abap', 'fiori',
+                           'report', 'program', 'function', 'process', 'implement', 
+                           'configure', 'setup', 'install', 'error', 'issue', 'problem',
+                           'solution', 'project', 'team', 'work', 'experience']
+            has_tech_content = any(kw in response_lower for kw in tech_keywords)
+            
+            is_bad_answer = (
+                word_count < 8 or                    # Too short
+                is_repetitive or                     # Repetitive words
+                is_gibberish or                      # Garbled text
+                any(indicator == response_lower.strip() for indicator in bad_indicators) or  # Just "ok", "yes", etc.
+                (word_count < 15 and not has_tech_content)  # Short without tech content
+            )
+            
+            # Check for clearly irrelevant content
+            irrelevant_indicators = [
+                "mcdonald", "youtube", "google", "phone", "rupee", "otp", "payment",
+                "video", "movie", "song", "food", "hospital", "japan", "cookie",
+                "grok", "python", "django", "michael jackson", "brooklyn"
+            ]
+            has_irrelevant = any(irr in response_lower for irr in irrelevant_indicators)
+            
+            if is_bad_answer or has_irrelevant:
+                response_quality = "bad"
+                # Mark topic as one user doesn't know
+                if session.exchanges:
+                    last_q = session.exchanges[-1].ai_message.lower()
+                    for tech in (session.extracted_technologies or []):
+                        if tech.lower() in last_q and tech not in session.silent_topics:
+                            session.silent_topics.append(tech)
+                            logger.info(f"[WI] User doesn't know '{tech}' - will ask different topic")
+                            break
+            elif word_count >= 20 and has_tech_content and not is_repetitive:
+                # GOOD answer - must be substantial AND have tech content
+                response_quality = "good"
+                should_followup = True
+                encouragement = self._get_encouragement()
+        
+        # =====================================================================
+        # STEP 2: If bad answer, acknowledge and change topic
+        # =====================================================================
+        if response_quality == "bad":
+            prefix = "I think you might not be familiar with that topic. No worries, let me ask you something different. "
+        elif response_quality == "good" and encouragement:
+            prefix = f"{encouragement} "
+        else:
+            prefix = ""
+        
+        # =====================================================================
+        # STEP 3: If good answer, ask follow-up based on their response
+        # =====================================================================
+        if should_followup and user_response:
+            follow_up = await self._generate_followup_from_answer(session, user_response, all_asked_questions)
+            if follow_up:
+                question = f"{prefix}{follow_up}"
+                return question, ["followup"]
+        
+        # =====================================================================
+        # STEP 4: Generate question FROM SUMMARY content
+        # =====================================================================
+        summary_content = session.content_context or ""
+        
+        # Get topics user knows (not in silent_topics)
+        available_topics = [t for t in (session.extracted_technologies or []) if t not in session.silent_topics]
+        
+        if not available_topics:
+            # User doesn't know any extracted topics - ask general from summary
+            available_topics = ["your work", "your experience", "your projects"]
+        
+        # Pick next topic (rotate through)
+        if not hasattr(session, 'topic_index'):
+            session.topic_index = 0
+        
+        topic_idx = session.topic_index % len(available_topics)
+        chosen_topic = available_topics[topic_idx]
+        session.topic_index += 1
+        
+        # Generate question using LLM based on ACTUAL summary
+        prompt = f"""You are a technical interviewer. Generate ONE specific question based on this candidate's work summary.
 
+CANDIDATE'S WORK SUMMARY:
+{summary_content[:2000]}
+
+TOPIC TO ASK ABOUT: {chosen_topic}
+
+ALREADY ASKED QUESTIONS (DO NOT REPEAT):
+{chr(10).join(all_asked_questions[-10:])}
+
+RULES:
+1. Ask about something SPECIFIC mentioned in the summary
+2. Question must be related to "{chosen_topic}"
+3. Ask about their PRACTICAL experience, not theoretical definitions
+4. Make it conversational
+5. DO NOT ask "What is X?" - ask "How did you use X?" or "Tell me about your experience with X"
+6. MAX 20 words
+
+Generate ONLY the question:"""
+
+        try:
             resp = await self.client_manager.openai_client.chat.completions.create(
-                model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.9, max_tokens=35)
-            
+                model=config.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=50
+            )
             question = resp.choices[0].message.content.strip()
+            question = question.strip('"').strip("'").strip()
+            
+            if not question.endswith('?'):
+                question += '?'
             
             # Check for duplicate
-            is_duplicate = False
-            for asked_q in all_hr_asked:
-                if self._is_similar_question(question.lower(), asked_q.lower()):
-                    is_duplicate = True
-                    break
+            is_duplicate = any(
+                self._is_similar_question(question.lower(), aq.lower()) 
+                for aq in all_asked_questions
+            )
             
             if is_duplicate:
-                # Create unique fallback
-                fallback_options = [
-                    "What's a recent accomplishment you're proud of?",
-                    "How do you approach learning new skills?",
-                    "Describe a time you helped a colleague.",
-                    "What does success mean to you?",
-                    "How do you stay organized?",
-                ]
-                for fb in fallback_options:
-                    if fb not in all_hr_asked:
-                        question = fb
-                        break
-                else:
-                    question = "What else would you like me to know about you?"
+                # Fallback to different phrasing
+                question = f"Tell me about your hands-on experience with {chosen_topic}."
+                
+        except Exception as e:
+            logger.error(f"Error generating question: {e}")
+            question = f"Can you share your experience working with {chosen_topic}?"
+        
+        # Add prefix if needed
+        full_question = f"{prefix}{question}" if prefix else question
+        
+        return full_question, [chosen_topic]
+
+    def _get_encouragement(self) -> str:
+        """Get random encouraging response for good answer"""
+        import random
+        encouragements = [
+            "That's a great explanation!",
+            "Excellent point!",
+            "Well explained!",
+            "Good answer!",
+            "That's exactly right!",
+            "Nice! You clearly have good experience with this.",
+            "Great insight!",
+            "That's impressive!",
+        ]
+        return random.choice(encouragements)
+
+    async def _generate_followup_from_answer(self, session, user_response: str, all_asked: List[str]) -> Optional[str]:
+        """Generate follow-up question based on what user said in their GOOD answer"""
+        await self.client_manager.initialize()
+        
+        prompt = f"""The candidate gave this good answer: "{user_response[:300]}"
+
+Generate ONE short follow-up question to dig deeper into what they mentioned.
+Ask about:
+- Specific details they mentioned
+- Challenges they faced
+- How they solved problems
+- Results or outcomes
+
+ALREADY ASKED (DO NOT REPEAT):
+{chr(10).join(all_asked[-5:])}
+
+MAX 15 words. Just the question:"""
+
+        try:
+            resp = await self.client_manager.openai_client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=40
+            )
+            question = resp.choices[0].message.content.strip()
             
-            session.used_hr_questions.append(question)
+            if not question.endswith('?'):
+                question += '?'
+            
+            # Check not duplicate
+            is_duplicate = any(
+                self._is_similar_question(question.lower(), aq.lower()) 
+                for aq in all_asked
+            )
+            
+            if not is_duplicate:
+                return question
+        except:
+            pass
         
-        if '?' not in question:
-            question += "?"
+        return None
+
+    def _normalize_question(self, question: str) -> str:
+        """Normalize question for comparison - remove common words, lowercase, sort"""
+        if not question:
+            return ""
+        q = question.lower().strip().rstrip('?').strip()
+        # Remove common words
+        stop_words = {'what', 'how', 'why', 'when', 'where', 'who', 'is', 'are', 'the', 'a', 'an', 
+                      'your', 'you', 'can', 'do', 'did', 'does', 'tell', 'me', 'about', 'describe', 
+                      'explain', 'please', 'could', 'would', 'should', 'to', 'in', 'on', 'for', 'with'}
+        words = [w for w in q.split() if w not in stop_words and len(w) > 2]
+        return ' '.join(sorted(words))
+
+    async def _generate_technical_behavioral_question(self, session) -> Tuple[str, List[str]]:
+        """Generate follow-up question based on what user just said"""
+        await self.client_manager.initialize()
         
-        keywords = ["strength", "motivation", "growth", "experience"]
-        return question, keywords
+        # Don't follow up on weak responses
+        if len(user_response.split()) < 5:
+            return None
+        
+        prompt = f"""The candidate said: "{user_response[:200]}"
+
+Generate ONE short follow-up question to dig deeper.
+Ask about: specifics, challenges, examples, or learnings.
+
+MAX 12 words. Just the question."""
+
+        try:
+            resp = await self.client_manager.openai_client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=35
+            )
+            question = resp.choices[0].message.content.strip()
+            
+            if not question.endswith('?'):
+                question += '?'
+            
+            # Check not duplicate
+            q_hash = self._normalize_question(question)
+            if hasattr(session, 'asked_question_hashes') and q_hash in session.asked_question_hashes:
+                return None
+            
+            return question, ["followup"]
+        except:
+            pass
+        
+        return None
+
+    async def _generate_technical_behavioral_question(self, session) -> Tuple[str, List[str]]:
+        """
+        Generate behavioral question for technical round.
+        SEQUENTIAL selection from pool, NEVER repeat.
+        """
+        
+        # Get ALL questions asked
+        all_asked = list(session.questions_asked)
+        
+        # Initialize hash set if needed
+        if not hasattr(session, 'asked_question_hashes'):
+            session.asked_question_hashes = set()
+            for q in all_asked:
+                session.asked_question_hashes.add(self._normalize_question(q))
+        
+        # Get user's primary technology for context
+        primary_tech = "your technical work"
+        if session.extracted_technologies:
+            primary_tech = session.extracted_technologies[0]
+        
+        project_context = "your projects"
+        if session.extracted_projects:
+            project_context = session.extracted_projects[0]
+        
+        # Initialize behavioral question tracker
+        if not hasattr(session, 'behavioral_question_idx'):
+            session.behavioral_question_idx = 0
+        
+        # Try TECHNICAL_BEHAVIORAL_QUESTIONS first (with {tech} placeholder)
+        while session.behavioral_question_idx < len(TECHNICAL_BEHAVIORAL_QUESTIONS):
+            template = TECHNICAL_BEHAVIORAL_QUESTIONS[session.behavioral_question_idx]
+            session.behavioral_question_idx += 1
+            
+            # Format with user's tech
+            try:
+                question = template.format(tech=primary_tech, project=project_context)
+            except:
+                question = template.replace("{tech}", primary_tech).replace("{project}", project_context)
+            
+            # Check if duplicate
+            q_hash = self._normalize_question(question)
+            if q_hash not in session.asked_question_hashes:
+                session.asked_question_hashes.add(q_hash)
+                session.used_behavioral_questions.append(question)
+                return question, ["behavioral"]
+        
+        # Try GENERIC_BEHAVIORAL_QUESTIONS next
+        if not hasattr(session, 'generic_behavioral_idx'):
+            session.generic_behavioral_idx = 0
+        
+        while session.generic_behavioral_idx < len(GENERIC_BEHAVIORAL_QUESTIONS):
+            question = GENERIC_BEHAVIORAL_QUESTIONS[session.generic_behavioral_idx]
+            session.generic_behavioral_idx += 1
+            
+            q_hash = self._normalize_question(question)
+            if q_hash not in session.asked_question_hashes:
+                session.asked_question_hashes.add(q_hash)
+                session.used_behavioral_questions.append(question)
+                return question, ["behavioral"]
+        
+        # All pool questions exhausted, generate dynamic one
+        await self.client_manager.initialize()
+        
+        question_num = len(session.used_behavioral_questions) + 1
+        
+        prompt = f"""Generate ONE unique behavioral interview question.
+
+Candidate works with: {primary_tech}
+
+ALREADY ASKED - DO NOT REPEAT:
+{chr(10).join(session.used_behavioral_questions[-10:])}
+
+Ask about: challenges, learning, teamwork, problem-solving
+MAX 15 words. Just the question."""
+
+        try:
+            resp = await self.client_manager.openai_client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.9,
+                max_tokens=40
+            )
+            question = resp.choices[0].message.content.strip()
+            if not question.endswith('?'):
+                question += '?'
+                
+            # Check duplicate
+            q_hash = self._normalize_question(question)
+            if q_hash in session.asked_question_hashes:
+                question = f"Share an experience where you overcame a challenge. (Q#{question_num})"
+        except:
+            question = f"Tell me about a learning experience in your career. (Q#{question_num})"
+        
+        session.asked_question_hashes.add(self._normalize_question(question))
+        session.used_behavioral_questions.append(question)
+        return question, ["behavioral"]
+
+    async def _generate_hr_question(self, session, db_manager=None) -> Tuple[str, List[str]]:
+        """
+        Generate HR question - SEQUENTIAL from templates, NEVER repeat.
+        Uses HR_QUESTIONS_POOL and GENERIC_HR_QUESTIONS.
+        """
+        
+        # Initialize hash set if needed
+        if not hasattr(session, 'asked_question_hashes'):
+            session.asked_question_hashes = set()
+            for q in session.questions_asked:
+                session.asked_question_hashes.add(self._normalize_question(q))
+        
+        # Get user's context for template filling
+        primary_tech = "your work"
+        if session.extracted_technologies:
+            primary_tech = session.extracted_technologies[0]
+        
+        project_context = "your projects"
+        if session.extracted_projects:
+            project_context = session.extracted_projects[0]
+        
+        # Initialize HR question tracker
+        if not hasattr(session, 'hr_question_idx'):
+            session.hr_question_idx = 0
+        
+        # Try HR_QUESTIONS_POOL first (15 templates)
+        while session.hr_question_idx < len(HR_QUESTIONS_POOL):
+            template = HR_QUESTIONS_POOL[session.hr_question_idx]
+            session.hr_question_idx += 1
+            
+            try:
+                question = template.format(tech=primary_tech, project=project_context)
+            except:
+                question = template.replace("{tech}", primary_tech).replace("{project}", project_context)
+            
+            q_hash = self._normalize_question(question)
+            if q_hash not in session.asked_question_hashes:
+                session.asked_question_hashes.add(q_hash)
+                session.used_hr_questions.append(question)
+                logger.info(f"[HR] Question from pool: {question[:60]}...")
+                return question, ["hr"]
+        
+        # Try GENERIC_HR_QUESTIONS (10 questions)
+        if not hasattr(session, 'generic_hr_idx'):
+            session.generic_hr_idx = 0
+        
+        while session.generic_hr_idx < len(GENERIC_HR_QUESTIONS):
+            question = GENERIC_HR_QUESTIONS[session.generic_hr_idx]
+            session.generic_hr_idx += 1
+            
+            q_hash = self._normalize_question(question)
+            if q_hash not in session.asked_question_hashes:
+                session.asked_question_hashes.add(q_hash)
+                session.used_hr_questions.append(question)
+                logger.info(f"[HR] Question from generic: {question[:60]}...")
+                return question, ["hr"]
+        
+        # All exhausted, generate dynamic question
+        await self.client_manager.initialize()
+        question_num = len(session.used_hr_questions) + 1
+        
+        prompt = f"""Generate ONE unique HR/behavioral question.
+
+ALREADY ASKED - DO NOT REPEAT:
+{chr(10).join(session.used_hr_questions[-10:])}
+
+Ask about: career goals, teamwork, leadership, stress management, motivation
+MAX 15 words. Just the question."""
+
+        try:
+            resp = await self.client_manager.openai_client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.9,
+                max_tokens=40
+            )
+            question = resp.choices[0].message.content.strip()
+            if not question.endswith('?'):
+                question += '?'
+            
+            q_hash = self._normalize_question(question)
+            if q_hash in session.asked_question_hashes:
+                question = f"What else would you like to share about yourself?"
+        except:
+            question = f"What are your career aspirations?"
+        
+        session.asked_question_hashes.add(self._normalize_question(question))
+        session.used_hr_questions.append(question)
+        logger.info(f"[HR] Dynamic question: {question[:60]}...")
+        return question, ["hr"]
 
     async def _generate_smart_followup(self, session, user_response: str, current_stage: WI_InterviewStage) -> str:
         """Generate short follow-up based on user's response"""
@@ -1113,20 +1992,27 @@ So, how are you doing today? Ready to get started?"""
         if session.current_stage == WI_InterviewStage.COMMUNICATION:
             if quality == "skip":
                 q = await self._generate_communication_question(session)
+                session.add_exchange(q, question_type="communication")  # FIXED: Add exchange
                 ack = await self._generate_dynamic_ack("skip", "transition")
                 return f"{ack} {q}"
             
             if quality == "silence":
                 return await self.generate_silence_response(session)
             
+            # Handle gibberish - ask to repeat
+            if quality == "gibberish":
+                return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
+            
             if quality == "cant_answer":
                 q = await self._generate_communication_question(session)
+                session.add_exchange(q, question_type="communication")  # FIXED: Add exchange
                 ack = await self._generate_dynamic_ack("cant answer", "cant_answer")
                 return f"{ack} {q}"
             
             # Weak response - acknowledge and ask something different
             if quality == "weak":
                 q = await self._generate_communication_question(session)
+                session.add_exchange(q, question_type="communication")  # FIXED: Add exchange
                 ack = await self._generate_dynamic_ack("weak response", "weak")
                 return f"{ack} {q}"
             
@@ -1134,10 +2020,12 @@ So, how are you doing today? Ready to get started?"""
             if self._should_followup(session, quality):
                 session.conversation_state.followups_on_topic += 1
                 q = await self._generate_communication_followup(session, user_response)
+                session.add_exchange(q, question_type="communication", is_followup=True)  # FIXED: Add exchange
                 ack = await self._generate_dynamic_ack("good response", "good")
                 return f"{ack} {q}"
             
             q = await self._generate_communication_question(session)
+            session.add_exchange(q, question_type="communication")  # FIXED: Add exchange
             session.conversation_state.followups_on_topic = 0
             ack = await self._generate_dynamic_ack("transition", "transition")
             return f"{ack} {q}"
@@ -1158,6 +2046,10 @@ So, how are you doing today? Ready to get started?"""
                 session.add_exchange(q, expected_keywords=keywords, question_type="technical")
                 ack = await self._generate_dynamic_ack("skip", "transition")
                 return f"{ack} {q}"
+            
+            # Handle gibberish - ask to repeat
+            if quality == "gibberish":
+                return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
             
             if quality == "silence":
                 # Track the topic user was silent on
@@ -1237,7 +2129,18 @@ So, how are you doing today? Ready to get started?"""
                 ack = await self._generate_dynamic_ack("skip", "transition")
                 return f"{ack} {q}"
             
+            # Handle gibberish - ask to repeat
+            if quality == "gibberish":
+                return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
+            
             if quality == "silence":
+                # After silence in HR, ask a new question instead of just prompting
+                session.silence_prompt_count += 1
+                if session.silence_prompt_count >= 2:
+                    session.silence_prompt_count = 0
+                    q, keywords = await self._generate_hr_question(session, db_manager)
+                    session.add_exchange(q, expected_keywords=keywords, question_type="hr")
+                    return f"Let's try a different question. {q}"
                 return await self.generate_silence_response(session)
             
             if quality == "cant_answer":
@@ -1388,11 +2291,15 @@ Be constructive. If good, praise briefly. If weak, suggest improvement."""
         # Count silent responses
         silent_count = sum(1 for ex in comm_exchanges + tech_exchanges + hr_exchanges if ex["is_silent"])
         
+        # Get total technical questions generated
+        total_tech_generated = getattr(session, 'total_technical_questions_generated', total_technical_qs)
+        
         summary_prompt = f"""Provide a brief overall interview summary (4-5 sentences) for {session.student_name}.
 
 METRICS:
 - Communication Questions: {total_comm_qs}
-- Technical Questions: {total_technical_qs}
+- Technical Questions Generated: {total_tech_generated}
+- Technical Questions Answered: {total_technical_qs}
 - Technical Accuracy: {tech_accuracy_avg:.0%}
 - HR Questions: {total_hr_qs}
 - Correct Answers: {session.correct_answers}
@@ -1417,7 +2324,8 @@ Include:
         
         # Add metrics summary
         evaluation_parts.append("\n" + "-" * 40)
-        evaluation_parts.append("SCORE BREAKDOWN:")
+        evaluation_parts.append("STATISTICS:")
+        evaluation_parts.append(f"  • Total Technical Questions Generated: {total_tech_generated}")
         evaluation_parts.append(f"  • Technical Accuracy: {tech_accuracy_avg:.0%}")
         evaluation_parts.append(f"  • Questions Answered Well: {session.correct_answers}/{total_technical_qs + total_hr_qs}")
         evaluation_parts.append(f"  • Partial Answers: {session.partial_answers}")

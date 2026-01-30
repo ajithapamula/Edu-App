@@ -146,6 +146,7 @@ class DatabaseManager:
     # DAILY_STANDUP SPECIFIC
     # ------------------------------------------------------------------------
     async def get_student_info_fast(self) -> Tuple[int, str, str, str]:
+        """Fetch student info from MySQL."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self.client_manager.executor,
@@ -153,6 +154,7 @@ class DatabaseManager:
         )
 
     def _sync_get_student_info(self) -> Tuple[int, str, str, str]:
+        """Fetch student info from MySQL. Returns: (student_id, first_name, last_name, session_key)"""
         try:
             conn = self.get_mysql_connection()
             cursor = conn.cursor(dictionary=True)
@@ -171,7 +173,12 @@ class DatabaseManager:
                 raise Exception("No valid student records found in tbl_Student")
 
             session_key = f"SESSION_{int(time.time())}"
+            logger.info(f"✅ Student: {row['First_Name']} {row['Last_Name']} (ID: {row['ID']})")
             return (row['ID'], row['First_Name'], row['Last_Name'], session_key)
+
+        except Exception as e:
+            logger.error(f"❌ Error fetching student info: {e}")
+            raise
 
         except Exception as e:
             logger.error(f"❌ Error fetching student info: {e}")
@@ -356,7 +363,7 @@ class DatabaseManager:
             raise Exception(f"MongoDB 7-day summary retrieval failed: {e}")
 
     # ------------------------------------------------------------------------
-    # WEEKLY INTERVIEW - SAVE/RETRIEVE RESULTS
+    # WEEKLY INTERVIEW - SAVE/RETRIEVE RESULTS (FIXED)
     # ------------------------------------------------------------------------
     async def save_interview_result_fast(self, interview_data: Dict[str, Any]) -> bool:
         """Save weekly interview result to MongoDB asynchronously."""
@@ -387,6 +394,7 @@ class DatabaseManager:
             
             if result.inserted_id:
                 logger.info(f"✅ Interview result saved with ID: {result.inserted_id}")
+                logger.info(f"✅ Saved test_id: {interview_data.get('test_id')}, session_id: {interview_data.get('session_id')}")
                 return True
             else:
                 logger.error("❌ Failed to save interview result - no inserted_id returned")
@@ -396,8 +404,53 @@ class DatabaseManager:
             logger.error(f"❌ Error saving interview result to MongoDB: {e}")
             return False
 
+    async def get_interview_result_fast(self, test_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a specific interview result by test_id (FIXED - searches by test_id)"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_get_interview_result_by_test_id,
+                test_id
+            )
+        except Exception as e:
+            logger.error(f"❌ Error retrieving interview result: {e}")
+            return None
+
+    def _sync_get_interview_result_by_test_id(self, test_id: str) -> Optional[Dict[str, Any]]:
+        """Synchronous helper to retrieve interview result by test_id"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["weekly_interview_results"]
+            
+            logger.info(f"🔍 Searching for interview result with test_id: {test_id}")
+            
+            # Try to find by test_id first
+            result = collection.find_one({"test_id": test_id})
+            
+            # If not found by test_id, try session_id
+            if not result:
+                logger.info(f"🔍 Not found by test_id, trying session_id: {test_id}")
+                result = collection.find_one({"session_id": test_id})
+            
+            client.close()
+            
+            if result:
+                result["_id"] = str(result["_id"])
+                logger.info(f"✅ Retrieved interview result for test_id: {test_id}")
+                logger.info(f"✅ Result has {len(result.get('conversation_log', []))} exchanges")
+            else:
+                logger.warning(f"⚠️ No interview result found for test_id: {test_id}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving interview result from MongoDB: {e}")
+            return None
+
     async def get_interview_result(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve a specific interview result by session_id."""
+        """Retrieve a specific interview result by session_id (original method kept for compatibility)"""
         try:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
@@ -428,6 +481,42 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Error retrieving interview result from MongoDB: {e}")
             return None
+
+    async def get_all_interview_results(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Retrieve all interview results (for debugging/admin)"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_get_all_interview_results,
+                limit
+            )
+        except Exception as e:
+            logger.error(f"❌ Error retrieving all interview results: {e}")
+            return []
+
+    def _sync_get_all_interview_results(self, limit: int) -> List[Dict[str, Any]]:
+        """Synchronous helper to retrieve all interview results"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["weekly_interview_results"]
+            
+            cursor = collection.find().sort("timestamp", -1).limit(limit)
+            
+            results = []
+            for doc in cursor:
+                doc["_id"] = str(doc["_id"])
+                results.append(doc)
+            
+            client.close()
+            
+            logger.info(f"✅ Retrieved {len(results)} interview results")
+            return results
+            
+        except Exception as e:
+            logger.error(f"❌ Error retrieving all interview results from MongoDB: {e}")
+            return []
 
     async def get_student_interview_history(self, student_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         """Retrieve interview history for a specific student."""
