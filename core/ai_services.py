@@ -125,6 +125,21 @@ HR_QUESTIONS_POOL = [
     "Tell me about a time you went above and beyond for a project or client.",
 ]
 
+# Add this near HR_QUESTIONS_POOL (around line 50-100)
+
+GENERIC_HR_QUESTIONS = [
+    "What motivates you to do your best work?",
+    "How do you handle stress when facing tight deadlines?",
+    "Where do you see yourself professionally in 5 years?",
+    "How do you handle criticism about your work?",
+    "Tell me about a time you went above and beyond for a project.",
+    "What values are important to you in a workplace?",
+    "How do you approach learning new skills?",
+    "Describe your ideal work environment.",
+    "What are your greatest professional strengths?",
+    "How do you prioritize tasks when you have multiple deadlines?"
+]
+
 # GENERIC FALLBACK QUESTIONS - When no specific tech context
 GENERIC_TECHNICAL_QUESTIONS = [
     "Can you describe your typical day at work?",
@@ -396,6 +411,7 @@ class WI_InterviewSession:
     topic_attempt_count: Dict[str, int] = field(default_factory=dict)
     used_behavioral_questions: List[str] = field(default_factory=list)
     used_hr_questions: List[str] = field(default_factory=list)
+    previously_asked_hr_questions: List[str]=field(default_factory=list)
     technical_question_count: int = 0
     behavioral_question_count: int = 0
     
@@ -417,9 +433,12 @@ class WI_InterviewSession:
     correct_answers: int = 0
     partial_answers: int = 0
     wrong_answers: int = 0
-    
+
     # Flag to prevent double finalization
     is_finalized: bool = False
+    
+    # HR round pacing - 1 question per minute
+    last_hr_question_time: float = 0.0
     
     def __post_init__(self):
         """Initialize time tracking after object creation"""
@@ -1782,94 +1801,243 @@ MAX 15 words. Just the question."""
 
     async def _generate_hr_question(self, session, db_manager=None) -> Tuple[str, List[str]]:
         """
-        Generate HR question - SEQUENTIAL from templates, NEVER repeat.
-        Uses HR_QUESTIONS_POOL and GENERIC_HR_QUESTIONS.
+        Generate HR question from MongoDB collection 'HR&Managerial_Interview_Questions'.
+        
+        CATEGORY DISTRIBUTION (Total: 10 questions):
+        - Introduction: 2 questions
+        - Behavioral: 3 questions
+        - Leadership: 3 questions
+        - Logical Thinking: 2 questions
         """
         
-        # Initialize hash set if needed
+        # Initialize hash set for duplicate detection
         if not hasattr(session, 'asked_question_hashes'):
             session.asked_question_hashes = set()
             for q in session.questions_asked:
                 session.asked_question_hashes.add(self._normalize_question(q))
         
-        # Get user's context for template filling
-        primary_tech = "your work"
-        if session.extracted_technologies:
-            primary_tech = session.extracted_technologies[0]
+        # Initialize category tracking
+        if not hasattr(session, 'hr_category_counts'):
+            session.hr_category_counts = {
+                'introduction': 0,
+                'behavioral': 0,
+                'leadership': 0,
+                'logical_thinking': 0
+            }
         
-        project_context = "your projects"
-        if session.extracted_projects:
-            project_context = session.extracted_projects[0]
+        # Initialize questions storage by category
+        if not hasattr(session, 'hr_questions_by_category'):
+            session.hr_questions_by_category = {}
         
-        # Initialize HR question tracker
-        if not hasattr(session, 'hr_question_idx'):
-            session.hr_question_idx = 0
+        # Category limits - YOUR REQUIREMENT
+        CATEGORY_LIMITS = {
+            'introduction': 2,      # 2 questions
+            'behavioral': 3,        # 3 questions
+            'leadership': 3,        # 3 questions
+            'logical_thinking': 2   # 2 questions
+        }
         
-        # Try HR_QUESTIONS_POOL first (15 templates)
-        while session.hr_question_idx < len(HR_QUESTIONS_POOL):
-            template = HR_QUESTIONS_POOL[session.hr_question_idx]
-            session.hr_question_idx += 1
-            
+        # Total = 10 questions
+        
+        # STEP 1: Load previously asked HR questions (cross-session tracking)
+        if not session.previously_asked_hr_questions and db_manager:
             try:
-                question = template.format(tech=primary_tech, project=project_context)
-            except:
-                question = template.replace("{tech}", primary_tech).replace("{project}", project_context)
+                session.previously_asked_hr_questions = await db_manager.get_hr_questions_asked(
+                    session.student_id, limit=200
+                )
+                logger.info(f"[HR] Loaded {len(session.previously_asked_hr_questions)} previously asked HR questions")
+                
+                for q in session.previously_asked_hr_questions:
+                    session.asked_question_hashes.add(self._normalize_question(q))
+            except Exception as e:
+                logger.warning(f"[HR] Could not load previous HR questions: {e}")
+                session.previously_asked_hr_questions = []
+        
+        # STEP 2: Load HR questions from MongoDB BY CATEGORY (if not already loaded)
+        if not session.hr_questions_by_category:
+            if db_manager:
+                try:
+                    await self._load_hr_questions_by_category(session, db_manager)
+                except Exception as e:
+                    logger.warning(f"[HR] Could not load from MongoDB: {e}")
             
-            q_hash = self._normalize_question(question)
-            if q_hash not in session.asked_question_hashes:
-                session.asked_question_hashes.add(q_hash)
-                session.used_hr_questions.append(question)
-                logger.info(f"[HR] Question from pool: {question[:60]}...")
-                return question, ["hr"]
+            # Fallback if MongoDB failed
+            if not session.hr_questions_by_category:
+                logger.warning("[HR] Using fallback questions")
+                session.hr_questions_by_category = {
+                    'introduction': GENERIC_HR_QUESTIONS[:5],
+                    'behavioral': HR_QUESTIONS_POOL[:5],
+                    'leadership': HR_QUESTIONS_POOL[5:10],
+                    'logical_thinking': HR_QUESTIONS_POOL[10:15]
+                }
         
-        # Try GENERIC_HR_QUESTIONS (10 questions)
-        if not hasattr(session, 'generic_hr_idx'):
-            session.generic_hr_idx = 0
+        # STEP 3: Determine which category to ask from next
+        # Order: intro -> behavioral -> leadership -> logical -> intro -> behavioral -> leadership -> behavioral -> leadership -> logical
         
-        while session.generic_hr_idx < len(GENERIC_HR_QUESTIONS):
-            question = GENERIC_HR_QUESTIONS[session.generic_hr_idx]
-            session.generic_hr_idx += 1
+        total_hr_asked = sum(session.hr_category_counts.values())
+        logger.info(f"[HR] Total HR questions asked so far: {total_hr_asked}")
+        logger.info(f"[HR] Category counts: {session.hr_category_counts}")
+        
+        # Find next category that hasn't reached its limit
+        target_category = None
+        
+        # Priority order for asking questions
+        category_order = ['introduction', 'behavioral', 'leadership', 'logical_thinking']
+        
+        for category in category_order:
+            if session.hr_category_counts[category] < CATEGORY_LIMITS[category]:
+                target_category = category
+                break
+        
+        # If all categories are at limit, HR round should end
+        if target_category is None:
+            logger.info("[HR] All category limits reached - HR round complete")
+            # Return a closing question or signal completion
+            return "Thank you! That concludes our HR round. You did great!", ["hr_complete"]
+        
+        logger.info(f"[HR] Asking from category: {target_category} (current: {session.hr_category_counts[target_category]}/{CATEGORY_LIMITS[target_category]})")
+        
+        # STEP 4: Select a question from the target category
+        category_questions = session.hr_questions_by_category.get(target_category, [])
+        
+        if not category_questions:
+            logger.warning(f"[HR] No questions available for category: {target_category}")
+            # Try next available category
+            for fallback_cat in category_order:
+                if fallback_cat != target_category and session.hr_questions_by_category.get(fallback_cat):
+                    category_questions = session.hr_questions_by_category[fallback_cat]
+                    target_category = fallback_cat
+                    break
+        
+        # Find unused question
+        all_asked = set(session.used_hr_questions) | set(session.previously_asked_hr_questions)
+        
+        selected_question = None
+        
+        # Shuffle for variety
+        shuffled = category_questions.copy()
+        random.shuffle(shuffled)
+        
+        for question in shuffled:
+            q_normalized = self._normalize_question(question)
             
-            q_hash = self._normalize_question(question)
-            if q_hash not in session.asked_question_hashes:
-                session.asked_question_hashes.add(q_hash)
-                session.used_hr_questions.append(question)
-                logger.info(f"[HR] Question from generic: {question[:60]}...")
-                return question, ["hr"]
+            if q_normalized not in session.asked_question_hashes:
+                # Check similarity
+                is_similar = False
+                for asked_q in all_asked:
+                    if self._is_similar_question(question.lower(), asked_q.lower()):
+                        is_similar = True
+                        break
+                
+                if not is_similar:
+                    selected_question = question
+                    break
         
-        # All exhausted, generate dynamic question
-        await self.client_manager.initialize()
-        question_num = len(session.used_hr_questions) + 1
+        # If no unique question found, use any from category
+        if not selected_question and category_questions:
+            selected_question = random.choice(category_questions)
+            logger.warning(f"[HR] All questions in {target_category} used, selecting random")
         
-        prompt = f"""Generate ONE unique HR/behavioral question.
+        # Final fallback
+        if not selected_question:
+            fallback_questions = {
+                'introduction': "What motivated you to choose your career path?",
+                'behavioral': "Tell me about a challenging situation you faced at work.",
+                'leadership': "Describe a time when you took initiative on a project.",
+                'logical_thinking': "How do you approach solving complex problems?"
+            }
+            selected_question = fallback_questions.get(target_category, "What are your career goals?")
+        
+        # STEP 5: Track the question
+        session.asked_question_hashes.add(self._normalize_question(selected_question))
+        session.used_hr_questions.append(selected_question)
+        session.hr_category_counts[target_category] += 1
+        
+        # STEP 6: Store for cross-session tracking
+        if db_manager:
+            try:
+                await db_manager.store_hr_question_asked(
+                    student_id=session.student_id,
+                    question=selected_question,
+                    session_id=session.session_id
+                )
+            except Exception as e:
+                logger.warning(f"[HR] Could not store question: {e}")
+        
+        logger.info(f"[HR] Selected [{target_category.upper()}] ({session.hr_category_counts[target_category]}/{CATEGORY_LIMITS[target_category]}): {selected_question[:60]}...")
+        
+        return selected_question, ["hr", target_category]
 
-ALREADY ASKED - DO NOT REPEAT:
-{chr(10).join(session.used_hr_questions[-10:])}
-
-Ask about: career goals, teamwork, leadership, stress management, motivation
-MAX 15 words. Just the question."""
-
+    async def _load_hr_questions_by_category(self, session, db_manager):
+        """
+        Load HR questions from MongoDB and organize by category.
+        
+        Collection: HR&Managerial_Interview_Questions
+        Database: ml_notes
+        """
         try:
-            resp = await self.client_manager.openai_client.chat.completions.create(
-                model=config.OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.9,
-                max_tokens=40
-            )
-            question = resp.choices[0].message.content.strip()
-            if not question.endswith('?'):
-                question += '?'
+            from pymongo import MongoClient
+            from .config import config
             
-            q_hash = self._normalize_question(question)
-            if q_hash in session.asked_question_hashes:
-                question = f"What else would you like to share about yourself?"
-        except:
-            question = f"What are your career aspirations?"
-        
-        session.asked_question_hashes.add(self._normalize_question(question))
-        session.used_hr_questions.append(question)
-        logger.info(f"[HR] Dynamic question: {question[:60]}...")
-        return question, ["hr"]
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client["ml_notes"]
+            collection = db["HR&Managerial_Interview_Questions"]
+            
+            logger.info("[HR] Loading questions from MongoDB by category...")
+            
+            # Find document by candidate_type
+            doc = collection.find_one({"candidate_type": "fresher"})  # Change to "experienced" if needed
+            
+            if not doc:
+                logger.warning("[HR] No 'fresher' document found, trying any document")
+                doc = collection.find_one({})
+            
+            if not doc:
+                logger.error("[HR] Collection is empty!")
+                client.close()
+                return
+            
+            # Initialize category storage
+            session.hr_questions_by_category = {
+                'introduction': [],
+                'behavioral': [],
+                'leadership': [],
+                'logical_thinking': []
+            }
+            
+            # Extract questions from each category
+            for category in ['introduction', 'behavioral', 'leadership', 'logical_thinking']:
+                if category in doc and isinstance(doc[category], dict):
+                    category_data = doc[category]
+                    
+                    if "questions" in category_data and isinstance(category_data["questions"], list):
+                        questions = []
+                        for q_obj in category_data["questions"]:
+                            if isinstance(q_obj, dict) and "text" in q_obj:
+                                q_text = str(q_obj["text"]).strip()
+                                if len(q_text) > 10:
+                                    questions.append(q_text)
+                        
+                        session.hr_questions_by_category[category] = questions
+                        logger.info(f"[HR] Loaded {len(questions)} questions from '{category}'")
+                else:
+                    logger.warning(f"[HR] Category '{category}' not found in document")
+            
+            client.close()
+            
+            # Log summary
+            total = sum(len(qs) for qs in session.hr_questions_by_category.values())
+            logger.info(f"[HR] ✅ Total questions loaded: {total}")
+            logger.info(f"[HR]   - Introduction: {len(session.hr_questions_by_category['introduction'])}")
+            logger.info(f"[HR]   - Behavioral: {len(session.hr_questions_by_category['behavioral'])}")
+            logger.info(f"[HR]   - Leadership: {len(session.hr_questions_by_category['leadership'])}")
+            logger.info(f"[HR]   - Logical Thinking: {len(session.hr_questions_by_category['logical_thinking'])}")
+            
+        except Exception as e:
+            logger.error(f"[HR] Error loading questions by category: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     async def _generate_smart_followup(self, session, user_response: str, current_stage: WI_InterviewStage) -> str:
         """Generate short follow-up based on user's response"""
@@ -1883,6 +2051,20 @@ Generate a short follow-up question. MAX 12 words."""
         
         q = resp.choices[0].message.content.strip()
         return q if '?' in q else q + "?"
+    
+    # =========================================================================
+    # HR ROUND PACING - 1 question per ~60 seconds
+    # =========================================================================
+
+    async def _pace_hr_question(self, session):
+        """Ensure at least 60 seconds between HR questions (10 Qs spread over 10 min)"""
+        if session.last_hr_question_time > 0:
+            elapsed = time.time() - session.last_hr_question_time
+            if elapsed < 60:
+                wait_time = 60 - elapsed
+                logger.info(f"[WI] HR Pacing: waiting {wait_time:.1f}s before next question")
+                await asyncio.sleep(wait_time)
+        session.last_hr_question_time = time.time()
 
     # =========================================================================
     # MAIN RESPONSE GENERATION
@@ -1976,6 +2158,7 @@ So, how are you doing today? Ready to get started?"""
             if elapsed >= 25:
                 logger.info(f"[WI] ⏰ TRANSITIONING: Technical -> HR (elapsed: {elapsed:.2f}min >= 25min)")
                 session.start_round(WI_InterviewStage.HR)
+                session.last_hr_question_time = time.time()  # First HR Q starts the clock
                 q, keywords = await self._generate_hr_question(session, db_manager)
                 session.add_exchange(q, expected_keywords=keywords, question_type="hr")
                 return f"Great technical discussion! Now some behavioral questions. {q}"
@@ -2124,6 +2307,7 @@ So, how are you doing today? Ready to get started?"""
                 session.update_last_response(user_response, 0.8, quality, accuracy)
             
             if quality == "skip":
+                await self._pace_hr_question(session)  # ← THIS IS THE ONLY NEW LINE
                 q, keywords = await self._generate_hr_question(session, db_manager)
                 session.add_exchange(q, expected_keywords=keywords, question_type="hr")
                 ack = await self._generate_dynamic_ack("skip", "transition")
@@ -2138,12 +2322,14 @@ So, how are you doing today? Ready to get started?"""
                 session.silence_prompt_count += 1
                 if session.silence_prompt_count >= 2:
                     session.silence_prompt_count = 0
+                    await self._pace_hr_question(session)  # ← THIS IS THE ONLY NEW LINE
                     q, keywords = await self._generate_hr_question(session, db_manager)
                     session.add_exchange(q, expected_keywords=keywords, question_type="hr")
                     return f"Let's try a different question. {q}"
                 return await self.generate_silence_response(session)
             
             if quality == "cant_answer":
+                await self._pace_hr_question(session)  # ← THIS IS THE ONLY NEW LINE
                 q, keywords = await self._generate_hr_question(session, db_manager)
                 session.add_exchange(q, expected_keywords=keywords, question_type="hr")
                 ack = await self._generate_dynamic_ack("cant answer hr", "cant_answer")
@@ -2151,6 +2337,7 @@ So, how are you doing today? Ready to get started?"""
             
             # Weak response - be understanding and ask different question
             if quality == "weak":
+                await self._pace_hr_question(session)  # ← THIS IS THE ONLY NEW LINE
                 q, keywords = await self._generate_hr_question(session, db_manager)
                 session.add_exchange(q, expected_keywords=keywords, question_type="hr")
                 ack = await self._generate_dynamic_ack("weak hr", "weak")
@@ -2158,13 +2345,23 @@ So, how are you doing today? Ready to get started?"""
             
             # Strong answer - might follow up
             if quality == "strong" and random.random() < 0.25:
+                await self._pace_hr_question(session)  # ← THIS IS THE ONLY NEW LINE
                 q = await self._generate_smart_followup(session, user_response, WI_InterviewStage.HR)
                 session.add_exchange(q, question_type="hr", is_followup=True)
                 ack = await self._generate_dynamic_ack("good hr", "hr")
                 return f"{ack} {q}"
             
             # Normal flow
+            await self._pace_hr_question(session)  # ← THIS IS THE ONLY NEW LINE
             q, keywords = await self._generate_hr_question(session, db_manager)
+
+            # ✅ FIX: Check if HR round is complete (all categories reached limit)
+            if keywords and "hr_complete" in keywords:
+                logger.info(f"[WI] ⏰ HR categories complete - transitioning to COMPLETE stage")
+                session.current_stage = WI_InterviewStage.COMPLETE
+                # Don't add exchange for completion message, just return it
+                return q  # This is "Thank you! That concludes our HR round..."
+            
             session.add_exchange(q, expected_keywords=keywords, question_type="hr")
             ack = await self._generate_dynamic_ack("hr response", "hr")
             return f"{ack} {q}"
@@ -2413,6 +2610,77 @@ confidence: X"""
         )
         
         logger.info(f"[WI] Evaluation complete - Overall: {scores['weighted_overall']}/10, Tech Accuracy: {scores['technical_accuracy']}%, Silent: {silent_count}")
+
+        evaluation_details = {
+            "rounds": {
+                "communication": [],
+                "technical": [],
+                "hr": [],
+            },
+            "overall_summary": overall_summary,  # Already generated above
+            "recommendations": [],
+        }
+
+        # Populate round Q&A with feedback
+        for ex_data, round_key in [
+            (comm_exchanges, "communication"),
+            (tech_exchanges, "technical"),
+            (hr_exchanges, "hr"),
+        ]:
+            for item in ex_data:
+                evaluation_details["rounds"][round_key].append({
+                    "question": item["question"],
+                    "answer": item["answer"],
+                    "feedback": item.get("feedback", ""),  # Will be populated below
+                    "accuracy": item.get("accuracy"),
+                    "is_silent": item.get("is_silent", False),
+                })
+
+        # Add per-question feedback to evaluation_details
+        # (Re-use the feedback already generated in the evaluation text)
+        import re as _re
+        current_round = None
+        qa_idx = {"communication": 0, "technical": 0, "hr": 0}
+        for line in evaluation.split("\n"):
+            line_stripped = line.strip()
+            if "COMMUNICATION ROUND" in line_stripped.upper():
+                current_round = "communication"
+            elif "TECHNICAL ROUND" in line_stripped.upper():
+                current_round = "technical"
+            elif "HR" in line_stripped.upper() and "ROUND" in line_stripped.upper():
+                current_round = "hr"
+            elif "OVERALL SUMMARY" in line_stripped.upper():
+                current_round = None
+            elif current_round and line_stripped.startswith("Feedback:"):
+                fb = line_stripped.split("Feedback:", 1)[1].strip()
+                # Remove accuracy suffix
+                fb = _re.sub(r'\s*\(Accuracy:\s*[\d.]+%\)', '', fb).strip()
+                idx = qa_idx[current_round]
+                if idx < len(evaluation_details["rounds"][current_round]):
+                    evaluation_details["rounds"][current_round][idx]["feedback"] = fb
+                    qa_idx[current_round] = idx + 1
+
+        # Generate recommendations based on scores
+        recommendations = []
+        if scores.get("technical_score", 5) < 6:
+            recommendations.append("Focus on deepening technical knowledge in core areas discussed during the interview.")
+        if scores.get("communication_score", 5) < 6:
+            recommendations.append("Practice articulating thoughts more clearly and completely during conversations.")
+        if scores.get("confidence_score", 5) < 6:
+            recommendations.append("Build confidence by practicing mock interviews and presenting technical topics.")
+        if scores.get("leadership_score", 5) < 6:
+            recommendations.append("Prepare specific examples of leadership, initiative, and decision-making from past experiences.")
+        if silent_count > total_technical_qs * 0.3:
+            recommendations.append("Reduce silent responses — even partial answers demonstrate engagement and willingness to try.")
+        if scores.get("technical_accuracy", 0) < 50:
+            recommendations.append("Review core technical concepts and practice explaining them in your own words.")
+        if not recommendations:
+            recommendations.append("Continue building on your strong foundation with advanced topics and real-world practice.")
+
+        evaluation_details["recommendations"] = recommendations
+
+        # Store evaluation_details in scores dict so _finalize_session_fast can save it
+        scores["evaluation_details"] = evaluation_details
         
         return evaluation, scores
 

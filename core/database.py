@@ -51,6 +51,9 @@ class DatabaseManager:
         self.db = None
         self.summaries_collection = None
         self.test_results_collection = None
+        self._hr_questions_cache = {}  # Dict to cache by candidate_type
+        self._hr_questions_cache_time = None
+        self._HR_CACHE_TTL = 3600  # Cache for 1 hour
 
     # ------------------------------------------------------------------------
     # CONFIGURATION PROPERTIES
@@ -362,6 +365,83 @@ class DatabaseManager:
             logger.error(f"❌ Sync 7-day summary retrieval error: {e}")
             raise Exception(f"MongoDB 7-day summary retrieval failed: {e}")
 
+    async def get_hr_questions_asked(self, student_id: int, limit: int = 50) -> List[str]:
+        """Get list of HR questions previously asked to this student across all sessions"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_get_hr_questions_asked,
+                student_id,
+                limit
+            )
+        except Exception as e:
+            logger.error(f"❌ Error getting HR questions: {e}")
+            return []
+
+    def _sync_get_hr_questions_asked(self, student_id: int, limit: int) -> List[str]:
+        """Sync helper to get previously asked HR questions"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["hr_questions_history"]
+            
+            cursor = collection.find(
+                {"student_id": student_id},
+                {"question": 1, "_id": 0}
+            ).sort("asked_at", -1).limit(limit)
+            
+            questions = [doc["question"] for doc in cursor if doc.get("question")]
+            
+            client.close()
+            logger.info(f"✅ Found {len(questions)} previous HR questions for student {student_id}")
+            return questions
+            
+        except Exception as e:
+            logger.error(f"❌ Error fetching HR questions: {e}")
+            return []
+
+    async def store_hr_question_asked(self, student_id: int, question: str, session_id: str = None) -> bool:
+        """Store an HR question that was asked to prevent future repetition"""
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                self.client_manager.executor if self.client_manager else None,
+                self._sync_store_hr_question,
+                student_id,
+                question,
+                session_id
+            )
+        except Exception as e:
+            logger.error(f"❌ Error storing HR question: {e}")
+            return False
+
+    def _sync_store_hr_question(self, student_id: int, question: str, session_id: str) -> bool:
+        """Sync helper to store HR question"""
+        try:
+            client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
+            db = client[config.MONGODB_DATABASE]
+            collection = db["hr_questions_history"]
+            
+            doc = {
+                "student_id": student_id,
+                "question": question,
+                "session_id": session_id,
+                "asked_at": datetime.utcnow()
+            }
+            
+            result = collection.insert_one(doc)
+            client.close()
+            
+            if result.inserted_id:
+                logger.info(f"✅ Stored HR question for student {student_id}")
+                return True
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error storing HR question: {e}")
+            return False
+
     # ------------------------------------------------------------------------
     # WEEKLY INTERVIEW - SAVE/RETRIEVE RESULTS (FIXED)
     # ------------------------------------------------------------------------
@@ -560,42 +640,78 @@ class DatabaseManager:
     # ------------------------------------------------------------------------
     # HR QUESTION TRACKING - Prevent repeating questions across sessions
     # ------------------------------------------------------------------------
-    async def get_hr_questions_asked(self, student_id: int, limit: int = 50) -> List[str]:
-        """Get list of HR questions previously asked to this student across all sessions"""
+    
+    async def get_hr_questions_from_db(self, limit: int = 100, candidate_type: str = "fresher") -> List[str]:
+        """
+        Fetch HR questions from MongoDB collection 'HR&Managerial_Interview_Quest'.
+        
+        Args:
+            limit: Maximum number of questions to return
+            candidate_type: "fresher" or "experienced"
+        """
+        cache_key = f"hr_questions_{candidate_type}"
+        
+        # Check cache
+        if hasattr(self, '_hr_questions_cache') and self._hr_questions_cache:
+            if self._hr_questions_cache.get(cache_key) and self._hr_questions_cache_time:
+                cache_age = time.time() - self._hr_questions_cache_time
+                if cache_age < 3600:  # 1 hour cache
+                    return self._hr_questions_cache[cache_key][:limit]
+        
         try:
             loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
+            questions = await loop.run_in_executor(
                 self.client_manager.executor if self.client_manager else None,
-                self._sync_get_hr_questions_asked,
-                student_id,
-                limit
+                self._sync_get_hr_questions_from_db,
+                limit,
+                candidate_type
             )
+            
+            # Update cache
+            if not hasattr(self, '_hr_questions_cache'):
+                self._hr_questions_cache = {}
+            self._hr_questions_cache[cache_key] = questions
+            self._hr_questions_cache_time = time.time()
+            
+            return questions
         except Exception as e:
-            logger.error(f"❌ Error getting HR questions: {e}")
+            logger.error(f"Error fetching HR questions: {e}")
             return []
 
-    def _sync_get_hr_questions_asked(self, student_id: int, limit: int) -> List[str]:
-        """Sync helper to get previously asked HR questions"""
+    def _sync_get_hr_questions_from_db(self, limit: int, candidate_type: str = "fresher") -> List[str]:
+        """Extract questions from nested document structure."""
         try:
             client = MongoClient(config.mongodb_connection_string, serverSelectionTimeoutMS=5000)
-            db = client[config.MONGODB_DATABASE]
-            collection = db["hr_questions_history"]
+            db = client["ml_notes"]
+            collection = db["HR&Managerial_Interview_Questions"]
             
-            cursor = collection.find(
-                {"student_id": student_id},
-                {"question": 1, "_id": 0}
-            ).sort("asked_at", -1).limit(limit)
+            # Find document by candidate_type
+            doc = collection.find_one({"candidate_type": candidate_type})
             
-            questions = [doc["question"] for doc in cursor if doc.get("question")]
+            if not doc:
+                doc = collection.find_one({})  # Fallback to any document
+                if not doc:
+                    return []
+            
+            questions = []
+            
+            # Extract from behavioral, leadership, introduction (most relevant for HR)
+            for category in ["behavioral", "leadership", "introduction"]:
+                if category in doc and isinstance(doc[category], dict):
+                    if "questions" in doc[category]:
+                        for q_obj in doc[category]["questions"]:
+                            if isinstance(q_obj, dict) and "text" in q_obj:
+                                q_text = q_obj["text"].strip()
+                                if len(q_text) > 10 and q_text not in questions:
+                                    questions.append(q_text)
             
             client.close()
-            logger.info(f"✅ Found {len(questions)} previous HR questions for student {student_id}")
-            return questions
+            logger.info(f"[HR] Loaded {len(questions)} questions from MongoDB")
+            return questions[:limit]
             
         except Exception as e:
-            logger.error(f"❌ Error fetching HR questions: {e}")
+            logger.error(f"Error: {e}")
             return []
-
     async def store_hr_question_asked(self, student_id: int, question: str, session_id: str = None) -> bool:
         """Store an HR question that was asked to prevent future repetition"""
         try:
