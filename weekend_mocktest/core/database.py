@@ -1,5 +1,5 @@
 # weekend_mocktest/core/database.py
-# PRODUCTION READY – FULL VERSION WITH WARNINGS
+# PRODUCTION READY – FULL VERSION WITH WARNINGS (FIXED)
 
 import logging
 import pymongo
@@ -68,36 +68,56 @@ class DatabaseManager:
 
     # ==========================================================
     # WARNINGS (3 warnings = termination)
-    # Warning types:
-    # - multiple_faces: Multiple faces detected in camera
-    # - object_detected: Objects/phone detected
-    # - tab_switch: Tab/window switching
-    # - face_turning: Face turned away from screen  
-    # - face_not_visible: Face not detected
-    # - screenshot: Screenshot attempt
+    #
+    # UPDATED: Now accepts both OLD and NEW frontend warning types
+    #
+    # NEW types (from ProctorCamera BlazeFace + COCO-SSD):
+    #   face_not_detected, face_multiple, face_looking_away
+    #   object_phone, object_book, object_person
+    #   tab_switch, right_click, low_light
+    #
+    # OLD types (kept for backward compatibility):
+    #   multiple_faces, object_detected, face_turning,
+    #   face_not_visible, screenshot
     # ==========================================================
     
-    VALID_WARNING_TYPES = [
-        "multiple_faces",    # Multiple faces detected
-        "object_detected",   # Objects like phone, book detected
-        "tab_switch",        # Tab or window switching
-        "face_turning",      # Face turned away
-        "face_not_visible",  # Face not detected in camera
-        "screenshot"         # Screenshot attempt
-    ]
-    
     MAX_WARNINGS = 3
+
+    # Human-readable messages for ALL warning types (old + new)
+    WARNING_MESSAGES = {
+        # NEW frontend types (BlazeFace + COCO-SSD)
+        "face_not_detected": "Face not visible in camera",
+        "face_multiple": "Multiple faces detected in camera frame",
+        "face_looking_away": "User looking away from screen",
+        "object_phone": "Mobile phone or electronic device detected",
+        "object_book": "Book or reading material detected",
+        "object_person": "Multiple persons detected in frame",
+        "tab_switch": "Tab or window switching detected",
+        "right_click": "Right-click attempted during exam",
+        "low_light": "Low lighting conditions detected",
+        
+        # OLD types (backward compatibility)
+        "multiple_faces": "Multiple faces detected",
+        "object_detected": "Suspicious object detected",
+        "face_turning": "Face turned away from screen",
+        "face_not_visible": "Face not detected in camera",
+        "screenshot": "Screenshot attempt detected",
+    }
 
     def add_warning(self, test_id: str, student_id: int, warning_type: str, 
                     details: Dict = None) -> Dict[str, Any]:
         """
         Add a proctoring warning.
         After 3 warnings, test is terminated.
+        
+        Accepts ALL warning types (old + new frontend).
+        Unknown types are logged but still recorded (never rejected).
         """
         import time
         
-        if warning_type not in self.VALID_WARNING_TYPES:
-            warning_type = "unknown"
+        # Don't reject unknown types — just log them
+        if warning_type not in self.WARNING_MESSAGES:
+            logger.warning(f"⚠️ Unknown warning type: {warning_type} — recording anyway")
         
         timestamp = time.time()
         
@@ -105,6 +125,7 @@ class DatabaseManager:
             "type": warning_type,
             "timestamp": timestamp,
             "timestamp_readable": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+            "description": self.WARNING_MESSAGES.get(warning_type, f"Warning: {warning_type}"),
             "details": details or {}
         }
         
@@ -130,6 +151,7 @@ class DatabaseManager:
                 "test_id": test_id,
                 "student_id": student_id,
                 "warning_count": new_count,
+                "max_warnings": self.MAX_WARNINGS,
                 "warnings": [warning_event],
                 "first_warning_at": timestamp,
                 "last_warning_at": timestamp,
@@ -144,23 +166,19 @@ class DatabaseManager:
         if should_terminate:
             self._mark_test_terminated(test_id)
         
-        # User friendly messages
-        messages = {
-            "multiple_faces": "Multiple faces detected. Only the test taker should be visible.",
-            "object_detected": "Suspicious object detected (phone/book). Please remove it.",
-            "tab_switch": "Tab switching detected. Stay on the test window.",
-            "face_turning": "Please face the screen directly.",
-            "face_not_visible": "Your face is not visible. Adjust your camera.",
-            "screenshot": "Screenshot attempt detected. This is not allowed."
-        }
-        
-        message = messages.get(warning_type, "Warning recorded.")
-        if new_count < self.MAX_WARNINGS:
-            message += f" Warning {new_count}/{self.MAX_WARNINGS}. {self.MAX_WARNINGS - new_count} remaining."
+        # Build user-friendly message
+        description = self.WARNING_MESSAGES.get(warning_type, f"Warning: {warning_type}")
+        if new_count >= self.MAX_WARNINGS:
+            message = f"FINAL WARNING: {description}. Test will be terminated."
+        elif new_count == self.MAX_WARNINGS - 1:
+            message = f"LAST CHANCE: {description}. One more warning = termination!"
         else:
-            message += " Maximum warnings reached. Test terminated."
+            message = f"Warning {new_count}/{self.MAX_WARNINGS}: {description}. {self.MAX_WARNINGS - new_count} remaining."
         
-        logger.warning(f"⚠️ Warning #{new_count} for test {test_id}: {warning_type}")
+        logger.warning(
+            f"⚠️ Warning #{new_count}/{self.MAX_WARNINGS} for test {test_id[:8]}: "
+            f"{warning_type} — {'TERMINATING' if should_terminate else message}"
+        )
         
         return {
             "warning_count": new_count,
@@ -176,7 +194,7 @@ class DatabaseManager:
         doc = self.warnings_collection.find_one({"test_id": test_id})
         warnings_list = doc.get("warnings", []) if doc else []
         
-        warning_summary = [f"{w['type']} at {w['timestamp_readable']}" for w in warnings_list]
+        warning_summary = [f"{w['type']} at {w.get('timestamp_readable', 'unknown')}" for w in warnings_list]
         termination_reason = f"Test terminated after {self.MAX_WARNINGS} warnings: " + "; ".join(warning_summary)
         
         self.warnings_collection.update_one(
@@ -190,7 +208,7 @@ class DatabaseManager:
             }
         )
         
-        logger.error(f"🚫 Test {test_id} TERMINATED: {termination_reason}")
+        logger.error(f"🚫 Test {test_id[:8]} TERMINATED: {termination_reason}")
 
     def get_warnings(self, test_id: str) -> Dict[str, Any]:
         """Get all warnings for a test"""
@@ -313,125 +331,6 @@ class DatabaseManager:
             {"question_id": {"$in": question_ids}},
             {"$inc": {"usage_count": 1}}
         )
-
-    # ==========================================================
-    # WARNINGS (3 warnings = termination)
-    # ==========================================================
-    def add_warning(self, test_id: str, student_id: int, warning_type: str, 
-                    details: Dict = None) -> Dict[str, Any]:
-        """
-        Add a proctoring warning.
-        
-        Warning types:
-        - multiple_faces: Multiple faces detected
-        - object_detected: Suspicious object detected
-        - tab_switch: Tab/window switching
-        - face_turning: Face turned away
-        - face_not_visible: Face not detected
-        - screenshot: Screenshot attempt detected
-        """
-        import time
-        
-        timestamp = time.time()
-        
-        warning_event = {
-            "type": warning_type,
-            "timestamp": timestamp,
-            "timestamp_readable": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-            "details": details or {}
-        }
-        
-        # Find existing or create new
-        existing = self.warnings_collection.find_one({"test_id": test_id})
-        
-        if existing:
-            new_count = existing.get("warning_count", 0) + 1
-            
-            self.warnings_collection.update_one(
-                {"test_id": test_id},
-                {
-                    "$push": {"warnings": warning_event},
-                    "$set": {
-                        "warning_count": new_count,
-                        "last_warning_at": timestamp,
-                        "last_warning_type": warning_type
-                    }
-                }
-            )
-        else:
-            new_count = 1
-            self.warnings_collection.insert_one({
-                "test_id": test_id,
-                "student_id": student_id,
-                "warning_count": new_count,
-                "warnings": [warning_event],
-                "first_warning_at": timestamp,
-                "last_warning_at": timestamp,
-                "last_warning_type": warning_type,
-                "terminated": False,
-                "termination_reason": None,
-                "created_at": timestamp
-            })
-        
-        # Check if should terminate (3 warnings)
-        should_terminate = new_count >= 3
-        
-        if should_terminate:
-            self._mark_test_terminated(test_id)
-        
-        logger.warning(f"⚠️ Warning #{new_count} for test {test_id}: {warning_type}")
-        
-        return {
-            "warning_count": new_count,
-            "max_warnings": 3,
-            "warnings_remaining": max(0, 3 - new_count),
-            "should_terminate": should_terminate,
-            "warning_type": warning_type
-        }
-
-    def _mark_test_terminated(self, test_id: str):
-        """Mark test as terminated due to warnings"""
-        doc = self.warnings_collection.find_one({"test_id": test_id})
-        warnings_list = doc.get("warnings", []) if doc else []
-        
-        # Build termination reason
-        warning_summary = [f"{w['type']} at {w['timestamp_readable']}" for w in warnings_list]
-        termination_reason = f"Session terminated after 3 warnings: " + "; ".join(warning_summary)
-        
-        self.warnings_collection.update_one(
-            {"test_id": test_id},
-            {
-                "$set": {
-                    "terminated": True,
-                    "terminated_at": datetime.utcnow().timestamp(),
-                    "termination_reason": termination_reason
-                }
-            }
-        )
-        
-        logger.error(f"🚫 Test {test_id} TERMINATED: {termination_reason}")
-
-    def get_warnings(self, test_id: str) -> Dict[str, Any]:
-        """Get all warnings for a test"""
-        doc = self.warnings_collection.find_one({"test_id": test_id}, {"_id": 0})
-        if not doc:
-            return {"test_id": test_id, "warning_count": 0, "warnings": [], "terminated": False}
-        return doc
-
-    def get_warning_count(self, test_id: str) -> int:
-        """Get current warning count"""
-        doc = self.warnings_collection.find_one({"test_id": test_id}, {"warning_count": 1})
-        return doc.get("warning_count", 0) if doc else 0
-
-    def is_test_terminated(self, test_id: str) -> bool:
-        """Check if test is terminated due to warnings"""
-        doc = self.warnings_collection.find_one({"test_id": test_id}, {"terminated": 1})
-        return doc.get("terminated", False) if doc else False
-
-    def get_termination_reason(self, test_id: str) -> str:
-        """Get termination reason"""
-        doc = self.warnings_collection.find_one({"test_id": test_id}, {"termination_reason": 1})
-        return doc.get("termination_reason", "") if doc else ""
 
     # ==========================================================
     # TEST RESULTS (EVALUATION + PDF)

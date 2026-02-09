@@ -1,4 +1,3 @@
-# weekend_mocktest/api/routes.py
 """
 API Routes - PRODUCTION VERSION
 
@@ -161,8 +160,6 @@ async def submit_answer(request_data: dict):
                 "sectionScores": section_scores,
                 
                 # Section-wise detailed results with AI explanations
-                # Format: { "aptitude": [...], "mcq": [...], "coding": [...] }
-                # Each item: { question, userAnswer, correctAnswer, isCorrect, explanation }
                 "sectionDetails": section_details,
                 
                 "sectionResults": section_results,
@@ -233,29 +230,7 @@ async def submit_answer(request_data: dict):
 
 @router.get("/api/test/results/{test_id}")
 async def get_test_results(test_id: str):
-    """
-    Get detailed test results with section-wise breakdown.
-    
-    Returns:
-    - Overall score and percentage
-    - sectionScores: { aptitude: {correct, total, percentage}, mcq: {...}, coding: {...} }
-    - sectionDetails: Per-question breakdown with AI explanations
-      {
-        "aptitude": [
-          {
-            "questionNumber": 1,
-            "question": "What is 25% of 200?",
-            "userAnswer": "50",
-            "correctAnswer": "50",
-            "isCorrect": true,
-            "explanation": "Correct! 25% of 200 = 0.25 × 200 = 50"
-          },
-          ...
-        ],
-        "mcq": [...],
-        "coding": [...]
-      }
-    """
+    """Get detailed test results with section-wise breakdown."""
     try:
         results = await test_service.get_test_results(test_id)
         if not results:
@@ -394,26 +369,31 @@ async def force_complete_test(request_data: dict):
 
 # ================================================================
 # WARNING ROUTES (Proctoring - 3 warnings = termination)
+#
+# FIXED:
+# 1. Added /api/warnings (POST) — frontend sends here
+# 2. Kept /api/warnings/add (POST) — backward compatibility
+# 3. Updated valid_types to accept NEW frontend types
+# 4. Unknown types are logged but NOT rejected
 # ================================================================
 
-@router.post("/api/warnings/add")
-async def add_warning(request_data: dict):
+async def _handle_add_warning(request_data: dict):
     """
-    Add a proctoring warning.
+    Shared handler for both /api/warnings and /api/warnings/add
     
-    Warning types:
-    - multiple_faces: Multiple faces detected in camera
-    - object_detected: Objects like phone/book detected
-    - tab_switch: Tab or window switching detected
-    - face_turning: Face turned away from screen
-    - face_not_visible: Face not detected in camera
-    - screenshot: Screenshot attempt detected
+    NEW warning types (from ProctorCamera BlazeFace + COCO-SSD):
+    - face_not_detected, face_multiple, face_looking_away
+    - object_phone, object_book, object_person
+    - tab_switch, right_click, low_light
     
-    After 3 warnings, test is automatically terminated.
+    OLD warning types (backward compatibility):
+    - multiple_faces, object_detected, face_turning, face_not_visible, screenshot
+    
+    After 3 warnings → auto-terminate test.
     """
     try:
         test_id = request_data.get("test_id")
-        student_id = request_data.get("student_id")
+        student_id = request_data.get("student_id", 0)
         warning_type = request_data.get("warning_type")
         details = request_data.get("details", {})
         
@@ -422,17 +402,25 @@ async def add_warning(request_data: dict):
         if not warning_type:
             raise ValueError("warning_type is required")
         
-        # Validate warning type
-        valid_types = ["multiple_faces", "object_detected", "tab_switch", 
-                       "face_turning", "face_not_visible", "screenshot"]
+        # Accept ALL known types (old + new). Don't reject unknown ones.
+        valid_types = [
+            # NEW frontend types
+            "face_not_detected", "face_multiple", "face_looking_away",
+            "object_phone", "object_book", "object_person",
+            "tab_switch", "right_click", "low_light",
+            # OLD types (backward compatibility)
+            "multiple_faces", "object_detected", "face_turning",
+            "face_not_visible", "screenshot"
+        ]
+        
         if warning_type not in valid_types:
-            raise ValueError(f"Invalid warning_type. Must be one of: {valid_types}")
+            logger.warning(f"⚠️ Unknown warning type: {warning_type} — accepting anyway")
         
         result = test_service.add_warning(test_id, student_id, warning_type, details)
         
-        # If should terminate, force complete
+        # Auto-terminate if max warnings reached
         if result.get("should_terminate"):
-            logger.warning(f"🚨 Max warnings reached for test {test_id[:8]}, terminating...")
+            logger.warning(f"🚨 Max warnings for {test_id[:8]} — terminating!")
             await test_service.force_complete_test(
                 test_id, 
                 f"Maximum warnings exceeded ({result['warning_count']} warnings)",
@@ -465,6 +453,20 @@ async def add_warning(request_data: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# FIX: Frontend ProctorCamera sends to /api/warnings (not /api/warnings/add)
+@router.post("/api/warnings")
+async def add_warning_new(request_data: dict):
+    """Add proctoring warning — NEW endpoint (frontend sends here)"""
+    return await _handle_add_warning(request_data)
+
+
+# Keep old endpoint for backward compatibility
+@router.post("/api/warnings/add")
+async def add_warning_legacy(request_data: dict):
+    """Add proctoring warning — LEGACY endpoint (backward compatibility)"""
+    return await _handle_add_warning(request_data)
+
+
 @router.get("/api/warnings/{test_id}")
 async def get_warnings(test_id: str):
     """Get all warnings for a test with full audit trail"""
@@ -492,10 +494,7 @@ async def get_warnings(test_id: str):
 
 @router.get("/api/warnings/{test_id}/status")
 async def get_warning_status(test_id: str):
-    """
-    Check if test can continue or is terminated.
-    Frontend should call this before each action.
-    """
+    """Check if test can continue or is terminated."""
     try:
         result = test_service.get_warning_status(test_id)
         return {
@@ -517,12 +516,22 @@ async def get_warning_types():
     """Get list of valid warning types for proctoring"""
     return {
         "warning_types": [
-            {"type": "multiple_faces", "description": "Multiple faces detected in camera"},
-            {"type": "object_detected", "description": "Objects like phone/book detected"},
+            # NEW types (frontend ProctorCamera)
+            {"type": "face_not_detected", "description": "Face not visible in camera"},
+            {"type": "face_multiple", "description": "Multiple faces detected in camera frame"},
+            {"type": "face_looking_away", "description": "User looking away from screen"},
+            {"type": "object_phone", "description": "Mobile phone or electronic device detected"},
+            {"type": "object_book", "description": "Book or reading material detected"},
+            {"type": "object_person", "description": "Multiple persons detected in frame"},
             {"type": "tab_switch", "description": "Tab or window switching detected"},
-            {"type": "face_turning", "description": "Face turned away from screen"},
-            {"type": "face_not_visible", "description": "Face not detected in camera"},
-            {"type": "screenshot", "description": "Screenshot attempt detected"},
+            {"type": "right_click", "description": "Right-click attempted during exam"},
+            {"type": "low_light", "description": "Low lighting conditions detected"},
+            # OLD types (backward compatibility)
+            {"type": "multiple_faces", "description": "Multiple faces detected (legacy)"},
+            {"type": "object_detected", "description": "Suspicious object detected (legacy)"},
+            {"type": "face_turning", "description": "Face turned away (legacy)"},
+            {"type": "face_not_visible", "description": "Face not detected (legacy)"},
+            {"type": "screenshot", "description": "Screenshot attempt (legacy)"},
         ],
         "max_warnings": 3,
         "note": "After 3 warnings, test is automatically terminated"
@@ -535,11 +544,7 @@ async def get_warning_types():
 
 @router.get("/api/student/{student_id}/history")
 async def get_student_history(student_id: str):
-    """
-    Get test history for a student (for dashboard).
-    
-    Returns all past tests with scores, section breakdown, and PDF availability.
-    """
+    """Get test history for a student (for dashboard)."""
     try:
         history = await test_service.get_student_tests(student_id)
         
@@ -581,14 +586,7 @@ async def get_student_history(student_id: str):
 
 @router.get("/api/student/{student_id}/dashboard")
 async def get_student_dashboard(student_id: str):
-    """
-    Get comprehensive dashboard data for a student.
-    
-    Includes:
-    - Recent tests
-    - Performance trends
-    - Section-wise analysis across all tests
-    """
+    """Get comprehensive dashboard data for a student."""
     try:
         history = await test_service.get_student_tests(student_id)
         
