@@ -138,6 +138,23 @@ class UltraFastInterviewManager:
                 raise Exception(f"Audio too small: {audio_size} bytes")
     
             transcript, quality = await self.audio_processor.transcribe_audio_fast(audio_data)
+
+            # === NEW: Bluetooth/Headphone disconnect handling ===
+            if transcript == "__DEVICE_DISCONNECTED__":
+                logger.warning("Session %s: Audio device disconnected", session_id)
+                await self._send_quick_message(session_data, {
+                    "type": "device_warning",
+                    "text": "It seems your audio device disconnected. Don't worry - the interview will continue. Please switch to your built-in microphone or reconnect your headphones.",
+                    "action": "switch_device",
+                    "interview_continues": True
+                })
+                return
+
+            if transcript == "__DEVICE_RECONNECTING__":
+                logger.info("Session %s: Waiting for device reconnection", session_id)
+                return
+            # === END NEW ===
+
             logger.info("Session %s: transcript='%s' quality=%.2f", session_id, (transcript or "").strip()[:50], quality)
             
             if not transcript or len(transcript.strip()) < 2:
@@ -148,10 +165,6 @@ class UltraFastInterviewManager:
                 answer_quality = self.conversation_manager._assess_answer_quality(transcript)
                 session_data.update_last_response(transcript, quality, answer_quality)
 
-            # =========================================================================
-            # FIXED: Track question count BEFORE generating response to detect if
-            # generate_fast_response internally added an exchange
-            # =========================================================================
             exchange_count_before = len(session_data.exchanges)
             stage_before = session_data.current_stage
 
@@ -162,7 +175,6 @@ class UltraFastInterviewManager:
             if not ai_response:
                 raise Exception("AI response generation returned empty response")
 
-            # CHECK IF INTERVIEW IS COMPLETE AND TRIGGER EVALUATION
             if session_data.current_stage == InterviewStage.COMPLETE:
                 logger.info("Session %s: Interview COMPLETE - triggering evaluation", session_id)
                 
@@ -191,32 +203,13 @@ class UltraFastInterviewManager:
                 logger.info("Total processing time (with evaluation): %.2fs", time.time() - start_time)
                 return
 
-            # =========================================================================
-            # FIXED Issue 1 & 2: Only add exchange in main.py if generate_fast_response
-            # did NOT already add one internally.
-            # 
-            # generate_fast_response adds exchanges internally for:
-            #   - Technical round (all question types)
-            #   - HR round (all question types)
-            #   - Round transitions (comm->tech, tech->hr)
-            #
-            # generate_fast_response does NOT add exchanges for:
-            #   - Communication round (just returns string)
-            #   - Introduction round
-            #   - Silence responses (just returns encouragement string)
-            #   - Repeat responses
-            # =========================================================================
             exchange_count_after = len(session_data.exchanges)
             already_added = exchange_count_after > exchange_count_before
             
             if already_added:
-                # generate_fast_response already called add_exchange internally
-                # Do NOT add another exchange here
                 logger.info("Session %s: Exchange already added by generate_fast_response (before=%d, after=%d), skipping duplicate add_exchange",
                            session_id, exchange_count_before, exchange_count_after)
             else:
-                # generate_fast_response did NOT add an exchange (communication, introduction, silence, repeat)
-                # We need to add it here
                 concept = session_data.current_concept if session_data.current_concept else "general"
                 is_followup = self._determine_if_followup(ai_response)
                 answer_quality = session_data.last_answer_quality
@@ -349,10 +342,6 @@ class UltraFastInterviewManager:
             fragment_manager = session_data.fragment_manager
             time_remaining = fragment_manager.get_round_time_remaining() if fragment_manager else 0
             
-            # =========================================================================
-            # FIXED Issue 1 & 3: Send is_repeat flag and proper question_number
-            # so frontend can track questions correctly and not echo user response
-            # =========================================================================
             await self._send_quick_message(session_data, {
                 "type": "ai_response",
                 "text": text,
@@ -509,7 +498,28 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 elif message.get("type") == "manual_stop":
                     session_data.is_active = False
                     break
-                    
+
+                # === NEW: Bluetooth/Headphone device change handlers ===
+                elif message.get("type") == "device_change":
+                    device_info = message.get("device", {})
+                    logger.info("Audio device changed for session %s: %s", session_id, device_info)
+                    interview_manager.audio_processor.device_monitor.reset()
+                    await websocket.send_text(json.dumps({
+                        "type": "device_acknowledged",
+                        "text": "Audio device change detected. Interview continuing.",
+                        "interview_continues": True
+                    }))
+
+                elif message.get("type") == "device_reconnected":
+                    logger.info("Audio device reconnected for session %s", session_id)
+                    interview_manager.audio_processor.device_monitor.reset()
+                    await websocket.send_text(json.dumps({
+                        "type": "device_acknowledged",
+                        "text": "Device reconnected. You can continue your interview.",
+                        "interview_continues": True
+                    }))
+                # === END NEW ===
+
             except asyncio.TimeoutError:
                 break
             except WebSocketDisconnect:
@@ -549,16 +559,12 @@ async def download_results(test_id: str):
 def generate_pdf_report(result: dict, test_id: str) -> bytes:
     """
     Professional Interview Evaluation Report PDF Generator.
-    
-    Replaces the old ~15 line plain-text version.
-    Same signature, same return type (bytes), drop-in replacement.
     """
     import io
     from datetime import datetime
     
     pdf_buffer = io.BytesIO()
     
-    # ── Page Setup ──────────────────────────────────────────────────────────
     doc = SimpleDocTemplate(
         pdf_buffer,
         pagesize=A4,
@@ -568,76 +574,32 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
         bottomMargin=15*mm,
     )
     
-    # ── Color Palette ───────────────────────────────────────────────────────
-    PRIMARY      = HexColor("#1a237e")   # Deep indigo
-    PRIMARY_LIGHT = HexColor("#e8eaf6")  # Light indigo bg
-    ACCENT       = HexColor("#0d47a1")   # Blue
-    SUCCESS      = HexColor("#2e7d32")   # Green
-    WARNING      = HexColor("#f57f17")   # Amber
-    DANGER       = HexColor("#c62828")   # Red
-    NEUTRAL      = HexColor("#546e7a")   # Blue-grey
-    LIGHT_BG     = HexColor("#f5f5f5")   # Light grey
-    DARK_TEXT     = HexColor("#212121")   # Near black
-    MED_TEXT      = HexColor("#616161")   # Medium grey
+    PRIMARY      = HexColor("#1a237e")
+    PRIMARY_LIGHT = HexColor("#e8eaf6")
+    ACCENT       = HexColor("#0d47a1")
+    SUCCESS      = HexColor("#2e7d32")
+    WARNING      = HexColor("#f57f17")
+    DANGER       = HexColor("#c62828")
+    NEUTRAL      = HexColor("#546e7a")
+    LIGHT_BG     = HexColor("#f5f5f5")
+    DARK_TEXT     = HexColor("#212121")
+    MED_TEXT      = HexColor("#616161")
     
-    # ── Custom Styles ───────────────────────────────────────────────────────
     styles = getSampleStyleSheet()
     
-    styles.add(ParagraphStyle(
-        'ReportTitle', parent=styles['Title'],
-        fontName='Helvetica-Bold', fontSize=22, textColor=white,
-        spaceAfter=6, alignment=TA_LEFT
-    ))
-    styles.add(ParagraphStyle(
-        'ReportSubtitle', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=11, textColor=HexColor("#b0bec5"),
-        spaceAfter=2, alignment=TA_LEFT
-    ))
-    styles.add(ParagraphStyle(
-        'SectionHeading', parent=styles['Heading2'],
-        fontName='Helvetica-Bold', fontSize=14, textColor=PRIMARY,
-        spaceBefore=16, spaceAfter=8,
-        borderPadding=(0, 0, 4, 0),
-    ))
-    styles.add(ParagraphStyle(
-        'RoundHeading', parent=styles['Heading3'],
-        fontName='Helvetica-Bold', fontSize=12, textColor=white,
-        spaceBefore=12, spaceAfter=6,
-    ))
-    styles.add(ParagraphStyle(
-        'QText', parent=styles['Normal'],
-        fontName='Helvetica-Bold', fontSize=9.5, textColor=DARK_TEXT,
-        spaceBefore=2, spaceAfter=1, leading=13,
-    ))
-    styles.add(ParagraphStyle(
-        'AText', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=9.5, textColor=MED_TEXT,
-        spaceBefore=1, spaceAfter=1, leading=13,
-    ))
-    styles.add(ParagraphStyle(
-        'FeedbackText', parent=styles['Normal'],
-        fontName='Helvetica-Oblique', fontSize=9, textColor=NEUTRAL,
-        spaceBefore=1, spaceAfter=4, leading=12,
-    ))
-    styles.add(ParagraphStyle(
-        'BodyText2', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=10, textColor=DARK_TEXT,
-        spaceBefore=2, spaceAfter=2, leading=14, alignment=TA_JUSTIFY,
-    ))
-    styles.add(ParagraphStyle(
-        'SmallLabel', parent=styles['Normal'],
-        fontName='Helvetica', fontSize=8, textColor=MED_TEXT,
-        alignment=TA_CENTER,
-    ))
-    styles.add(ParagraphStyle(
-        'ScoreValue', parent=styles['Normal'],
-        fontName='Helvetica-Bold', fontSize=16, textColor=PRIMARY,
-        alignment=TA_CENTER,
-    ))
+    styles.add(ParagraphStyle('ReportTitle', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=22, textColor=white, spaceAfter=6, alignment=TA_LEFT))
+    styles.add(ParagraphStyle('ReportSubtitle', parent=styles['Normal'], fontName='Helvetica', fontSize=11, textColor=HexColor("#b0bec5"), spaceAfter=2, alignment=TA_LEFT))
+    styles.add(ParagraphStyle('SectionHeading', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=14, textColor=PRIMARY, spaceBefore=16, spaceAfter=8, borderPadding=(0, 0, 4, 0)))
+    styles.add(ParagraphStyle('RoundHeading', parent=styles['Heading3'], fontName='Helvetica-Bold', fontSize=12, textColor=white, spaceBefore=12, spaceAfter=6))
+    styles.add(ParagraphStyle('QText', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=9.5, textColor=DARK_TEXT, spaceBefore=2, spaceAfter=1, leading=13))
+    styles.add(ParagraphStyle('AText', parent=styles['Normal'], fontName='Helvetica', fontSize=9.5, textColor=MED_TEXT, spaceBefore=1, spaceAfter=1, leading=13))
+    styles.add(ParagraphStyle('FeedbackText', parent=styles['Normal'], fontName='Helvetica-Oblique', fontSize=9, textColor=NEUTRAL, spaceBefore=1, spaceAfter=4, leading=12))
+    styles.add(ParagraphStyle('BodyText2', parent=styles['Normal'], fontName='Helvetica', fontSize=10, textColor=DARK_TEXT, spaceBefore=2, spaceAfter=2, leading=14, alignment=TA_JUSTIFY))
+    styles.add(ParagraphStyle('SmallLabel', parent=styles['Normal'], fontName='Helvetica', fontSize=8, textColor=MED_TEXT, alignment=TA_CENTER))
+    styles.add(ParagraphStyle('ScoreValue', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=16, textColor=PRIMARY, alignment=TA_CENTER))
     
     story = []
     
-    # ── Extract Data ────────────────────────────────────────────────────────
     student_name = result.get("student_name", "Student")
     scores = result.get("scores", {})
     evaluation = result.get("evaluation", "")
@@ -653,43 +615,26 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
     
     overall_score = scores.get("weighted_overall", 5.0)
     
-    # Determine grade
-    if overall_score >= 8.5:
-        grade, grade_color = "Excellent", SUCCESS
-    elif overall_score >= 7.0:
-        grade, grade_color = "Good", HexColor("#1b5e20")
-    elif overall_score >= 5.5:
-        grade, grade_color = "Average", WARNING
-    elif overall_score >= 4.0:
-        grade, grade_color = "Needs Improvement", HexColor("#e65100")
-    else:
-        grade, grade_color = "Poor", DANGER
+    if overall_score >= 8.5: grade, grade_color = "Excellent", SUCCESS
+    elif overall_score >= 7.0: grade, grade_color = "Good", HexColor("#1b5e20")
+    elif overall_score >= 5.5: grade, grade_color = "Average", WARNING
+    elif overall_score >= 4.0: grade, grade_color = "Needs Improvement", HexColor("#e65100")
+    else: grade, grade_color = "Poor", DANGER
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 1: HEADER BANNER
-    # ════════════════════════════════════════════════════════════════════════
+    # HEADER BANNER
     header_data = [[
         Paragraph(f"<b>{student_name}</b>", styles['ReportTitle']),
-        Paragraph(f"<b>{overall_score}/10</b>", ParagraphStyle(
-            'HeaderScore', parent=styles['Normal'],
-            fontName='Helvetica-Bold', fontSize=28, textColor=white,
-            alignment=TA_RIGHT,
-        ))
+        Paragraph(f"<b>{overall_score}/10</b>", ParagraphStyle('HeaderScore', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=28, textColor=white, alignment=TA_RIGHT))
     ]]
     header_table = Table(header_data, colWidths=[120*mm, 50*mm])
     header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), PRIMARY),
-        ('TEXTCOLOR', (0, 0), (-1, -1), white),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('LEFTPADDING', (0, 0), (0, 0), 15),
-        ('RIGHTPADDING', (-1, -1), (-1, -1), 15),
-        ('TOPPADDING', (0, 0), (-1, -1), 12),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-        ('ROUNDEDCORNERS', [6, 6, 0, 0]),
+        ('BACKGROUND', (0, 0), (-1, -1), PRIMARY), ('TEXTCOLOR', (0, 0), (-1, -1), white),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('LEFTPADDING', (0, 0), (0, 0), 15),
+        ('RIGHTPADDING', (-1, -1), (-1, -1), 15), ('TOPPADDING', (0, 0), (-1, -1), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 12), ('ROUNDEDCORNERS', [6, 6, 0, 0]),
     ]))
     story.append(header_table)
     
-    # Sub-header with meta info
     meta_data = [[
         Paragraph(f"<b>Date:</b> {interview_date}", ParagraphStyle('Meta', fontName='Helvetica', fontSize=8.5, textColor=MED_TEXT)),
         Paragraph(f"<b>Duration:</b> {duration} min", ParagraphStyle('Meta2', fontName='Helvetica', fontSize=8.5, textColor=MED_TEXT)),
@@ -698,25 +643,19 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
     ]]
     meta_table = Table(meta_data, colWidths=[48*mm, 35*mm, 42*mm, 45*mm])
     meta_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, -1), PRIMARY_LIGHT),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('LEFTPADDING', (0, 0), (0, 0), 15),
+        ('BACKGROUND', (0, 0), (-1, -1), PRIMARY_LIGHT), ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6), ('LEFTPADDING', (0, 0), (0, 0), 15),
         ('ROUNDEDCORNERS', [0, 0, 6, 6]),
     ]))
     story.append(meta_table)
     story.append(Spacer(1, 12))
     
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 2: SCORE DASHBOARD
-    # ════════════════════════════════════════════════════════════════════════
+    # SCORE DASHBOARD
     story.append(Paragraph("Score Dashboard", styles['SectionHeading']))
     
     score_keys = [
-        ("Communication", "communication_score", 0.20),
-        ("Technical", "technical_score", 0.30),
-        ("Leadership", "leadership_score", 0.15),
-        ("Behaviour", "behaviour_score", 0.20),
+        ("Communication", "communication_score", 0.20), ("Technical", "technical_score", 0.30),
+        ("Leadership", "leadership_score", 0.15), ("Behaviour", "behaviour_score", 0.20),
         ("Confidence", "confidence_score", 0.15),
     ]
     
@@ -727,46 +666,27 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
         return DANGER
     
     def _make_gauge_cell(label, score_val, weight_pct):
-        """Create a mini gauge bar for a score dimension"""
         sc = min(max(score_val, 0), 10)
         color = _score_color(sc)
-        bar_width = 100  # px
+        bar_width = 100
         filled = int(sc / 10 * bar_width)
-        
         d = Drawing(bar_width + 10, 14)
-        # Background bar
         d.add(Rect(0, 2, bar_width, 10, fillColor=HexColor("#e0e0e0"), strokeColor=None))
-        # Filled bar
-        if filled > 0:
-            d.add(Rect(0, 2, filled, 10, fillColor=color, strokeColor=None))
-        # Score text
+        if filled > 0: d.add(Rect(0, 2, filled, 10, fillColor=color, strokeColor=None))
         d.add(String(bar_width + 3, 3, f"{sc:.1f}", fontName='Helvetica-Bold', fontSize=9, fillColor=color))
-        
         return [
-            Paragraph(f"<b>{label}</b> <font size='7' color='#9e9e9e'>({int(weight_pct*100)}%)</font>", 
-                      ParagraphStyle('GL', fontName='Helvetica-Bold', fontSize=9, textColor=DARK_TEXT)),
+            Paragraph(f"<b>{label}</b> <font size='7' color='#9e9e9e'>({int(weight_pct*100)}%)</font>", ParagraphStyle('GL', fontName='Helvetica-Bold', fontSize=9, textColor=DARK_TEXT)),
             d
         ]
     
-    gauge_rows = []
-    for label, key, weight in score_keys:
-        val = scores.get(key, 5.0)
-        gauge_rows.append(_make_gauge_cell(label, val, weight))
+    gauge_rows = [_make_gauge_cell(label, scores.get(key, 5.0), weight) for label, key, weight in score_keys]
     
-    # Layout: 2-column grid of gauges + overall score box
-    left_col = []
-    for row in gauge_rows:
-        left_col.append(row)
-    
-    gauge_table = Table(left_col, colWidths=[55*mm, 50*mm])
+    gauge_table = Table(gauge_rows, colWidths=[55*mm, 50*mm])
     gauge_table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('LEFTPADDING', (0, 0), (0, -1), 8),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'), ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4), ('LEFTPADDING', (0, 0), (0, -1), 8),
     ]))
     
-    # Overall score box
     overall_box_content = [
         [Paragraph(f"<b>{overall_score}</b>", ParagraphStyle('BigScore', fontName='Helvetica-Bold', fontSize=36, textColor=grade_color, alignment=TA_CENTER))],
         [Paragraph("<font size='7'>out of 10</font>", ParagraphStyle('OutOf', fontName='Helvetica', fontSize=7, textColor=MED_TEXT, alignment=TA_CENTER))],
@@ -775,24 +695,17 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
     ]
     overall_box = Table(overall_box_content, colWidths=[55*mm])
     overall_box.setStyle(TableStyle([
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG),
-        ('ROUNDEDCORNERS', [8, 8, 8, 8]),
-        ('TOPPADDING', (0, 0), (-1, 0), 12),
-        ('BOTTOMPADDING', (0, -1), (-1, -1), 12),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG), ('ROUNDEDCORNERS', [8, 8, 8, 8]),
+        ('TOPPADDING', (0, 0), (-1, 0), 12), ('BOTTOMPADDING', (0, -1), (-1, -1), 12),
     ]))
     
     dashboard = Table([[gauge_table, overall_box]], colWidths=[110*mm, 60*mm])
-    dashboard.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-    ]))
+    dashboard.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
     story.append(dashboard)
     story.append(Spacer(1, 8))
     
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 3: KEY METRICS ROW
-    # ════════════════════════════════════════════════════════════════════════
+    # KEY METRICS ROW
     tech_acc = scores.get("technical_accuracy", 0)
     hr_acc = scores.get("hr_accuracy", 0)
     correct = scores.get("questions_correct", 0)
@@ -816,67 +729,41 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
         _metric_cell("Silent", str(silent), NEUTRAL),
     ]
     
-    # Transpose: each metric is a column with 2 rows
-    metrics_table_data = [
-        [m[0] for m in metrics_row],  # Values
-        [m[1] for m in metrics_row],  # Labels
-    ]
-    
+    metrics_table_data = [[m[0] for m in metrics_row], [m[1] for m in metrics_row]]
     col_w = 170*mm / 6
     metrics_table = Table(metrics_table_data, colWidths=[col_w]*6)
     metrics_table.setStyle(TableStyle([
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG),
-        ('TOPPADDING', (0, 0), (-1, 0), 8),
-        ('BOTTOMPADDING', (0, -1), (-1, -1), 6),
-        ('ROUNDEDCORNERS', [6, 6, 6, 6]),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BACKGROUND', (0, 0), (-1, -1), LIGHT_BG), ('TOPPADDING', (0, 0), (-1, 0), 8),
+        ('BOTTOMPADDING', (0, -1), (-1, -1), 6), ('ROUNDEDCORNERS', [6, 6, 6, 6]),
         ('LINEAFTER', (0, 0), (-2, -1), 0.5, HexColor("#e0e0e0")),
     ]))
     story.append(metrics_table)
     story.append(Spacer(1, 10))
     
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 4: ROUND-BY-ROUND Q&A FEEDBACK
-    # ════════════════════════════════════════════════════════════════════════
+    # ROUND-BY-ROUND Q&A FEEDBACK
+    ROUND_COLORS = {"communication": HexColor("#0277bd"), "technical": HexColor("#2e7d32"), "hr": HexColor("#6a1b9a")}
     
-    ROUND_COLORS = {
-        "communication": HexColor("#0277bd"),  # Blue
-        "technical": HexColor("#2e7d32"),       # Green
-        "hr": HexColor("#6a1b9a"),              # Purple
-    }
-    
-    # Get structured evaluation details if available
     rounds_data = eval_details.get("rounds", {}) if eval_details else {}
-    
-    # If no structured details, parse from the raw evaluation text
     if not rounds_data:
         rounds_data = _parse_evaluation_text_to_rounds(evaluation, result.get("conversation_log", []))
     
     for round_name, round_label in [("communication", "Communication Round"), ("technical", "Technical Round"), ("hr", "HR/Behavioral Round")]:
         round_qs = rounds_data.get(round_name, [])
-        if not round_qs:
-            continue
+        if not round_qs: continue
         
         round_color = ROUND_COLORS.get(round_name, PRIMARY)
         q_count = questions_per_round.get(round_name, len(round_qs))
         
-        # Round header bar
-        header_data = [[
-            Paragraph(f"<b>{round_label}</b>  <font size='8' color='#e0e0e0'>({q_count} questions)</font>", 
-                      ParagraphStyle('RH', fontName='Helvetica-Bold', fontSize=11, textColor=white))
-        ]]
+        header_data = [[Paragraph(f"<b>{round_label}</b>  <font size='8' color='#e0e0e0'>({q_count} questions)</font>", ParagraphStyle('RH', fontName='Helvetica-Bold', fontSize=11, textColor=white))]]
         header_tbl = Table(header_data, colWidths=[170*mm])
         header_tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), round_color),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('TOPPADDING', (0, 0), (-1, -1), 7),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+            ('BACKGROUND', (0, 0), (-1, -1), round_color), ('LEFTPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 7), ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
             ('ROUNDEDCORNERS', [4, 4, 0, 0]),
         ]))
         story.append(header_tbl)
         
-        # Q&A cards
         for i, qa in enumerate(round_qs):
             question = qa.get("question", "")
             answer = qa.get("answer", "")
@@ -884,103 +771,54 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
             accuracy = qa.get("accuracy")
             is_silent = qa.get("is_silent", False)
             
-            # Determine answer status color
-            if is_silent or not answer or answer.startswith("[SILENT"):
-                status_color = DANGER
-                status_label = "SILENT"
+            if is_silent or not answer or answer.startswith("[SILENT"): status_color, status_label = DANGER, "SILENT"
             elif accuracy is not None:
-                if accuracy >= 0.7:
-                    status_color = SUCCESS
-                    status_label = f"{accuracy:.0%}"
-                elif accuracy >= 0.4:
-                    status_color = WARNING
-                    status_label = f"{accuracy:.0%}"
-                else:
-                    status_color = DANGER
-                    status_label = f"{accuracy:.0%}"
-            else:
-                status_color = NEUTRAL
-                status_label = ""
+                if accuracy >= 0.7: status_color, status_label = SUCCESS, f"{accuracy:.0%}"
+                elif accuracy >= 0.4: status_color, status_label = WARNING, f"{accuracy:.0%}"
+                else: status_color, status_label = DANGER, f"{accuracy:.0%}"
+            else: status_color, status_label = NEUTRAL, ""
             
-            # Truncate long answers for readability
             display_answer = answer[:300] + "..." if len(answer) > 300 else answer
-            
-            # Build Q&A card
             card_elements = []
-            
             q_prefix = f"<font color='{round_color.hexval()}'><b>Q{i+1}.</b></font> "
             card_elements.append(Paragraph(f"{q_prefix}{_escape_xml(question)}", styles['QText']))
             
-            if status_label:
-                answer_line = f"<font color='{status_color.hexval()}'>[{status_label}]</font> {_escape_xml(display_answer)}"
-            else:
-                answer_line = _escape_xml(display_answer)
+            if status_label: answer_line = f"<font color='{status_color.hexval()}'>[{status_label}]</font> {_escape_xml(display_answer)}"
+            else: answer_line = _escape_xml(display_answer)
             card_elements.append(Paragraph(f"<b>A:</b> {answer_line}", styles['AText']))
             
-            if feedback:
-                card_elements.append(Paragraph(f"<i>Feedback:</i> {_escape_xml(feedback)}", styles['FeedbackText']))
+            if feedback: card_elements.append(Paragraph(f"<i>Feedback:</i> {_escape_xml(feedback)}", styles['FeedbackText']))
             
-            # Card with left accent border
-            card_data = [[card_elements]]
-            # We use a table trick: first column is thin colored bar, second is content
-            inner_content = []
-            for elem in card_elements:
-                inner_content.append([elem])
-            
+            inner_content = [[elem] for elem in card_elements]
             inner_table = Table(inner_content, colWidths=[165*mm])
-            inner_table.setStyle(TableStyle([
-                ('TOPPADDING', (0, 0), (-1, -1), 1),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
-                ('LEFTPADDING', (0, 0), (-1, -1), 0),
-            ]))
+            inner_table.setStyle(TableStyle([('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1), ('LEFTPADDING', (0, 0), (-1, -1), 0)]))
             
+            bg_color = HexColor("#fafafa") if i % 2 == 0 else white
             card_wrapper = Table([[" ", inner_table]], colWidths=[3*mm, 167*mm])
             card_wrapper.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (0, -1), round_color),
-                ('BACKGROUND', (1, 0), (1, -1), HexColor("#fafafa")),
-                ('LEFTPADDING', (1, 0), (1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('BACKGROUND', (0, 0), (0, -1), round_color), ('BACKGROUND', (1, 0), (1, -1), bg_color),
+                ('LEFTPADDING', (1, 0), (1, -1), 8), ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4), ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]))
-            
-            # Alternate card bg
-            if i % 2 == 1:
-                card_wrapper.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (0, -1), round_color),
-                    ('BACKGROUND', (1, 0), (1, -1), white),
-                    ('LEFTPADDING', (1, 0), (1, -1), 8),
-                    ('TOPPADDING', (0, 0), (-1, -1), 4),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ]))
             
             story.append(card_wrapper)
             story.append(Spacer(1, 2))
         
         story.append(Spacer(1, 8))
     
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 5: OVERALL SUMMARY
-    # ════════════════════════════════════════════════════════════════════════
+    # OVERALL SUMMARY
     story.append(Paragraph("Overall Summary", styles['SectionHeading']))
     
-    # Extract just the overall summary part (after "OVERALL SUMMARY" header)
     summary_text = ""
     if eval_details and eval_details.get("overall_summary"):
         summary_text = eval_details["overall_summary"]
     else:
-        # Parse from raw evaluation text
         if "OVERALL SUMMARY" in evaluation:
             parts = evaluation.split("OVERALL SUMMARY")
             if len(parts) > 1:
                 summary_part = parts[1]
-                # Get text before STATISTICS
-                if "STATISTICS:" in summary_part:
-                    summary_text = summary_part.split("STATISTICS:")[0]
-                else:
-                    summary_text = summary_part[:1500]
-                # Clean up separator chars
+                if "STATISTICS:" in summary_part: summary_text = summary_part.split("STATISTICS:")[0]
+                else: summary_text = summary_part[:1500]
                 summary_text = summary_text.replace("=" * 60, "").replace("-" * 40, "").strip()
     
     if summary_text:
@@ -990,22 +828,15 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
                 story.append(Paragraph(_escape_xml(para), styles['BodyText2']))
                 story.append(Spacer(1, 4))
     
-    # ════════════════════════════════════════════════════════════════════════
-    # SECTION 6: RECOMMENDATIONS (if available)
-    # ════════════════════════════════════════════════════════════════════════
+    # RECOMMENDATIONS
     recommendations = eval_details.get("recommendations", []) if eval_details else []
     if recommendations:
         story.append(Paragraph("Recommendations", styles['SectionHeading']))
         for i, rec in enumerate(recommendations, 1):
-            story.append(Paragraph(
-                f"<font color='{ACCENT.hexval()}'><b>{i}.</b></font> {_escape_xml(rec)}",
-                styles['BodyText2']
-            ))
+            story.append(Paragraph(f"<font color='{ACCENT.hexval()}'><b>{i}.</b></font> {_escape_xml(rec)}", styles['BodyText2']))
             story.append(Spacer(1, 3))
     
-    # ════════════════════════════════════════════════════════════════════════
     # FOOTER
-    # ════════════════════════════════════════════════════════════════════════
     story.append(Spacer(1, 20))
     story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#e0e0e0")))
     story.append(Spacer(1, 6))
@@ -1014,34 +845,18 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
         ParagraphStyle('Footer', alignment=TA_CENTER)
     ))
     
-    # ── Build PDF ───────────────────────────────────────────────────────────
     doc.build(story)
     pdf_buffer.seek(0)
     return pdf_buffer.read()
 
 
 def _escape_xml(text: str) -> str:
-    """Escape XML special characters for ReportLab Paragraphs"""
-    if not text:
-        return ""
-    return (
-        text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&#39;")
-    )
+    if not text: return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
 
 def _parse_evaluation_text_to_rounds(evaluation: str, conversation_log: list) -> dict:
-    """
-    Parse the raw evaluation text into structured round data.
-    
-    Falls back to conversation_log if evaluation text doesn't have 
-    clear Q&A sections (backward compatibility).
-    """
     rounds = {"communication": [], "technical": [], "hr": []}
     
-    # Try parsing from evaluation text first
     if evaluation:
         current_round = None
         lines = evaluation.split("\n")
@@ -1049,69 +864,42 @@ def _parse_evaluation_text_to_rounds(evaluation: str, conversation_log: list) ->
         while i < len(lines):
             line = lines[i].strip()
             
-            # Detect round headers
-            if "COMMUNICATION ROUND" in line.upper():
-                current_round = "communication"
-            elif "TECHNICAL ROUND" in line.upper():
-                current_round = "technical"
-            elif "HR" in line.upper() and "ROUND" in line.upper() and "FEEDBACK" in line.upper():
-                current_round = "hr"
-            elif "OVERALL SUMMARY" in line.upper():
-                current_round = None
+            if "COMMUNICATION ROUND" in line.upper(): current_round = "communication"
+            elif "TECHNICAL ROUND" in line.upper(): current_round = "technical"
+            elif "HR" in line.upper() and "ROUND" in line.upper() and "FEEDBACK" in line.upper(): current_round = "hr"
+            elif "OVERALL SUMMARY" in line.upper(): current_round = None
             
-            # Parse Q&A blocks
             if current_round and line.startswith("Q") and ". AI Question:" in line:
                 question = line.split("AI Question:", 1)[1].strip() if "AI Question:" in line else line
-                answer = ""
-                feedback = ""
-                accuracy = None
+                answer = ""; feedback = ""; accuracy = None
                 
-                # Look ahead for answer and feedback
                 j = i + 1
                 while j < len(lines) and j < i + 5:
                     next_line = lines[j].strip()
-                    if next_line.startswith("User Answer:"):
-                        answer = next_line.split("User Answer:", 1)[1].strip()
+                    if next_line.startswith("User Answer:"): answer = next_line.split("User Answer:", 1)[1].strip()
                     elif next_line.startswith("Feedback:"):
                         fb_text = next_line.split("Feedback:", 1)[1].strip()
-                        # Extract accuracy if present
                         import re
                         acc_match = re.search(r'\(Accuracy:\s*(\d+)%\)', fb_text)
                         if acc_match:
                             accuracy = int(acc_match.group(1)) / 100
                             fb_text = re.sub(r'\s*\(Accuracy:\s*\d+%\)', '', fb_text).strip()
                         feedback = fb_text
-                    elif next_line.startswith("Q") and ". AI Question:" in next_line:
-                        break
-                    elif next_line.startswith("=" * 10):
-                        break
+                    elif next_line.startswith("Q") and ". AI Question:" in next_line: break
+                    elif next_line.startswith("=" * 10): break
                     j += 1
                 
                 is_silent = "[SILENT" in answer.upper() if answer else True
-                
-                rounds[current_round].append({
-                    "question": question,
-                    "answer": answer,
-                    "feedback": feedback,
-                    "accuracy": accuracy,
-                    "is_silent": is_silent,
-                })
+                rounds[current_round].append({"question": question, "answer": answer, "feedback": feedback, "accuracy": accuracy, "is_silent": is_silent})
             
             i += 1
     
-    # If parsing didn't find anything, use conversation_log
     total_parsed = sum(len(v) for v in rounds.values())
     if total_parsed == 0 and conversation_log:
         for entry in conversation_log:
             stage = entry.get("stage", "").lower()
             if stage in rounds:
-                rounds[stage].append({
-                    "question": entry.get("ai_message", ""),
-                    "answer": entry.get("user_response", ""),
-                    "feedback": "",
-                    "accuracy": None,
-                    "is_silent": not entry.get("user_response"),
-                })
+                rounds[stage].append({"question": entry.get("ai_message", ""), "answer": entry.get("user_response", ""), "feedback": "", "accuracy": None, "is_silent": not entry.get("user_response")})
     
     return rounds
 

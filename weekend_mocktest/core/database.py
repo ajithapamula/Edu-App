@@ -87,6 +87,8 @@ class DatabaseManager:
     WARNING_MESSAGES = {
         # NEW frontend types (BlazeFace + COCO-SSD)
         "face_not_detected": "Face not visible in camera",
+        "face_turned_left": "User turned face to the left",
+        "face_turned_right": "User turned face to the right",
         "face_multiple": "Multiple faces detected in camera frame",
         "face_looking_away": "User looking away from screen",
         "object_phone": "Mobile phone or electronic device detected",

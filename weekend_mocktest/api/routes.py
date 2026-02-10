@@ -404,10 +404,11 @@ async def _handle_add_warning(request_data: dict):
         
         # Accept ALL known types (old + new). Don't reject unknown ones.
         valid_types = [
-            # NEW frontend types
             "face_not_detected", "face_multiple", "face_looking_away",
+            "face_turned_left", "face_turned_right",
             "object_phone", "object_book", "object_person",
-            "tab_switch", "right_click", "low_light",
+            "tab_switch", "right_click", "low_light"
+        
             # OLD types (backward compatibility)
             "multiple_faces", "object_detected", "face_turning",
             "face_not_visible", "screenshot"
