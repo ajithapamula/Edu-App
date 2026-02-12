@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 ROUND_DURATIONS = {
     "introduction": 60,
-    "communication": 600,
+    "communication": 300,
     "technical": 1500,
     "hr": 600,
 }
@@ -936,10 +936,67 @@ class WI_OptimizedAudioProcessor:
 class WI_OptimizedConversationManager:
     def __init__(self, client_manager): self.client_manager = client_manager
     def _detect_user_intent(self, user_response):
+        """Detect if user wants to skip, repeat, or can't answer.
+
+        Uses full-phrase matching instead of bare substring matching to avoid
+        false positives like 'I don't want to repeat the question' being
+        classified as a repeat request, or 'I never skip meals' as skip.
+
+        Rules:
+        - Only match explicit request phrases (e.g. 'please repeat', 'repeat the question')
+        - Ignore if 'repeat'/'skip' appears in a normal sentence context
+        - Negations like 'don't repeat', 'no need to repeat' are NOT repeat requests
+        """
         r = user_response.lower().strip()
-        if any(p in r for p in ["skip", "next question", "move on", "next one", "pass"]): return "skip"
-        if any(p in r for p in ["repeat", "say again", "can you repeat", "what was the question"]): return "repeat"
-        if any(p in r for p in ["i don't know", "i'm not sure", "no idea", "can't answer", "don't remember"]): return "dont_know"
+
+        # --- SKIP detection: must be an explicit request to skip ---
+        skip_phrases = [
+            "skip this question", "skip the question", "skip question",
+            "next question", "next question please", "move on",
+            "next one", "next one please", "pass this", "let's skip",
+            "i want to skip", "can we skip", "please skip",
+            "can you skip", "skip please", "go to next",
+        ]
+        # Also match very short responses that are just "skip", "next", "pass"
+        if r in ["skip", "next", "pass", "next please", "skip please"]:
+            return "skip"
+        if any(phrase in r for phrase in skip_phrases):
+            return "skip"
+
+        # --- REPEAT detection: must be an explicit request to hear question again ---
+        repeat_phrases = [
+            "repeat the question", "repeat that question", "repeat question",
+            "can you repeat", "could you repeat", "please repeat",
+            "repeat please", "repeat it please", "say that again",
+            "say it again", "say again please", "what was the question",
+            "what's the question", "i didn't hear", "i didn't catch",
+            "can you say that again", "one more time", "come again",
+            "tell me the question again", "ask me again", "repeat it",
+        ]
+        # Very short responses that are just "repeat" or "repeat please"
+        if r in ["repeat", "repeat please", "say again", "come again", "pardon"]:
+            return "repeat"
+        # Check for explicit repeat request phrases
+        if any(phrase in r for phrase in repeat_phrases):
+            # But NOT if they're saying "don't repeat" / "no need to repeat" / "I don't want to repeat"
+            negation_patterns = ["don't repeat", "dont repeat", "do not repeat",
+                               "no need to repeat", "not repeat", "without repeat",
+                               "don't want to repeat", "dont want to repeat",
+                               "no repeat", "stop repeat"]
+            if any(neg in r for neg in negation_patterns):
+                return "normal"  # User is talking about repeating, not requesting it
+            return "repeat"
+
+        # --- CAN'T ANSWER detection ---
+        cant_answer_phrases = [
+            "i don't know", "i dont know", "i'm not sure", "im not sure",
+            "no idea", "can't answer", "cant answer", "don't remember",
+            "dont remember", "not sure about that", "i have no idea",
+            "i don't have any idea", "no clue",
+        ]
+        if any(phrase in r for phrase in cant_answer_phrases):
+            return "dont_know"
+
         return "normal"
     def _is_gibberish(self, text):
         if not text: return True
@@ -1251,7 +1308,7 @@ class WI_OptimizedConversationManager:
         return q if '?' in q else q + "?"
     async def generate_first_question(self, session): return await self.generate_introduction(session)
     async def generate_introduction(self, session):
-        return f"""Hello {session.student_name}! Welcome to your weekly interview session. I'm excited to chat with you today!\n\nWe'll have three rounds:\n• First, a Communication round (about 10 minutes) where we'll have a casual conversation and get to know each other.\n• Then, a Technical round (about 25 minutes) where we'll discuss your recent work and technical knowledge.\n• Finally, an HR round (about 10 minutes) with some behavioral questions.\n\nSo, how are you doing today? Ready to get started?"""
+        return f"""Hello {session.student_name}! Welcome to your weekly interview session. I'm excited to chat with you today!\n\nWe'll have three rounds:\n• First, a Communication round (about 5 minutes) where we'll have a casual conversation and get to know each other.\n• Then, a Technical round (about 25 minutes) where we'll discuss your recent work and technical knowledge.\n• Finally, an HR round (about 10 minutes) with some behavioral questions.\n\nSo, how are you doing today? Ready to get started?"""
     async def generate_silence_response(self, session):
         session.silence_prompt_count += 1
         return random.choice(["Take your time.", "I'm here when you're ready.", "Would you like me to repeat?", "No rush, think about it."])
