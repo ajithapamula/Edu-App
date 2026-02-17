@@ -999,19 +999,135 @@ class WI_OptimizedConversationManager:
 
         return "normal"
     def _is_gibberish(self, text):
+        """Detect gibberish including Whisper hallucinations.
+        
+        Whisper hallucinations look like real English but are incoherent:
+        - "bow is getting the milk, and already, uh, so, yeah"
+        - "the soviet union yeah yeah sorry haste da proprio"
+        - "taiwan on the left i, uh, we, uh, we, uh, uh, si, uh"
+        
+        We detect these by checking for:
+        1. Non-ASCII content
+        2. Excessive repetition
+        3. Known hallucination phrases
+        4. Too many filler words (uh, um, so, yeah, okay)
+        5. Random unrelated nouns (Whisper invents topics)
+        6. Excessive commas/fragments (Whisper joins random phrases)
+        """
         if not text: return True
+        text_lower = text.lower().strip()
+        words = text_lower.split()
+        word_count = len(words)
+        
+        # Basic checks
         ascii_chars = sum(1 for c in text if c.isascii())
         if len(text) > 0 and (ascii_chars / len(text)) < 0.8: return True
-        words = text.lower().split()
-        if len(words) > 5:
-            unique_ratio = len(set(words)) / len(words)
+        
+        # Repetition check
+        if word_count > 5:
+            unique_ratio = len(set(words)) / word_count
             if unique_ratio < 0.3: return True
+        
+        # Nonsense patterns (repeated chars/words)
         nonsense_patterns = [r'(.)\1{4,}', r'\b(\w+)\s+\1\s+\1\s+\1']
         for pattern in nonsense_patterns:
-            if re.search(pattern, text.lower()): return True
-        hallucinations = ["thank you for watching", "please subscribe", "like and subscribe", "see you next time", "bye bye bye", "youtube", "mcdonald"]
-        text_lower = text.lower()
+            if re.search(pattern, text_lower): return True
+        
+        # Known Whisper hallucination phrases
+        hallucinations = [
+            "thank you for watching", "please subscribe", "like and subscribe",
+            "see you next time", "bye bye bye", "youtube", "mcdonald",
+            "link in description", "check out my", "sponsored by",
+            "the speaker is answering", "interview response",
+        ]
         if any(h in text_lower for h in hallucinations): return True
+        
+        # ── NEW: Whisper hallucination pattern detection ──
+        
+        # 1. Too many filler words = Whisper filling gaps with fillers
+        fillers = ['uh', 'um', 'oh', 'ah', 'eh', 'so', 'yeah', 'like', 'okay', 'right', 'well']
+        filler_count = sum(1 for w in words if w.strip('.,!?') in fillers)
+        if word_count > 5 and filler_count / word_count > 0.35:
+            logger.info(f"[GIBBERISH] Too many fillers: {filler_count}/{word_count} = {filler_count/word_count:.0%}")
+            return True
+        
+        # 2. Random unrelated nouns that Whisper hallucinates
+        # These NEVER appear in a real SAP/tech interview answer
+        whisper_random_nouns = [
+            'milk', 'bomb', 'taiwan', 'soviet', 'penguin', 'puppet', 'taser',
+            'iphone', 'platinum', 'kiss', 'cornered', 'lung', 'dance',
+            'cooking', 'cabinet', 'alcohol', 'armor', 'dynasty', 'camera',
+            'buffet', 'elsa', 'puppy', 'napkins', 'iron', 'pits', 'legs',
+            'weather pattern', 'body', 'nooks', 'kampf', 'anarchist',
+            'corazn', 'servicio', 'hauptrablers', 'kafir', 'kristian',
+        ]
+        random_noun_count = sum(1 for noun in whisper_random_nouns if noun in text_lower)
+        if random_noun_count >= 2:
+            logger.info(f"[GIBBERISH] Whisper random nouns detected: {random_noun_count}")
+            return True
+        
+        # 3. Too many short fragments joined by commas = Whisper joining random phrases
+        # Real speech: "I used SCC4 to create clients and then copied using SCCL"
+        # Whisper garbage: "bow, getting, milk, and, already, uh, so, yeah, but"
+        if word_count > 10:
+            comma_count = text_lower.count(',')
+            if comma_count > word_count * 0.25:
+                # Many commas AND low coherence = gibberish
+                # Check if there are any meaningful tech words
+                tech_words = ['sap', 'client', 'transaction', 'system', 'data', 'server',
+                             'config', 'table', 'module', 'basis', 'abap', 'fiori', 'user',
+                             'scc4', 'sccl', 'scc3', 'rfc', 'sm50', 'su01', 'se09']
+                has_any_tech = any(tw in text_lower for tw in tech_words)
+                if not has_any_tech:
+                    logger.info(f"[GIBBERISH] Too many commas ({comma_count}) with no tech content")
+                    return True
+        
+        # 4. Very long response with no coherent structure = Whisper hallucinating paragraphs
+        # Real answers have sentences. Whisper garbage jumps topics every few words.
+        if word_count > 30:
+            sentences = re.split(r'[.!?]', text_lower)
+            sentences = [s.strip() for s in sentences if len(s.strip()) > 3]
+            if len(sentences) < 2:
+                # 30+ words but no sentence breaks = likely garbage
+                filler_ratio = filler_count / word_count if word_count > 0 else 0
+                if filler_ratio > 0.2:
+                    logger.info(f"[GIBBERISH] Long text, no sentences, high fillers")
+                    return True
+        
+        # 5. COMBINED SCORE: Multiple weak signals together = gibberish
+        # A real answer might have some fillers OR one random noun, but NOT both.
+        # Whisper hallucinations trigger multiple weak signals at once.
+        if word_count > 8:
+            gibberish_score = 0.0
+            filler_ratio = filler_count / word_count
+            
+            # Filler contribution (0-0.4)
+            if filler_ratio > 0.25: gibberish_score += 0.35
+            elif filler_ratio > 0.15: gibberish_score += 0.2
+            elif filler_ratio > 0.08: gibberish_score += 0.1
+            
+            # Random noun contribution (0-0.4)
+            if random_noun_count >= 2: gibberish_score += 0.4
+            elif random_noun_count == 1: gibberish_score += 0.25
+            
+            # No tech content contribution (0-0.3)
+            tech_words = ['sap', 'client', 'transaction', 'system', 'data', 'server',
+                         'config', 'table', 'module', 'basis', 'abap', 'fiori', 'user',
+                         'scc4', 'sccl', 'scc3', 'rfc', 'sm50', 'su01', 'se09',
+                         'copy', 'transport', 'login', 'authorization', 'profile',
+                         'instance', 'dispatcher', 'kernel', 'parameter', 'landscape']
+            has_any_tech = any(tw in text_lower for tw in tech_words)
+            if not has_any_tech: gibberish_score += 0.3
+            
+            # High comma ratio contribution (0-0.15)
+            comma_count = text_lower.count(',')
+            if comma_count > word_count * 0.2: gibberish_score += 0.15
+            
+            # Threshold: if combined score >= 0.50, it's gibberish
+            if gibberish_score >= 0.50:
+                logger.info(f"[GIBBERISH] Combined score {gibberish_score:.2f} (fillers={filler_ratio:.0%}, random_nouns={random_noun_count}, tech={has_any_tech})")
+                return True
+        
         return False
     def _assess_answer_quality(self, user_response):
         if not user_response: return "silence"
@@ -1101,9 +1217,40 @@ class WI_OptimizedConversationManager:
         if len(words1) == 0 or len(words2) == 0: return False
         overlap = len(words1 & words2); min_len = min(len(words1), len(words2))
         return overlap / min_len > 0.4
+    def _get_off_topic_response(self):
+        """Return a random polite off-topic redirect. Never repeats consecutively."""
+        responses = [
+            "I think you might not be aware of that, let me ask you something different.",
+            "No worries, let me move on to a different question.",
+            "That's okay, I'll ask you something else instead.",
+            "I see, let me try a different topic.",
+            "Alright, let's switch to another question.",
+            "No problem at all, let me ask you something you might be more familiar with.",
+            "That's fine, I'll move on to a different one.",
+            "Okay, don't worry about that, here's another question for you.",
+            "Let me ask you something different instead.",
+            "I understand, let's try a different question.",
+            "That doesn't quite answer the question, but no worries, let me ask another one.",
+            "Let me come back to something else.",
+        ]
+        if not hasattr(self, '_last_off_topic_idx'): self._last_off_topic_idx = -1
+        idx = random.randint(0, len(responses) - 1)
+        while idx == self._last_off_topic_idx and len(responses) > 1:
+            idx = random.randint(0, len(responses) - 1)
+        self._last_off_topic_idx = idx
+        return responses[idx]
+
     async def _generate_dynamic_ack(self, context, tone="friendly"):
         await self.client_manager.initialize()
-        prompts = {"weak": "Generate ONE short understanding response when someone gives unclear answer. Like 'I see, let me try another question' or 'Okay, let's move on'. MAX 8 words.", "good": "Generate ONE short positive acknowledgment like 'That's nice!' or 'Good to know!' MAX 5 words.", "technical_good": "Generate ONE short praise for good technical answer like 'Well explained!' or 'Good point!' MAX 5 words.", "technical_weak": "Generate ONE short understanding response for unclear technical answer. MAX 8 words.", "cant_answer": "Generate ONE short supportive response when someone can't answer, like 'No problem, let's try something else'. MAX 10 words.", "transition": "Generate ONE short transition phrase like 'Interesting!' or 'Nice!' MAX 3 words.", "hr": "Generate ONE short professional acknowledgment like 'Thank you for sharing' or 'Good point'. MAX 5 words."}
+        prompts = {
+            "weak": "Generate ONE short understanding response when someone gives unclear answer. Like 'I see, let me try another question' or 'Okay, let's move on'. MAX 8 words.",
+            "good": "Generate ONE short positive acknowledgment like 'That's nice!' or 'Good to know!' MAX 5 words.",
+            "technical_good": "Generate ONE short acknowledgment for a good technical answer. Like 'Good point.' or 'Right.' or 'Okay, good.' MAX 4 words. Do NOT say 'impressive' or 'exactly right'.",
+            "technical_weak": "Generate ONE short understanding response for unclear technical answer. Like 'I see.' or 'Okay.' MAX 5 words.",
+            "cant_answer": "Generate ONE short supportive response when someone can't answer, like 'No problem, let's try something else'. MAX 10 words.",
+            "transition": "Generate ONE short transition phrase like 'Okay!' or 'Alright.' MAX 3 words. Do NOT say 'impressive' or 'great insight'.",
+            "hr": "Generate ONE short professional acknowledgment like 'Thank you for sharing' or 'Good point'. MAX 5 words.",
+        }
         prompt = prompts.get(tone, prompts["good"])
         try:
             resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.9, max_tokens=20)
@@ -1138,7 +1285,7 @@ class WI_OptimizedConversationManager:
             has_irrelevant = any(irr in response_lower for irr in irrelevant)
             is_bad_answer = (word_count < 8 or is_repetitive or has_irrelevant or any(indicator == response_lower.strip() for indicator in bad_indicators) or (word_count < 15 and not has_tech_content))
             if is_bad_answer:
-                response_quality = "bad"; prefix = "I think you might not be familiar with that topic. No worries, let me ask you something different. "
+                response_quality = "bad"; prefix = self._get_off_topic_response() + " "
                 if session.exchanges:
                     last_q = session.exchanges[-1].ai_message.lower()
                     for tech in (session.extracted_technologies or []):
@@ -1165,7 +1312,28 @@ class WI_OptimizedConversationManager:
         await self.client_manager.initialize()
         tech_idx = session.current_tech_index % len(technologies); chosen_tech = technologies[tech_idx]
         summary_context = session.content_context[:1000] if session.content_context else ""
-        prompt = f"""Generate ONE technical behavioral interview question for a candidate who works with {chosen_tech}.\n\nCANDIDATE'S BACKGROUND:\n{summary_context}\n\nThe question should ask about a REAL TECHNICAL SCENARIO like:\n- Debugging a difficult issue with {chosen_tech}\n- Making a technical decision about {chosen_tech}\n- Solving a complex problem using {chosen_tech}\n- Learning something challenging about {chosen_tech}\n- Handling a technical failure or mistake with {chosen_tech}\n\nDO NOT ask generic HR questions like "tell me about leadership" or "describe teamwork".\nThe question MUST be about a specific technical situation involving {chosen_tech}.\n\nALREADY ASKED (DO NOT REPEAT):\n{chr(10).join(all_asked[-10:])}\n\nGenerate ONE specific question (MAX 25 words):"""
+        prompt = f"""Generate ONE technical behavioral interview question for a candidate who works with {chosen_tech}.
+
+CANDIDATE'S BACKGROUND:
+{summary_context}
+
+Ask about a REAL TECHNICAL SCENARIO specifically related to {chosen_tech} as mentioned in the background above.
+ONLY ask about topics that appear in the candidate's background — do NOT invent unrelated topics.
+
+Vary the phrasing. Use ONE of these styles randomly:
+- "Tell me about a time when..."
+- "Walk me through how you handled..."
+- "What was the most difficult part of working with..."
+- "How did you approach [specific task] with..."
+- "What would you do if [specific situation] happened with..."
+
+DO NOT ask generic HR questions like "tell me about leadership".
+DO NOT start every question with "Can you describe a challenge..."
+
+ALREADY ASKED (DO NOT REPEAT):
+{chr(10).join(all_asked[-15:])}
+
+Generate ONE specific question (MAX 25 words):"""
         try:
             resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.8, max_tokens=60)
             question = resp.choices[0].message.content.strip().strip('"').strip("'")
@@ -1180,20 +1348,89 @@ class WI_OptimizedConversationManager:
     async def _generate_dynamic_question_from_summary(self, session, tech, all_asked):
         await self.client_manager.initialize()
         summary = session.content_context or "General technical work"
-        prompt = f"""Generate ONE unique technical interview question based on this candidate's work.\n\nCANDIDATE'S WORK SUMMARY:\n{summary[:1500]}\n\nTOPIC TO FOCUS ON: {tech}\n\nALREADY ASKED (DO NOT REPEAT):\n{chr(10).join(all_asked[-10:])}\n\nGenerate a specific question about their practical experience with {tech}.\nAsk about HOW they used it, WHAT they built, or CHALLENGES they faced.\nNOT theoretical definitions.\n\nMAX 20 words. Just the question:"""
+
+        # ── Question Type Rotation ──
+        # Rotate through different question types so we don't ask
+        # "describe a challenge..." every single time.
+        # 40% definition, 30% practical, 20% scenario, 10% comparison
+        if not hasattr(session, '_question_type_index'): session._question_type_index = 0
+        question_types = [
+            "definition", "practical", "definition", "practical",
+            "scenario", "definition", "practical", "comparison",
+            "scenario", "definition",
+        ]
+        q_type = question_types[session._question_type_index % len(question_types)]
+        session._question_type_index += 1
+
+        type_instructions = {
+            "definition": f"Ask a DIRECT KNOWLEDGE question about {tech}. Examples:\n- 'What is {tech} and what is its purpose?'\n- 'What are the key features of {tech}?'\n- 'Explain the role of {tech} in SAP.'\nDo NOT ask about challenges or scenarios. Just test their knowledge.",
+            "practical": f"Ask a HOW-TO / PRACTICAL question about {tech}. Examples:\n- 'How do you perform [specific task] using {tech}?'\n- 'What are the steps to configure {tech}?'\n- 'Walk me through the process of using {tech}.'\nAsk about the PROCESS, not about challenges faced.",
+            "scenario": f"Ask a SCENARIO-BASED question about {tech}. Examples:\n- 'Describe a situation where you used {tech} to solve a problem.'\n- 'Tell me about a challenge you faced with {tech}.'\nAsk about a REAL experience with {tech}.",
+            "comparison": f"Ask a COMPARISON or DIFFERENCE question about {tech}. Examples:\n- 'What is the difference between [concept A] and [concept B] in {tech}?'\n- 'When would you use [approach A] vs [approach B] with {tech}?'\nAsk them to compare or differentiate concepts.",
+        }
+
+        prompt = f"""Generate ONE technical interview question for a candidate.
+
+CANDIDATE'S WORK SUMMARY:
+{summary[:1500]}
+
+TOPIC: {tech}
+
+QUESTION TYPE: {q_type.upper()}
+{type_instructions[q_type]}
+
+STRICT RULES:
+1. ONLY ask about topics that appear in the candidate's work summary above
+2. Do NOT ask about topics NOT in the summary (no random SAP modules, no PP, no MM unless mentioned)
+3. The question MUST be specifically about {tech} as mentioned in the summary
+4. Do NOT start with "Can you describe a challenge..." — vary the phrasing
+
+ALREADY ASKED (DO NOT REPEAT OR ASK SIMILAR):
+{chr(10).join(all_asked[-15:])}
+
+MAX 20 words. Just the question:"""
         try:
             resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.8, max_tokens=50)
             question = resp.choices[0].message.content.strip().strip('"').strip("'")
             if not question.endswith('?'): question += '?'
+            logger.info(f"[WI] Technical Q ({q_type}): {question[:60]}...")
+            return question
+        except Exception as e:
+            logger.error(f"Error generating dynamic question: {e}")
+            return f"Tell me more about your experience with {tech}?"
             return question
         except Exception as e:
             logger.error(f"Error generating dynamic question: {e}")
             return f"Tell me more about your experience with {tech}?"
     def _get_encouragement(self):
-        return random.choice(["That's a great explanation!", "Excellent point!", "Well explained!", "Good answer!", "That's exactly right!", "Nice! You clearly have good experience with this.", "Great insight!", "That's impressive!"])
+        """Positive ack for genuinely good answers (20+ words with tech content)."""
+        responses = [
+            "Good explanation.", "Well explained.", "Good answer.", "Right, good.",
+            "That's correct.", "Good point.", "Nice, you know this well.",
+            "Okay, good.", "That makes sense.", "Good understanding.",
+            "Right.", "Yes, that's correct.", "Good, I can see you understand this.",
+        ]
+        if not hasattr(self, '_last_enc_idx'): self._last_enc_idx = -1
+        idx = random.randint(0, len(responses) - 1)
+        while idx == self._last_enc_idx and len(responses) > 1:
+            idx = random.randint(0, len(responses) - 1)
+        self._last_enc_idx = idx
+        return responses[idx]
     async def _generate_followup_from_answer(self, session, user_response, all_asked):
         await self.client_manager.initialize()
-        prompt = f"""The candidate gave this good answer: "{user_response[:300]}"\n\nGenerate ONE short follow-up question to dig deeper into what they mentioned.\nAsk about: Specific details, Challenges faced, How they solved problems, Results\n\nALREADY ASKED (DO NOT REPEAT):\n{chr(10).join(all_asked[-5:])}\n\nMAX 15 words. Just the question:"""
+        summary = session.content_context[:500] if session.content_context else ""
+        prompt = f"""The candidate answered: "{user_response[:300]}"
+
+Their work context: {summary}
+
+Generate ONE short follow-up question to dig deeper into what they mentioned.
+ONLY ask about topics that appear in their work context above.
+Ask about: Specific details, How they did it, What tools they used, Results achieved.
+
+ALREADY ASKED (DO NOT REPEAT):
+{chr(10).join(all_asked[-10:])}
+
+MAX 15 words. Just the question:"""
         try:
             resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.7, max_tokens=40)
             question = resp.choices[0].message.content.strip()
@@ -1311,7 +1548,26 @@ class WI_OptimizedConversationManager:
         return f"""Hello {session.student_name}! Welcome to your weekly interview session. I'm excited to chat with you today!\n\nWe'll have three rounds:\n• First, a Communication round (about 5 minutes) where we'll have a casual conversation and get to know each other.\n• Then, a Technical round (about 25 minutes) where we'll discuss your recent work and technical knowledge.\n• Finally, an HR round (about 10 minutes) with some behavioral questions.\n\nSo, how are you doing today? Ready to get started?"""
     async def generate_silence_response(self, session):
         session.silence_prompt_count += 1
-        return random.choice(["Take your time.", "I'm here when you're ready.", "Would you like me to repeat?", "No rush, think about it."])
+        responses = [
+            "Take your time.",
+            "I'm here when you're ready.",
+            "Would you like me to repeat the question?",
+            "No rush, think about it.",
+            "It's okay, take a moment to think.",
+            "Whenever you're ready, go ahead.",
+            "No hurry, I'll wait.",
+            "Feel free to take your time and answer.",
+            "Don't worry, there's no pressure.",
+            "I understand, take as much time as you need.",
+            "You can answer whenever you're comfortable.",
+            "It's completely fine, take a moment.",
+        ]
+        if not hasattr(session, '_last_silence_idx'): session._last_silence_idx = -1
+        idx = random.randint(0, len(responses) - 1)
+        while idx == session._last_silence_idx and len(responses) > 1:
+            idx = random.randint(0, len(responses) - 1)
+        session._last_silence_idx = idx
+        return responses[idx]
 
     async def generate_fast_response(self, session, user_response, db_manager=None):
         await self.client_manager.initialize()
@@ -1373,8 +1629,13 @@ class WI_OptimizedConversationManager:
                 session.conversation_state.followups_on_topic += 1; q = await self._generate_communication_followup(session, user_response); session.add_exchange(q, question_type="communication", is_followup=True); ack = await self._generate_dynamic_ack("good response", "good"); return f"{ack} {q}"
             q = await self._generate_communication_question(session); session.add_exchange(q, question_type="communication"); session.conversation_state.followups_on_topic = 0; ack = await self._generate_dynamic_ack("transition", "transition"); return f"{ack} {q}"
         if session.current_stage == WI_InterviewStage.TECHNICAL:
+            # Evaluate accuracy FIRST — this tells us if the answer is actually correct
+            accuracy = 0.0
             if session.exchanges and session.exchanges[-1].question_type == "technical":
-                last_ex = session.exchanges[-1]; accuracy = await self._evaluate_technical_accuracy(session, last_ex.ai_message, user_response, last_ex.expected_keywords); session.update_last_response(user_response, 0.8, quality, accuracy)
+                last_ex = session.exchanges[-1]
+                accuracy = await self._evaluate_technical_accuracy(session, last_ex.ai_message, user_response, last_ex.expected_keywords)
+                session.update_last_response(user_response, 0.8, quality, accuracy)
+                logger.info(f"[WI] Technical accuracy: {accuracy:.2f} for quality: {quality}")
             self._adjust_difficulty(session, quality)
             if quality == "skip":
                 q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("skip", "transition"); return f"{ack} {q}"
@@ -1394,14 +1655,54 @@ class WI_OptimizedConversationManager:
                     for tech in session.extracted_technologies:
                         if tech.lower() in last_q: session.topic_attempt_count[tech] = session.topic_attempt_count.get(tech, 0) + 1; (session.silent_topics.append(tech) if session.topic_attempt_count[tech] >= 2 and tech not in session.silent_topics else None); break
                 session.current_difficulty = "easy"; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("cant answer technical", "cant_answer"); return f"{ack} {q}"
-            if quality == "weak":
-                session.current_difficulty = "easy"; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("weak technical", "technical_weak"); return f"{ack} {q}"
-            if quality == "strong" and random.random() < 0.3:
-                q = await self._generate_smart_followup(session, user_response, WI_InterviewStage.TECHNICAL); session.add_exchange(q, question_type="technical", is_followup=True); ack = await self._generate_dynamic_ack("good technical", "technical_good"); return f"{ack} {q}"
-            q, keywords = await self._generate_technical_question(session, user_response, True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("technical", "technical_good" if quality == "strong" else "transition"); return f"{ack} {q}"
+
+            # ── ACCURACY-BASED RESPONSE (the key fix) ──
+            # Use the actual accuracy score to decide acknowledgment,
+            # not just word count / keyword presence.
+            #
+            # accuracy >= 0.7 → correct answer → praise + follow-up or next question
+            # accuracy 0.4-0.69 → partial answer → gentle ack + next question
+            # accuracy < 0.4 → wrong/unrelated → "not aware of this" + different question
+            if accuracy >= 0.7:
+                # GOOD answer — praise and maybe follow-up
+                if random.random() < 0.3:
+                    q = await self._generate_smart_followup(session, user_response, WI_InterviewStage.TECHNICAL)
+                    session.add_exchange(q, question_type="technical", is_followup=True)
+                    ack = self._get_encouragement()
+                    return f"{ack} {q}"
+                q, keywords = await self._generate_technical_question(session, user_response, True)
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                ack = self._get_encouragement()
+                return f"{ack} {q}"
+            elif accuracy >= 0.4:
+                # PARTIAL answer — gentle acknowledgment, move on
+                q, keywords = await self._generate_technical_question(session, user_response, True)
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                ack = await self._generate_dynamic_ack("partial technical", "transition")
+                return f"{ack} {q}"
+            else:
+                # WRONG / UNRELATED answer — tell them politely, ask different question
+                if session.exchanges:
+                    last_q = session.exchanges[-1].ai_message.lower()
+                    for tech in (session.extracted_technologies or []):
+                        if tech.lower() in last_q and tech not in session.silent_topics:
+                            session.topic_attempt_count[tech] = session.topic_attempt_count.get(tech, 0) + 1
+                            if session.topic_attempt_count[tech] >= 2:
+                                session.silent_topics.append(tech)
+                            break
+                session.current_difficulty = "easy"
+                q, keywords = await self._generate_technical_question(session, "", True)
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                ack = self._get_off_topic_response()
+                return f"{ack} {q}"
         if session.current_stage == WI_InterviewStage.HR:
+            # Evaluate accuracy FIRST
+            accuracy = 0.0
             if session.exchanges and session.exchanges[-1].question_type == "hr":
-                last_ex = session.exchanges[-1]; accuracy = await self._evaluate_technical_accuracy(session, last_ex.ai_message, user_response, last_ex.expected_keywords); session.update_last_response(user_response, 0.8, quality, accuracy)
+                last_ex = session.exchanges[-1]
+                accuracy = await self._evaluate_technical_accuracy(session, last_ex.ai_message, user_response, last_ex.expected_keywords)
+                session.update_last_response(user_response, 0.8, quality, accuracy)
+                logger.info(f"[WI] HR accuracy: {accuracy:.2f} for quality: {quality}")
             if quality == "skip":
                 q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); ack = await self._generate_dynamic_ack("skip", "transition"); return f"{ack} {q}"
             if quality == "gibberish": return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
@@ -1412,11 +1713,28 @@ class WI_OptimizedConversationManager:
                 return await self.generate_silence_response(session)
             if quality == "cant_answer":
                 q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); ack = await self._generate_dynamic_ack("cant answer hr", "cant_answer"); return f"{ack} {q}"
-            if quality == "weak":
-                q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); ack = await self._generate_dynamic_ack("weak hr", "weak"); return f"{ack} {q}"
-            if quality == "strong" and random.random() < 0.25:
-                q = await self._generate_smart_followup(session, user_response, WI_InterviewStage.HR); session.add_exchange(q, question_type="hr", is_followup=True); ack = await self._generate_dynamic_ack("good hr", "hr"); return f"{ack} {q}"
-            q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); ack = await self._generate_dynamic_ack("hr response", "hr"); return f"{ack} {q}"
+
+            # ── ACCURACY-BASED RESPONSE FOR HR ──
+            if accuracy >= 0.7:
+                if random.random() < 0.25:
+                    q = await self._generate_smart_followup(session, user_response, WI_InterviewStage.HR)
+                    session.add_exchange(q, question_type="hr", is_followup=True)
+                    ack = self._get_encouragement()
+                    return f"{ack} {q}"
+                q, keywords = await self._generate_hr_question(session, db_manager)
+                session.add_exchange(q, expected_keywords=keywords, question_type="hr")
+                ack = self._get_encouragement()
+                return f"{ack} {q}"
+            elif accuracy >= 0.4:
+                q, keywords = await self._generate_hr_question(session, db_manager)
+                session.add_exchange(q, expected_keywords=keywords, question_type="hr")
+                ack = await self._generate_dynamic_ack("partial hr", "transition")
+                return f"{ack} {q}"
+            else:
+                q, keywords = await self._generate_hr_question(session, db_manager)
+                session.add_exchange(q, expected_keywords=keywords, question_type="hr")
+                ack = self._get_off_topic_response()
+                return f"{ack} {q}"
         return "That's interesting. Tell me more?"
 
     async def generate_fast_evaluation(self, session) -> Tuple[str, Dict[str, float]]:
@@ -1424,6 +1742,9 @@ class WI_OptimizedConversationManager:
         await self.client_manager.initialize()
         comm_exchanges = []; tech_exchanges = []; hr_exchanges = []; tech_accuracies = []; hr_accuracies = []
         for ex in session.exchanges:
+            # Skip exchanges that are just silence prompts or repeat confirmations (not real Q&A)
+            if ex.answer_quality in ["silence", "gibberish"] and not ex.user_response:
+                continue
             exchange_data = {"question": ex.ai_message, "answer": ex.user_response if ex.user_response else "[SILENT - No response]", "is_silent": not ex.user_response or ex.answer_quality == "silence", "answer_quality": ex.answer_quality, "accuracy": ex.technical_accuracy}
             if ex.stage == WI_InterviewStage.COMMUNICATION: comm_exchanges.append(exchange_data)
             elif ex.stage == WI_InterviewStage.TECHNICAL: tech_exchanges.append(exchange_data); (tech_accuracies.append(ex.technical_accuracy) if ex.technical_accuracy is not None else None)
@@ -1469,7 +1790,33 @@ class WI_OptimizedConversationManager:
         evaluation_parts.append(f"  Needs Improvement: {session.wrong_answers}")
         evaluation_parts.append(f"  Silent Responses: {silent_count}")
         evaluation = "\n".join(evaluation_parts)
-        score_prompt = f"""Based on this interview, provide scores (0-10) for each criteria.\nTechnical Accuracy: {tech_accuracy_avg:.0%}\nReply in EXACT format:\ncommunication: X\ntechnical: X\nleadership: X\nbehaviour: X\nconfidence: X"""
+        score_prompt = f"""Score this interview candidate on a scale of 0-10 for each criteria.
+
+ACTUAL PERFORMANCE METRICS (use these to determine scores):
+- Technical Accuracy: {tech_accuracy_avg:.0%}
+- Correct Answers: {session.correct_answers}
+- Partial Answers: {session.partial_answers}
+- Wrong/Weak Answers: {session.wrong_answers}
+- Silent/No Response: {silent_count}
+- Total Questions: {total_comm_qs + total_technical_qs + total_hr_qs}
+- Communication Questions: {total_comm_qs}
+- Technical Questions: {total_technical_qs}
+- HR Questions: {total_hr_qs}
+
+STRICT SCORING RULES:
+- If Technical Accuracy is below 20%, technical score MUST be 2 or below
+- If Technical Accuracy is below 50%, technical score MUST be 4 or below
+- If Correct Answers is 0, technical score MUST be 1 or 2
+- If Wrong Answers > 10, overall scores should be LOW (1-4 range)
+- If most responses were incoherent or gibberish, confidence and communication MUST be 3 or below
+- Do NOT give generous scores. Be honest and accurate based on the metrics above.
+
+Reply in EXACT format (just the scores, nothing else):
+communication: X
+technical: X
+leadership: X
+behaviour: X
+confidence: X"""
         sc_resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": score_prompt}], temperature=0.1, max_tokens=200)
         score_text = sc_resp.choices[0].message.content.lower()
         scores = {}
@@ -1479,6 +1826,33 @@ class WI_OptimizedConversationManager:
             else:
                 if key == "technical": scores[f"{key}_score"] = round(tech_accuracy_avg * 10, 1)
                 else: scores[f"{key}_score"] = 5.0
+
+        # ── HARD SCORE CAPS ──
+        # Even if LLM gives generous scores, force them down based on real metrics.
+        # Technical score MUST reflect actual accuracy
+        tech_cap = tech_accuracy_avg * 10  # 8% accuracy → max 0.8 score
+        if tech_cap < 2.0: tech_cap = max(tech_cap, 1.0)  # minimum 1.0
+        if scores.get("technical_score", 0) > tech_cap + 1.5:
+            logger.info(f"[WI] Capping technical score from {scores['technical_score']} to {round(tech_cap + 1.0, 1)} (accuracy={tech_accuracy_avg:.0%})")
+            scores["technical_score"] = round(tech_cap + 1.0, 1)
+
+        # If 0 correct answers, cap all scores
+        if session.correct_answers == 0 and session.wrong_answers > 5:
+            for key in ["communication", "technical", "leadership", "behaviour", "confidence"]:
+                score_key = f"{key}_score"
+                if scores.get(score_key, 0) > 4.0:
+                    logger.info(f"[WI] Capping {key} from {scores[score_key]} to 4.0 (0 correct, {session.wrong_answers} wrong)")
+                    scores[score_key] = min(scores[score_key], 4.0)
+
+        # If most answers were gibberish/incoherent, cap communication and confidence
+        gibberish_ratio = silent_count / max(total_comm_qs + total_technical_qs + total_hr_qs, 1)
+        wrong_ratio = session.wrong_answers / max(total_comm_qs + total_technical_qs + total_hr_qs, 1)
+        if wrong_ratio > 0.6 or gibberish_ratio > 0.4:
+            for key in ["communication", "confidence"]:
+                score_key = f"{key}_score"
+                if scores.get(score_key, 0) > 3.0:
+                    scores[score_key] = min(scores[score_key], 3.0)
+
         scores["technical_accuracy"] = round(tech_accuracy_avg * 100, 1)
         scores["hr_accuracy"] = round(hr_accuracy_avg * 100, 1)
         scores["questions_correct"] = session.correct_answers
@@ -1486,6 +1860,9 @@ class WI_OptimizedConversationManager:
         scores["questions_wrong"] = session.wrong_answers
         scores["questions_silent"] = silent_count
         scores["total_questions"] = total_technical_qs + total_hr_qs + total_comm_qs
+        scores["communication_questions"] = total_comm_qs
+        scores["technical_questions"] = total_technical_qs
+        scores["hr_questions"] = total_hr_qs
         w = {"communication_weight": 0.20, "technical_weight": 0.30, "leadership_weight": 0.15, "behaviour_weight": 0.20, "confidence_weight": 0.15}
         scores["weighted_overall"] = round(scores.get("communication_score", 5) * w.get("communication_weight", 0.2) + scores.get("technical_score", 5) * w.get("technical_weight", 0.3) + scores.get("leadership_score", 5) * w.get("leadership_weight", 0.15) + scores.get("behaviour_score", 5) * w.get("behaviour_weight", 0.2) + scores.get("confidence_score", 5) * w.get("confidence_weight", 0.15), 1)
         logger.info(f"[WI] Evaluation complete - Overall: {scores['weighted_overall']}/10, Tech Accuracy: {scores['technical_accuracy']}%")

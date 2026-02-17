@@ -9,11 +9,14 @@ Features:
 - AI-generated explanations
 - ✅/❌ status indicators
 - Professional formatting
+- ☁️ AWS S3 Upload with URL stored in MongoDB
 """
 
 import io
 import logging
 import os
+import boto3
+from botocore.exceptions import ClientError
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -31,7 +34,91 @@ class PDFService:
         self.output_dir = "static/pdf_reports"
         os.makedirs(self.output_dir, exist_ok=True)
         
-        logger.info("📄 PDF Service initialized with Code Formatting support")
+        # ════════════════════════════════════════════════════════════
+        # AWS S3 Configuration (from config.py)
+        # ════════════════════════════════════════════════════════════
+        from ..core.config import config as app_config
+        
+        self.s3_client = boto3.client(
+            's3',
+            aws_access_key_id=app_config.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=app_config.AWS_SECRET_ACCESS_KEY,
+            region_name=app_config.AWS_REGION
+        )
+        self.s3_bucket = app_config.S3_BUCKET_NAME
+        self.s3_folder = app_config.S3_PDF_FOLDER
+        
+        logger.info("📄 PDF Service initialized with S3 Upload + Code Formatting support")
+
+    # ════════════════════════════════════════════════════════════
+    # AWS S3 UPLOAD
+    # ════════════════════════════════════════════════════════════
+    def _upload_to_s3(self, pdf_bytes: bytes, test_id: str, student_id: str = "unknown") -> Optional[str]:
+        """
+        Upload PDF to AWS S3 and return the public URL.
+        
+        Args:
+            pdf_bytes: PDF file content as bytes
+            test_id: Unique test identifier
+            student_id: Student ID for folder organization
+            
+        Returns:
+            S3 URL string or None if upload fails
+        """
+        try:
+            # S3 key: pdf-reports/student_123/test_results_abc123.pdf
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            s3_key = f"{self.s3_folder}/student_{student_id}/test_results_{test_id}_{timestamp}.pdf"
+            
+            # Upload to S3
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket,
+                Key=s3_key,
+                Body=pdf_bytes,
+                ContentType='application/pdf',
+                ContentDisposition=f'inline; filename="test_results_{test_id}.pdf"',
+                Metadata={
+                    'test_id': test_id,
+                    'student_id': str(student_id),
+                    'generated_at': datetime.now().isoformat()
+                }
+            )
+            
+            # Construct URL
+            region = os.environ.get('AWS_REGION', 'ap-south-1')
+            s3_url = f"https://{self.s3_bucket}.s3.{region}.amazonaws.com/{s3_key}"
+            
+            logger.info(f"☁️ PDF uploaded to S3: {s3_url}")
+            return s3_url
+            
+        except ClientError as e:
+            logger.error(f"❌ S3 upload failed: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Unexpected S3 error: {e}")
+            return None
+
+    def _generate_presigned_url(self, s3_key: str, expiration: int = 86400) -> Optional[str]:
+        """
+        Generate a presigned URL for private S3 objects.
+        Default expiration: 24 hours (86400 seconds)
+        
+        Use this if your S3 bucket is NOT public.
+        """
+        try:
+            url = self.s3_client.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': self.s3_bucket,
+                    'Key': s3_key
+                },
+                ExpiresIn=expiration
+            )
+            logger.info(f"🔗 Presigned URL generated (expires in {expiration}s)")
+            return url
+        except ClientError as e:
+            logger.error(f"❌ Presigned URL generation failed: {e}")
+            return None
 
     def _is_code_content(self, text: str) -> bool:
         """Check if text looks like code"""
@@ -613,22 +700,42 @@ class PDFService:
         # Build PDF
         pdf_doc.build(elements)
         buffer.seek(0)
+        pdf_bytes = buffer.getvalue()
         
-        # Save PDF to file system for dashboard access
+        # ════════════════════════════════════════════════════════════
+        # SAVE LOCAL + UPLOAD TO S3 + UPDATE MONGODB
+        # ════════════════════════════════════════════════════════════
+        
+        # 1. Save PDF to local file system
         pdf_path = os.path.join(self.output_dir, f"test_results_{test_id}.pdf")
         with open(pdf_path, 'wb') as f:
-            f.write(buffer.getvalue())
+            f.write(pdf_bytes)
         
-        # Update database with PDF path
+        # 2. Upload to AWS S3
+        s3_url = self._upload_to_s3(pdf_bytes, test_id, str(student_id))
+        
+        # 3. Update MongoDB with local path + S3 URL
+        update_fields = {
+            "pdf_path": pdf_path,
+            "pdf_generated_at": datetime.now().isoformat()
+        }
+        
+        if s3_url:
+            update_fields["pdf_url"] = s3_url
+            logger.info(f"☁️ S3 URL stored in MongoDB: {s3_url}")
+        else:
+            update_fields["pdf_url"] = None
+            logger.warning(f"⚠️ S3 upload failed, pdf_url set to None for test: {test_id}")
+        
         self.db_manager.test_results_collection.update_one(
             {"test_id": test_id},
-            {"$set": {"pdf_path": pdf_path, "pdf_generated_at": datetime.now().isoformat()}}
+            {"$set": update_fields}
         )
         
-        logger.info(f"📄 PDF generated and saved: {pdf_path}")
+        logger.info(f"📄 PDF generated, saved locally, uploaded to S3, and MongoDB updated: {test_id}")
         
         buffer.seek(0)
-        return buffer.getvalue()
+        return pdf_bytes
     
     async def get_pdf_path(self, test_id: str) -> Optional[str]:
         """Get stored PDF path for a test"""
@@ -637,6 +744,14 @@ class PDFService:
             {"pdf_path": 1}
         )
         return doc.get("pdf_path") if doc else None
+
+    async def get_pdf_url(self, test_id: str) -> Optional[str]:
+        """Get S3 PDF URL for a test"""
+        doc = self.db_manager.test_results_collection.find_one(
+            {"test_id": test_id},
+            {"pdf_url": 1}
+        )
+        return doc.get("pdf_url") if doc else None
 
 
 # Singleton

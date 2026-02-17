@@ -119,6 +119,19 @@ class Config:
     FILLER_IGNORE_MAX_TOKENS = int(os.getenv("FILLER_IGNORE_MAX_TOKENS", "2"))
 
     # =========================================================================
+    # ADD THESE LINES TO YOUR config.py (after the CORS SETTINGS section)
+    # =========================================================================
+
+    # =========================================================================
+    # AWS S3 CONFIG (for PDF storage)
+    # =========================================================================
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+    AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME", "imeetpro-225220763325")
+    AWS_S3_INTERVIEW_PREFIX = os.getenv("AWS_S3_INTERVIEW_PREFIX", "weekly-interviews")
+
+    # =========================================================================
     # COLLECTION NAMES
     # =========================================================================
     SUMMARIES_COLLECTION = os.getenv("SUMMARIES_COLLECTION", "summaries")

@@ -16,6 +16,7 @@ class Config:
     - Question Bank for large-scale non-repetition
     - MongoDB summaries
     - Groq LLM evaluation
+    - AWS S3 PDF storage
     """
 
     # ============================================================
@@ -44,6 +45,15 @@ class Config:
     TEST_RESULTS_COLLECTION = "mock_test_results"
     QUESTION_BANK_COLLECTION = "question_bank"
     STUDENT_QUESTION_HISTORY_COLLECTION = "student_question_history"
+
+    # ============================================================
+    # AWS S3 CONFIGURATION (PDF STORAGE)
+    # ============================================================
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "o4BiSXneLkds2Uk9XOIwHz/PNo9ur7ti5IlpmR6j")
+    AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
+    S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "imeetpro-225220763325")
+    S3_PDF_FOLDER = os.getenv("S3_PDF_FOLDER", "mock-test-reports")
 
     # ============================================================
     # MYSQL CONFIGURATION (STUDENT METADATA)
@@ -215,7 +225,7 @@ class Config:
                         "question_count": self.DEV_APTITUDE_COUNT,
                         "time_per_question_sec": self.APTITUDE_TIME_PER_Q * 60
                     },
-                    "mcq": {  # Changed from "theory"
+                    "mcq": {
                         "percentage": self.DEV_MCQ_PERCENT,
                         "minutes": self.DEV_MCQ_MINUTES,
                         "question_count": self.DEV_MCQ_COUNT,
@@ -231,7 +241,6 @@ class Config:
                 "total_questions": self.DEV_TOTAL_QUESTIONS
             }
         else:
-            # Non-developer: Aptitude (10) + MCQ (20) = 30 questions, 45 minutes
             return {
                 "total_time_minutes": self.NON_DEV_TOTAL_MINUTES,
                 "sections": {
@@ -266,3 +275,4 @@ import logging
 logger = logging.getLogger(__name__)
 logger.info(f"📊 Developer Exam: {config.DEV_APTITUDE_COUNT} aptitude + {config.DEV_MCQ_COUNT} mcq + {config.DEV_CODING_COUNT} coding = {config.DEV_TOTAL_QUESTIONS} questions in {config.EXAM_TOTAL_MINUTES} min")
 logger.info(f"📊 Non-Dev Exam: {config.NON_DEV_APTITUDE_COUNT} aptitude + {config.NON_DEV_MCQ_COUNT} MCQ = {config.NON_DEV_TOTAL_QUESTIONS} questions in {config.NON_DEV_TOTAL_MINUTES} min")
+logger.info(f"☁️ AWS S3 Bucket: {config.S3_BUCKET_NAME} | Region: {config.AWS_REGION}")

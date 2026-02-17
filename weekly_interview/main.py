@@ -21,8 +21,11 @@ import io
 from datetime import datetime
 from pathlib import Path
 
+import boto3
+from botocore.exceptions import ClientError
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -52,6 +55,55 @@ from core.prompts import validate_prompts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ─── S3 Client Setup ───
+def _get_s3_client():
+    try:
+        s3_kwargs = {"region_name": os.getenv("AWS_REGION", "ap-south-1")}
+        access_key = os.getenv("AWS_ACCESS_KEY_ID", "")
+        secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+        if access_key and secret_key:
+            s3_kwargs["aws_access_key_id"] = access_key
+            s3_kwargs["aws_secret_access_key"] = secret_key
+        return boto3.client("s3", **s3_kwargs)
+    except Exception as e:
+        logger.error("Failed to create S3 client: %s", e)
+        return None
+
+s3_client = _get_s3_client()
+S3_BUCKET = os.getenv("AWS_S3_BUCKET_NAME", "imeetpro-225220763325")
+S3_PREFIX = os.getenv("AWS_S3_INTERVIEW_PREFIX", "weekly-interviews")
+
+
+def upload_pdf_to_s3(pdf_bytes: bytes, student_id: str, test_id: str) -> Optional[str]:
+    if not s3_client:
+        logger.error("S3 client not available")
+        return None
+    try:
+        s3_key = f"{S3_PREFIX}/{student_id}/{test_id}.pdf"
+        s3_client.put_object(
+            Bucket=S3_BUCKET, Key=s3_key, Body=pdf_bytes,
+            ContentType="application/pdf",
+            ContentDisposition=f"inline; filename=interview_report_{test_id}.pdf",
+        )
+        logger.info("PDF uploaded to S3: s3://%s/%s", S3_BUCKET, s3_key)
+        return s3_key
+    except Exception as e:
+        logger.error("S3 upload failed: %s", e)
+        return None
+
+
+def get_s3_presigned_url(s3_key: str, expires_in: int = 3600) -> Optional[str]:
+    if not s3_client or not s3_key:
+        return None
+    try:
+        return s3_client.generate_presigned_url(
+            "get_object", Params={"Bucket": S3_BUCKET, "Key": s3_key}, ExpiresIn=expires_in,
+        )
+    except Exception as e:
+        logger.error("Presigned URL failed: %s", e)
+        return None
 
 
 class UltraFastInterviewManager:
@@ -272,6 +324,36 @@ class UltraFastInterviewManager:
             if not evaluation:
                 raise Exception("Evaluation generation returned empty result")
 
+            # ── Generate PDF and upload to S3 ──
+            pdf_url = None
+            pdf_s3_key = None
+            try:
+                result_for_pdf = {
+                    "student_name": session_data.student_name, "scores": scores,
+                    "evaluation": evaluation, "evaluation_details": scores.get("evaluation_details", {}),
+                    "duration_minutes": round((time.time() - session_data.created_at) / 60, 1),
+                    "questions_per_round": dict(session_data.questions_per_round),
+                    "timestamp": time.time(),
+                    "conversation_log": [
+                        {"timestamp": ex.timestamp, "stage": ex.stage.value, "ai_message": ex.ai_message,
+                         "user_response": ex.user_response, "transcript_quality": ex.transcript_quality,
+                         "concept": ex.concept, "is_followup": ex.is_followup, "answer_quality": ex.answer_quality}
+                        for ex in session_data.exchanges
+                    ],
+                }
+                pdf_bytes = generate_pdf_report(result_for_pdf, session_data.test_id)
+                pdf_s3_key = await asyncio.get_event_loop().run_in_executor(
+                    shared_clients.executor, upload_pdf_to_s3, pdf_bytes,
+                    str(session_data.student_id), session_data.test_id,
+                )
+                if pdf_s3_key:
+                    pdf_url = get_s3_presigned_url(pdf_s3_key, expires_in=86400 * 7)
+                    logger.info("PDF uploaded to S3: %s", pdf_s3_key)
+                else:
+                    logger.warning("S3 upload failed - PDF available on-the-fly only")
+            except Exception as pdf_err:
+                logger.error("PDF generation/upload failed: %s", pdf_err)
+
             interview_data = {
                 "test_id": session_data.test_id,
                 "session_id": session_data.session_id,
@@ -297,6 +379,8 @@ class UltraFastInterviewManager:
                 "questions_per_round": dict(session_data.questions_per_round),
                 "followup_questions": session_data.followup_questions,
                 "evaluation_details": scores.get("evaluation_details", {}),
+                "pdf_s3_key": pdf_s3_key,
+                "pdf_url": pdf_url,
             }
 
             await self.db_manager.save_interview_result_fast(interview_data)
@@ -312,7 +396,7 @@ class UltraFastInterviewManager:
                 "text": completion_message,
                 "evaluation": evaluation,
                 "scores": scores,
-                "pdf_url": f"/weekly_interview/download_results/{session_data.test_id}",
+                "pdf_url": pdf_url or f"/weekly_interview/download_results/{session_data.test_id}",
                 "status": "complete",
             })
 
@@ -545,6 +629,15 @@ async def health_check():
 async def download_results(test_id: str):
     try:
         result = await interview_manager.get_session_result_fast(test_id)
+
+        # Try S3 presigned URL first
+        pdf_s3_key = result.get("pdf_s3_key")
+        if pdf_s3_key:
+            presigned_url = get_s3_presigned_url(pdf_s3_key, expires_in=3600)
+            if presigned_url:
+                return RedirectResponse(url=presigned_url)
+
+        # Fallback: generate on-the-fly
         pdf_buffer = await asyncio.get_event_loop().run_in_executor(
             shared_clients.executor, generate_pdf_report, result, test_id
         )
