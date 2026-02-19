@@ -1598,7 +1598,7 @@ MAX 15 words. Just the question:"""
         elapsed = session.get_round_elapsed_minutes()
         logger.info(f"[WI] Stage: {session.current_stage.value}, Elapsed: {elapsed:.2f} min")
         if session.current_stage == WI_InterviewStage.COMMUNICATION:
-            if elapsed >= 10:
+            if elapsed >= 5:
                 logger.info(f"[WI] TRANSITIONING: Communication -> Technical")
                 session.start_round(WI_InterviewStage.TECHNICAL)
                 q, keywords = await self._generate_technical_question(session)
