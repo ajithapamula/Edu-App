@@ -352,6 +352,7 @@ class WI_InterviewSession:
     partial_answers: int = 0
     wrong_answers: int = 0
     is_finalized: bool = False
+    _last_real_question: str = ""  # Survives round transitions (unlike conversation_state.last_pure_question)
     
     def __post_init__(self):
         self.interview_start_time = self.created_at
@@ -363,6 +364,7 @@ class WI_InterviewSession:
         self.round_start_times[stage.value] = current_time
         self.current_stage = stage
         self.conversation_state = WI_ConversationState()
+        self.silence_prompt_count = 0  # Reset so new round gets fresh silence prompts
 
     def get_round_elapsed_time(self):
         current_stage_value = self.current_stage.value
@@ -394,9 +396,12 @@ class WI_InterviewSession:
                     for sep in ['. ', '! ', '\n']:
                         if sep in part: part = part.split(sep)[-1].strip()
                     self.conversation_state.last_pure_question = part + '?'
+                    # Also store on session level (survives round transitions)
+                    self._last_real_question = part + '?'
                     break
         else:
             self.conversation_state.last_pure_question = ai_message
+            self._last_real_question = ai_message
 
     def update_last_response(self, user_response, quality, answer_quality="neutral", technical_accuracy=None):
         if self.exchanges:
@@ -438,7 +443,7 @@ class WI_SharedClientManager:
     def __init__(self):
         self.openai_client: Optional[AsyncOpenAI] = None
         self.groq_client: Optional[AsyncGroq] = None
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=16)  # Support 16 concurrent audio processing tasks
         self._initialized = False
     async def initialize(self):
         if self._initialized: return
@@ -515,29 +520,16 @@ class WI_EnhancedInterviewFragmentManager:
 
 class HumanVoiceDetector:
     """Detects human voice and rejects non-human sounds (TV, fan, traffic, music)."""
-    VOICE_FREQ_LOW = 60          # Lower for Bluetooth codec compression
-    VOICE_FREQ_HIGH = 4000       # Wider range for Bluetooth harmonics
-    VOICE_ENERGY_THRESHOLD = 0.005  # Lower - Bluetooth mics are quieter
-    VOICE_RATIO_THRESHOLD = 0.20    # Lower - Bluetooth compresses voice frequencies
-    ZCR_LOW = 0.01               # Wider range for Bluetooth artifacts
-    ZCR_HIGH = 0.45              # Wider range for Bluetooth artifacts
-    MIN_CONFIDENCE = 0.20        # Lower - Bluetooth audio scores lower on all metrics
+    VOICE_FREQ_LOW = 60
+    VOICE_FREQ_HIGH = 4000
+    VOICE_ENERGY_THRESHOLD = 0.025  # Raised from 0.015 — speaker echo has rms=0.02-0.05
+    VOICE_RATIO_THRESHOLD = 0.20
+    ZCR_LOW = 0.01
+    ZCR_HIGH = 0.45
+    MIN_CONFIDENCE = 0.30  # Was 0.20 — too lenient for voice confirmation
     def __init__(self, sample_rate=16000): self.sample_rate = sample_rate
     def audio_bytes_to_numpy(self, audio_data):
-        """Convert audio bytes (WAV, WebM/Opus, OGG, MP4, etc.) to numpy float32 array.
-
-        The frontend sends audio/webm;codecs=opus — NOT raw PCM or WAV.
-        We MUST decode compressed formats properly using ffmpeg, otherwise
-        the raw compressed bytes get misinterpreted as PCM and produce
-        garbage/near-zero values causing VAD to randomly fail.
-
-        Decode priority:
-          1. Try WAV (fast, no subprocess)
-          2. Try ffmpeg for any format (WebM, Opus, OGG, MP4, etc.)
-          3. Return None if all fail
-        """
         try:
-            # --- Attempt 1: Parse as WAV (raw PCM already decoded) ---
             try:
                 with io.BytesIO(audio_data) as audio_io:
                     with wave.open(audio_io, 'rb') as wav:
@@ -553,22 +545,11 @@ class HumanVoiceDetector:
                         return samples
             except Exception:
                 pass
-
-            # --- Attempt 2: Decode with ffmpeg (handles WebM/Opus, OGG, MP4, etc.) ---
             try:
                 target_sr = 16000
                 result = subprocess.run(
-                    [
-                        'ffmpeg', '-i', 'pipe:0',     # read from stdin
-                        '-f', 's16le',                 # output raw PCM signed 16-bit little-endian
-                        '-acodec', 'pcm_s16le',        # PCM codec
-                        '-ar', str(target_sr),          # resample to 16kHz
-                        '-ac', '1',                     # mono
-                        'pipe:1'                        # write to stdout
-                    ],
-                    input=audio_data,
-                    capture_output=True,
-                    timeout=10
+                    ['ffmpeg', '-i', 'pipe:0', '-f', 's16le', '-acodec', 'pcm_s16le', '-ar', str(target_sr), '-ac', '1', 'pipe:1'],
+                    input=audio_data, capture_output=True, timeout=10
                 )
                 if result.returncode == 0 and len(result.stdout) > 0:
                     samples = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
@@ -583,8 +564,6 @@ class HumanVoiceDetector:
                 logger.warning("[VAD] ffmpeg not found on system, cannot decode compressed audio")
             except Exception as e:
                 logger.warning("[VAD] ffmpeg decode error: %s", e)
-
-            # --- No fallback to raw int16 — that produces garbage for compressed formats ---
             logger.warning("[VAD] Could not decode audio data (%d bytes)", len(audio_data))
             return None
         except Exception as e:
@@ -641,7 +620,7 @@ class HumanVoiceDetector:
             center = (self.ZCR_LOW + self.ZCR_HIGH) / 2
             deviation = abs(zcr - center) / (self.ZCR_HIGH - self.ZCR_LOW)
             zcr_score = (1.0 - deviation) * 0.25
-        elif zcr < self.ZCR_LOW * 3:  # Still give partial score for near-range
+        elif zcr < self.ZCR_LOW * 3:
             zcr_score = 0.08
         pat_score = pattern * 0.40
         confidence = vr_score + zcr_score + pat_score
@@ -650,52 +629,22 @@ class HumanVoiceDetector:
         return is_voice, confidence, {"rms": round(rms, 4), "voice_ratio": round(voice_ratio, 3), "confidence": round(confidence, 3), "is_voice": is_voice}
 
 class AudioPreprocessor:
-    """Gently cleans audio before Whisper: trim leading/trailing silence + normalize.
-
-    IMPORTANT: Whisper is trained on noisy audio and handles background noise
-    well on its own. Aggressive preprocessing (spectral noise gates, etc.)
-    actually HURTS transcription accuracy because it removes speech harmonics
-    that Whisper relies on. The previous spectral noise gate was estimating
-    "noise" from the first few audio frames — which often contained speech,
-    causing it to subtract the speaker's own voice from the entire clip.
-
-    Evidence from logs:
-      Preprocessed: 91200 -> 18409 samples  (80% of speech removed!)
-      Preprocessed: 91200 -> 15594 samples  (83% of speech removed!)
-    Result: Whisper got tiny mangled fragments and hallucinated random text.
-
-    Now we only do:
-      1. Gentle trim of leading/trailing dead silence (threshold=0.003)
-      2. Normalize volume to consistent level
-      3. That's it — let Whisper handle the rest
-    """
     def __init__(self, sample_rate=16000):
         self.sample_rate = sample_rate
         self._vad = HumanVoiceDetector(sample_rate)
-
     def _normalize(self, samples):
-        """Normalize audio to consistent volume level."""
         max_val = np.max(np.abs(samples))
         return samples * (0.8 / max_val) if max_val > 1e-6 else samples
-
     def _trim_silence(self, samples, threshold=0.003, pad=3200):
-        """Trim only dead silence from start/end. Very gentle threshold.
-
-        threshold=0.003 (was 0.01) — only trims true silence, not quiet speech
-        pad=3200 (was 1600) — keeps 200ms padding so speech edges aren't clipped
-        """
         above = np.where(np.abs(samples) > threshold)[0]
         if len(above) == 0: return samples
         start = max(0, above[0] - pad)
         end = min(len(samples), above[-1] + pad)
-        # Safety: never trim more than 50% of audio — if we would, skip trimming
         if (end - start) < len(samples) * 0.5:
             logger.debug("[AUDIO] Trim would remove >50%% of audio, skipping trim")
             return samples
         return samples[start:end]
-
     def _to_wav_bytes(self, samples):
-        """Convert float32 samples back to WAV bytes."""
         pcm = (samples * 32767).astype(np.int16)
         buf = io.BytesIO()
         with wave.open(buf, 'wb') as wav:
@@ -704,15 +653,12 @@ class AudioPreprocessor:
             wav.setframerate(self.sample_rate)
             wav.writeframes(pcm.tobytes())
         return buf.getvalue()
-
     def preprocess(self, audio_data):
-        """Preprocess audio: gentle trim + normalize. No spectral manipulation."""
         try:
             samples = self._vad.audio_bytes_to_numpy(audio_data)
             if samples is None: return audio_data
             orig_len = len(samples)
             samples = self._trim_silence(samples)
-            # NO spectral noise gate — Whisper handles noise better than we can
             samples = self._normalize(samples)
             logger.info(f"[AUDIO] Preprocessed: {orig_len} -> {len(samples)} samples")
             return self._to_wav_bytes(samples)
@@ -721,7 +667,6 @@ class AudioPreprocessor:
             return audio_data
 
 class AudioDeviceHealthMonitor:
-    """Detects Bluetooth/headphone disconnect. Keeps interview alive."""
     GRACE_PERIOD = 10
     MAX_BAD_BEFORE_WARN = 3
     def __init__(self): self.last_good_time = None; self.consecutive_bad = 0; self.disconnect_detected = False
@@ -749,7 +694,7 @@ class AudioDeviceHealthMonitor:
     def reset(self): self.last_good_time = time.time(); self.consecutive_bad = 0; self.disconnect_detected = False
 
 # =============================================================================
-# ENHANCED WI_OptimizedAudioProcessor with Voice Detection + Device Monitor
+# ENHANCED WI_OptimizedAudioProcessor
 # =============================================================================
 
 class WI_OptimizedAudioProcessor:
@@ -759,130 +704,226 @@ class WI_OptimizedAudioProcessor:
         self.audio_preprocessor = AudioPreprocessor()
         self.device_monitor = AudioDeviceHealthMonitor()
         self.HALLUCINATION_PHRASES = [
-            # Whisper prompt echoes (old prompt that was leaking into transcripts)
-            "the speaker is answering questions about their",
-            "interview response",
-            "the speaker is answering",
-            "answering questions about their work",
-            "work experience, technical skills",
-            "technical skills, and projects",
-            # Standard Whisper hallucinations
+            # === Original hallucinations ===
+            "the speaker is answering questions about their", "interview response",
+            "the speaker is answering", "answering questions about their work",
+            "work experience, technical skills", "technical skills, and projects",
             "thank you for watching", "thanks for watching", "please subscribe",
             "like and subscribe", "see you in the next", "bye bye", "goodbye",
             "thank you for listening", "the end", "music", "applause", "laughter",
             "silence", "inaudible", "unintelligible", "foreign",
             "speaking foreign language", "don't forget to subscribe", "hit the bell",
             "leave a comment", "check out my", "link in description", "sponsored by",
+            # === Whisper silence hallucinations (generates fake speech from noise) ===
+            "i'm doing great", "thanks for asking", "please continue",
+            "i'm gonna say", "i'm gonna be", "i'm going to",
+            "well, my friends", "bama aum", "aum", "om",
+            "yar yar", "yar, yar", "blah blah", "la la la",
+            "hmm hmm hmm", "mmm mmm", "uh huh uh huh",
+            "gonna be thinking about it", "thinking about it",
+            "i think so", "i guess so", "yeah yeah yeah",
+            "okay okay", "alright alright", "right right right",
+            "you know what i mean", "you know what i'm saying",
+            "so so so", "um um um", "uh uh uh",
+            "this is a test", "testing testing", "hello hello",
+            "can you hear me", "is this on", "one two three",
+            "the the the", "a a a", "and and and",
+            "i don't know what to say", "i have nothing to say",
+            "subtitles by", "translated by", "captioned by",
+            "copyright", "all rights reserved", "narrator",
+            "chapter", "verse", "ameen", "amen", "namaste",
+            "shukriya", "dhanyavaad", "bahut", "accha",
+            # === Whisper Indian accent artifacts ===
+            "bhai", "yaar", "acha", "theek hai", "kya",
+            "haan ji", "nahin", "ji haan",
         ]
 
     def _decode_to_wav(self, audio_data: bytes) -> bytes:
-        """Decode any audio format (WebM/Opus, OGG, MP4, WAV) to WAV PCM bytes.
-
-        The frontend sends audio/webm;codecs=opus. We decode once upfront and
-        pass the resulting WAV bytes to all subsequent pipeline steps (device
-        health check, VAD, preprocessor, Whisper) so ffmpeg only runs once.
-        """
-        # Already WAV? Return as-is.
         if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
             logger.debug("[DECODE] Audio is already WAV format")
             return audio_data
-
-        # Use ffmpeg to convert to 16kHz mono WAV
         try:
             result = subprocess.run(
-                [
-                    'ffmpeg', '-i', 'pipe:0',
-                    '-f', 'wav',
-                    '-acodec', 'pcm_s16le',
-                    '-ar', '16000',
-                    '-ac', '1',
-                    'pipe:1'
-                ],
-                input=audio_data,
-                capture_output=True,
-                timeout=10
+                ['ffmpeg', '-i', 'pipe:0', '-f', 'wav', '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', 'pipe:1'],
+                input=audio_data, capture_output=True, timeout=10
             )
             if result.returncode == 0 and len(result.stdout) > 100:
                 logger.info("[DECODE] Converted %d bytes -> %d bytes WAV (ffmpeg)", len(audio_data), len(result.stdout))
                 return result.stdout
             else:
-                logger.warning("[DECODE] ffmpeg conversion failed (rc=%d): %s",
-                             result.returncode, result.stderr[:300].decode(errors='replace'))
+                logger.warning("[DECODE] ffmpeg conversion failed (rc=%d): %s", result.returncode, result.stderr[:300].decode(errors='replace'))
                 return None
         except subprocess.TimeoutExpired:
-            logger.warning("[DECODE] ffmpeg timed out converting audio")
-            return None
+            logger.warning("[DECODE] ffmpeg timed out converting audio"); return None
         except FileNotFoundError:
-            logger.error("[DECODE] ffmpeg not found — cannot decode WebM/Opus audio")
-            return None
+            logger.error("[DECODE] ffmpeg not found"); return None
         except Exception as e:
-            logger.error("[DECODE] Audio decode error: %s", e)
-            return None
+            logger.error("[DECODE] Audio decode error: %s", e); return None
 
     async def transcribe_audio_fast(self, audio_data: bytes) -> Tuple[str, float]:
         await self.client_manager.initialize()
-        if len(audio_data) < 2000: return "", 0.0
-
-        # DECODE ONCE: Convert WebM/Opus to WAV PCM upfront (avoids running ffmpeg 3x)
-        decoded_wav = self._decode_to_wav(audio_data)
-        if decoded_wav is None:
-            logger.warning("[WI] Could not decode audio, skipping")
+        # Minimum ~1 second of audio (16kHz × 2 bytes × 1 sec = 32000 bytes raw)
+        # Compressed webm is smaller, so 16000 bytes ≈ ~1 sec
+        if len(audio_data) < 16000:
+            logger.info(f"[WI] Audio too short ({len(audio_data)} bytes < 16000), skipping")
             return "", 0.0
-
-        # STEP 1: Device Health Check (using decoded WAV)
-        device_health = self.device_monitor.check_audio_health(decoded_wav)
+        
+        loop = asyncio.get_event_loop()
+        
+        # Run CPU-bound ffmpeg decode in executor (doesn't block event loop for other users)
+        decoded_wav = await loop.run_in_executor(
+            self.client_manager.executor, self._decode_to_wav, audio_data
+        )
+        if decoded_wav is None:
+            logger.warning("[WI] Could not decode audio, skipping"); return "", 0.0
+        
+        # Check WAV duration — reject if < 1.5 seconds (likely speaker echo, not real speech)
+        wav_samples = len(decoded_wav) / 2  # 16-bit = 2 bytes per sample
+        wav_duration_sec = wav_samples / 16000  # 16kHz sample rate
+        if wav_duration_sec < 1.5:
+            logger.info(f"[WI] WAV too short ({wav_duration_sec:.1f}s < 1.5s), likely speaker echo — skipping")
+            return "", 0.0
+        
+        # Run CPU-bound device health check in executor
+        device_health = await loop.run_in_executor(
+            self.client_manager.executor, self.device_monitor.check_audio_health, decoded_wav
+        )
         if not device_health["healthy"]:
             if device_health["action"] == "warn_user":
-                logger.warning(f"[WI] Device disconnect: {device_health.get('message', '')}")
-                return "__DEVICE_DISCONNECTED__", 0.0
+                logger.warning(f"[WI] Device disconnect: {device_health.get('message', '')}"); return "__DEVICE_DISCONNECTED__", 0.0
             elif device_health["action"] == "wait_reconnect":
-                logger.info(f"[WI] Waiting for device reconnect: {device_health.get('message', '')}")
-                return "__DEVICE_RECONNECTING__", 0.0
-
-        # STEP 2: Human Voice Detection (using decoded WAV)
-        is_voice, vad_confidence, vad_details = self.voice_detector.is_human_voice(decoded_wav)
+                logger.info(f"[WI] Waiting for device reconnect: {device_health.get('message', '')}"); return "__DEVICE_RECONNECTING__", 0.0
+        
+        # Run CPU-bound VAD (numpy FFT) in executor
+        is_voice, vad_confidence, vad_details = await loop.run_in_executor(
+            self.client_manager.executor, self.voice_detector.is_human_voice, decoded_wav
+        )
         if not is_voice:
-            logger.info(f"[WI] Non-human sound rejected (conf={vad_confidence:.2f}). Skipping transcription.")
-            return "", 0.0
+            logger.info(f"[WI] Non-human sound rejected (conf={vad_confidence:.2f}). Skipping transcription."); return "", 0.0
         logger.info(f"[WI] Human voice confirmed (confidence={vad_confidence:.2f})")
-
-        # STEP 3: Preprocess Audio (using decoded WAV — already in WAV format)
-        processed_audio = self.audio_preprocessor.preprocess(decoded_wav)
+        
+        # Run CPU-bound audio preprocessing in executor
+        processed_audio = await loop.run_in_executor(
+            self.client_manager.executor, self.audio_preprocessor.preprocess, decoded_wav
+        )
         logger.info(f"[WI] Audio preprocessed: {len(audio_data)} -> {len(processed_audio)} bytes")
-
-        # STEP 4: Transcribe with Groq Whisper (using processed audio)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-            tf.write(processed_audio)
-            temp_path = tf.name
+            tf.write(processed_audio); temp_path = tf.name
         try:
             with open(temp_path, "rb") as f: audio_bytes = f.read()
-            # FIXED: Use short vocabulary hints instead of full sentences.
-            # Whisper's "prompt" is meant for spelling/vocabulary guidance, NOT
-            # context sentences. Full sentences get echoed back as hallucinations
-            # when audio is short or unclear (e.g. "The speaker is answering
-            # questions about their wor" was the prompt being echoed).
             tr = await self.client_manager.groq_client.audio.transcriptions.create(
-                file=(temp_path, audio_bytes),
-                model="whisper-large-v3-turbo",
-                language="en",
-                prompt="um, uh, like, okay, so, yeah, right, actually, basically"
+                file=(temp_path, audio_bytes), model="whisper-large-v3-turbo", language="en",
+                prompt="Interview candidate speaking about SAP, technical projects, work experience, and professional skills."
             )
             raw_text = tr.text.strip() if hasattr(tr, 'text') else ""
             if not raw_text: return "", 0.0
+            
+            # Check if Whisper produced a hallucination from noise/speaker echo
+            if self._is_whisper_hallucination(raw_text):
+                logger.info(f"[WI] Whisper hallucination rejected: '{raw_text[:80]}...'")
+                return "", 0.0
+            
             cleaned_text = self._remove_hallucinations(raw_text)
             confidence = self._calculate_confidence(cleaned_text)
             confidence = (confidence + vad_confidence) / 2
             if confidence < 0.3: return "", confidence
             final_text = self._final_cleanup(cleaned_text)
             if len(final_text.split()) < 2: return "", 0.2
-            self.device_monitor.consecutive_bad = 0
-            self.device_monitor.disconnect_detected = False
+            self.device_monitor.consecutive_bad = 0; self.device_monitor.disconnect_detected = False
             return final_text, confidence
         except Exception as e:
             logger.error(f"[WI] Transcription error: {e}"); return "", 0.0
         finally:
             try: os.unlink(temp_path)
             except: pass
+
+    def _is_whisper_hallucination(self, raw_text):
+        """Detect Whisper hallucinations from speaker echo / background noise.
+        
+        Whisper generates confident-sounding but nonsensical text when fed:
+        - AI's own speech leaking through speakers
+        - Background noise (fan, AC, traffic)  
+        - Very short audio clips with ambient sound
+        
+        Returns True if the text is likely a hallucination.
+        """
+        if not raw_text: return True
+        text = raw_text.lower().strip()
+        words = text.split()
+        word_count = len(words)
+        
+        # 1. Check for exact hallucination phrases (Whisper generates these from noise)
+        exact_hallucinations = [
+            "thank you.", "thanks.", "bye.", "bye bye.", "goodbye.",
+            "thank you for watching.", "thanks for watching.",
+            "please subscribe.", "see you next time.",
+            "you", "thank you", "thanks", "bye", "hmm", "huh",
+            "okay", "ok", "oh", "ah", "um", "uh", "so", "yeah",
+        ]
+        if text.rstrip('.!?,') in exact_hallucinations:
+            logger.info(f"[HALLUCINATION] Exact match: '{text}'")
+            return True
+        
+        # 2. Repetitive word pattern (yar yar yar, hmm hmm hmm, etc.)
+        if word_count >= 3:
+            unique_words = set(w.strip('.,!?') for w in words)
+            if len(unique_words) <= 2:
+                logger.info(f"[HALLUCINATION] Repetitive: '{text}' ({len(unique_words)} unique words)")
+                return True
+        
+        # 3. Very short with no real content (< 4 real words after removing fillers)
+        fillers = {'uh', 'um', 'oh', 'ah', 'eh', 'hmm', 'huh', 'so', 'like', 'okay', 
+                   'ok', 'yeah', 'well', 'right', 'and', 'but', 'the', 'a', 'i', 'im',
+                   "i'm", 'gonna', 'going', 'to', 'be', 'its', "it's"}
+        real_words = [w.strip('.,!?') for w in words if w.strip('.,!?') not in fillers and len(w.strip('.,!?')) > 1]
+        if len(real_words) < 2 and word_count <= 8:
+            logger.info(f"[HALLUCINATION] Too few real words: {len(real_words)} in '{text}'")
+            return True
+        
+        # 4. Grammatically broken patterns (Whisper noise artifacts)
+        broken_patterns = [
+            r'\b(\w+)\s+\1\s+\1',  # Triple word: "yar yar yar"
+            r'very\s+too\b',        # "very too" is never valid English
+            r'\bfriends\s+are\s+very\s+too\b',  # Specific hallucination seen in logs
+            r'\bgonna\s+(?:say|be)\s.*gonna\s+(?:say|be)',  # Repeated "gonna say/be"
+            r'(?:hm+\s*){3,}',      # "hmm hmm hmm"
+            r'(?:ya+r?\s*[,.]?\s*){3,}',  # "yar, yar, yar"
+        ]
+        for pattern in broken_patterns:
+            if re.search(pattern, text):
+                logger.info(f"[HALLUCINATION] Broken pattern in: '{text}'")
+                return True
+        
+        # 5. Whisper "echo" detection — if transcript sounds like it's repeating the AI question
+        # These are common when mic picks up AI's TTS playback
+        ai_echo_phrases = [
+            "please continue", "let me ask", "here's a question",
+            "let's move on", "that's interesting", "good to know",
+            "tell me about", "can you describe", "what do you think",
+            "great to hear", "let's get to know", "nice chatting",
+            "how are you doing", "ready to get started",
+            "welcome to your", "weekly interview", "three rounds",
+            "communication round", "technical round", "hr round",
+            "behavioral questions",
+        ]
+        echo_matches = sum(1 for phrase in ai_echo_phrases if phrase in text)
+        if echo_matches >= 2:
+            logger.info(f"[HALLUCINATION] AI echo detected ({echo_matches} matches): '{text[:60]}'")
+            return True
+        
+        # 6. Nonsense words commonly generated by Whisper from noise
+        nonsense_words = [
+            'bama', 'aum', 'namaste', 'shukriya', 'dhanyavaad',
+            'hauptrablers', 'kafir', 'kristian', 'corazn', 'servicio',
+            'kampf', 'anarchist', 'cornered', 'puppet', 'taser',
+            'pewdiepie', 'morpheus', 'voldemort',
+        ]
+        nonsense_count = sum(1 for w in words if w.strip('.,!?') in nonsense_words)
+        if nonsense_count >= 1 and word_count <= 5:
+            logger.info(f"[HALLUCINATION] Nonsense words in short text: '{text}'")
+            return True
+        
+        return False
 
     def _remove_hallucinations(self, text):
         if not text: return ""
@@ -891,9 +932,7 @@ class WI_OptimizedAudioProcessor:
         cleaned = ""
         for char in result:
             if char.isascii() or char in ".,?!'\"- ": cleaned += char
-        cleaned = re.sub(r'[.]{2,}', '.', cleaned)
-        cleaned = re.sub(r'[,]{2,}', ',', cleaned)
-        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = re.sub(r'[.]{2,}', '.', cleaned); cleaned = re.sub(r'[,]{2,}', ',', cleaned); cleaned = re.sub(r'\s+', ' ', cleaned)
         words = cleaned.split()
         if len(words) > 3:
             deduped = []; repeat_count = 0; last_word = ""
@@ -913,8 +952,7 @@ class WI_OptimizedAudioProcessor:
         real_speech_indicators = {'i', 'we', 'my', 'our', 'the', 'this', 'that', 'is', 'are', 'was', 'were', 'have', 'has', 'had', 'do', 'did', 'work', 'worked', 'use', 'used', 'project', 'system', 'data', 'client', 'team', 'experience', 'years', 'developed', 'created', 'managed', 'handled', 'implemented', 'configured', 'learned', 'know', 'think', 'believe', 'like', 'want', 'need', 'yes', 'no', 'because', 'so', 'and', 'but', 'or', 'for', 'with'}
         text_lower = text.lower()
         indicator_count = sum(1 for word in real_speech_indicators if word in text_lower)
-        indicator_score = min(indicator_count / 5, 1.0)
-        length_score = min(word_count / 10, 1.0)
+        indicator_score = min(indicator_count / 5, 1.0); length_score = min(word_count / 10, 1.0)
         gibberish_penalty = 0.0
         unique_ratio = len(set(words)) / len(words) if words else 0
         if unique_ratio < 0.5: gibberish_penalty += 0.3
@@ -930,26 +968,13 @@ class WI_OptimizedAudioProcessor:
         return text
 
 # =============================================================================
-# WI CONVERSATION MANAGER - Main Logic (UNCHANGED)
+# WI CONVERSATION MANAGER - Main Logic
 # =============================================================================
 
 class WI_OptimizedConversationManager:
     def __init__(self, client_manager): self.client_manager = client_manager
     def _detect_user_intent(self, user_response):
-        """Detect if user wants to skip, repeat, or can't answer.
-
-        Uses full-phrase matching instead of bare substring matching to avoid
-        false positives like 'I don't want to repeat the question' being
-        classified as a repeat request, or 'I never skip meals' as skip.
-
-        Rules:
-        - Only match explicit request phrases (e.g. 'please repeat', 'repeat the question')
-        - Ignore if 'repeat'/'skip' appears in a normal sentence context
-        - Negations like 'don't repeat', 'no need to repeat' are NOT repeat requests
-        """
         r = user_response.lower().strip()
-
-        # --- SKIP detection: must be an explicit request to skip ---
         skip_phrases = [
             "skip this question", "skip the question", "skip question",
             "next question", "next question please", "move on",
@@ -957,13 +982,10 @@ class WI_OptimizedConversationManager:
             "i want to skip", "can we skip", "please skip",
             "can you skip", "skip please", "go to next",
         ]
-        # Also match very short responses that are just "skip", "next", "pass"
         if r in ["skip", "next", "pass", "next please", "skip please"]:
             return "skip"
         if any(phrase in r for phrase in skip_phrases):
             return "skip"
-
-        # --- REPEAT detection: must be an explicit request to hear question again ---
         repeat_phrases = [
             "repeat the question", "repeat that question", "repeat question",
             "can you repeat", "could you repeat", "please repeat",
@@ -973,21 +995,16 @@ class WI_OptimizedConversationManager:
             "can you say that again", "one more time", "come again",
             "tell me the question again", "ask me again", "repeat it",
         ]
-        # Very short responses that are just "repeat" or "repeat please"
         if r in ["repeat", "repeat please", "say again", "come again", "pardon"]:
             return "repeat"
-        # Check for explicit repeat request phrases
         if any(phrase in r for phrase in repeat_phrases):
-            # But NOT if they're saying "don't repeat" / "no need to repeat" / "I don't want to repeat"
             negation_patterns = ["don't repeat", "dont repeat", "do not repeat",
                                "no need to repeat", "not repeat", "without repeat",
                                "don't want to repeat", "dont want to repeat",
                                "no repeat", "stop repeat"]
             if any(neg in r for neg in negation_patterns):
-                return "normal"  # User is talking about repeating, not requesting it
+                return "normal"
             return "repeat"
-
-        # --- CAN'T ANSWER detection ---
         cant_answer_phrases = [
             "i don't know", "i dont know", "i'm not sure", "im not sure",
             "no idea", "can't answer", "cant answer", "don't remember",
@@ -996,44 +1013,21 @@ class WI_OptimizedConversationManager:
         ]
         if any(phrase in r for phrase in cant_answer_phrases):
             return "dont_know"
-
         return "normal"
+
     def _is_gibberish(self, text):
-        """Detect gibberish including Whisper hallucinations.
-        
-        Whisper hallucinations look like real English but are incoherent:
-        - "bow is getting the milk, and already, uh, so, yeah"
-        - "the soviet union yeah yeah sorry haste da proprio"
-        - "taiwan on the left i, uh, we, uh, we, uh, uh, si, uh"
-        
-        We detect these by checking for:
-        1. Non-ASCII content
-        2. Excessive repetition
-        3. Known hallucination phrases
-        4. Too many filler words (uh, um, so, yeah, okay)
-        5. Random unrelated nouns (Whisper invents topics)
-        6. Excessive commas/fragments (Whisper joins random phrases)
-        """
         if not text: return True
         text_lower = text.lower().strip()
         words = text_lower.split()
         word_count = len(words)
-        
-        # Basic checks
         ascii_chars = sum(1 for c in text if c.isascii())
         if len(text) > 0 and (ascii_chars / len(text)) < 0.8: return True
-        
-        # Repetition check
         if word_count > 5:
             unique_ratio = len(set(words)) / word_count
             if unique_ratio < 0.3: return True
-        
-        # Nonsense patterns (repeated chars/words)
         nonsense_patterns = [r'(.)\1{4,}', r'\b(\w+)\s+\1\s+\1\s+\1']
         for pattern in nonsense_patterns:
             if re.search(pattern, text_lower): return True
-        
-        # Known Whisper hallucination phrases
         hallucinations = [
             "thank you for watching", "please subscribe", "like and subscribe",
             "see you next time", "bye bye bye", "youtube", "mcdonald",
@@ -1041,18 +1035,11 @@ class WI_OptimizedConversationManager:
             "the speaker is answering", "interview response",
         ]
         if any(h in text_lower for h in hallucinations): return True
-        
-        # ── NEW: Whisper hallucination pattern detection ──
-        
-        # 1. Too many filler words = Whisper filling gaps with fillers
         fillers = ['uh', 'um', 'oh', 'ah', 'eh', 'so', 'yeah', 'like', 'okay', 'right', 'well']
         filler_count = sum(1 for w in words if w.strip('.,!?') in fillers)
         if word_count > 5 and filler_count / word_count > 0.35:
             logger.info(f"[GIBBERISH] Too many fillers: {filler_count}/{word_count} = {filler_count/word_count:.0%}")
             return True
-        
-        # 2. Random unrelated nouns that Whisper hallucinates
-        # These NEVER appear in a real SAP/tech interview answer
         whisper_random_nouns = [
             'milk', 'bomb', 'taiwan', 'soviet', 'penguin', 'puppet', 'taser',
             'iphone', 'platinum', 'kiss', 'cornered', 'lung', 'dance',
@@ -1065,15 +1052,9 @@ class WI_OptimizedConversationManager:
         if random_noun_count >= 2:
             logger.info(f"[GIBBERISH] Whisper random nouns detected: {random_noun_count}")
             return True
-        
-        # 3. Too many short fragments joined by commas = Whisper joining random phrases
-        # Real speech: "I used SCC4 to create clients and then copied using SCCL"
-        # Whisper garbage: "bow, getting, milk, and, already, uh, so, yeah, but"
         if word_count > 10:
             comma_count = text_lower.count(',')
             if comma_count > word_count * 0.25:
-                # Many commas AND low coherence = gibberish
-                # Check if there are any meaningful tech words
                 tech_words = ['sap', 'client', 'transaction', 'system', 'data', 'server',
                              'config', 'table', 'module', 'basis', 'abap', 'fiori', 'user',
                              'scc4', 'sccl', 'scc3', 'rfc', 'sm50', 'su01', 'se09']
@@ -1081,36 +1062,22 @@ class WI_OptimizedConversationManager:
                 if not has_any_tech:
                     logger.info(f"[GIBBERISH] Too many commas ({comma_count}) with no tech content")
                     return True
-        
-        # 4. Very long response with no coherent structure = Whisper hallucinating paragraphs
-        # Real answers have sentences. Whisper garbage jumps topics every few words.
         if word_count > 30:
             sentences = re.split(r'[.!?]', text_lower)
             sentences = [s.strip() for s in sentences if len(s.strip()) > 3]
             if len(sentences) < 2:
-                # 30+ words but no sentence breaks = likely garbage
                 filler_ratio = filler_count / word_count if word_count > 0 else 0
                 if filler_ratio > 0.2:
                     logger.info(f"[GIBBERISH] Long text, no sentences, high fillers")
                     return True
-        
-        # 5. COMBINED SCORE: Multiple weak signals together = gibberish
-        # A real answer might have some fillers OR one random noun, but NOT both.
-        # Whisper hallucinations trigger multiple weak signals at once.
         if word_count > 8:
             gibberish_score = 0.0
             filler_ratio = filler_count / word_count
-            
-            # Filler contribution (0-0.4)
             if filler_ratio > 0.25: gibberish_score += 0.35
             elif filler_ratio > 0.15: gibberish_score += 0.2
             elif filler_ratio > 0.08: gibberish_score += 0.1
-            
-            # Random noun contribution (0-0.4)
             if random_noun_count >= 2: gibberish_score += 0.4
             elif random_noun_count == 1: gibberish_score += 0.25
-            
-            # No tech content contribution (0-0.3)
             tech_words = ['sap', 'client', 'transaction', 'system', 'data', 'server',
                          'config', 'table', 'module', 'basis', 'abap', 'fiori', 'user',
                          'scc4', 'sccl', 'scc3', 'rfc', 'sm50', 'su01', 'se09',
@@ -1118,27 +1085,116 @@ class WI_OptimizedConversationManager:
                          'instance', 'dispatcher', 'kernel', 'parameter', 'landscape']
             has_any_tech = any(tw in text_lower for tw in tech_words)
             if not has_any_tech: gibberish_score += 0.3
-            
-            # High comma ratio contribution (0-0.15)
             comma_count = text_lower.count(',')
             if comma_count > word_count * 0.2: gibberish_score += 0.15
-            
-            # Threshold: if combined score >= 0.50, it's gibberish
             if gibberish_score >= 0.50:
                 logger.info(f"[GIBBERISH] Combined score {gibberish_score:.2f} (fillers={filler_ratio:.0%}, random_nouns={random_noun_count}, tech={has_any_tech})")
                 return True
-        
         return False
-    def _assess_answer_quality(self, user_response):
+
+    def _is_off_topic(self, user_response, stage, session=None):
+        """Detect if user's answer is completely unrelated to the current round.
+        
+        Returns (True, detected_topic) if off-topic, (False, None) if on-topic.
+        
+        Rules:
+        - Communication round: almost everything is on-topic (casual chat)
+        - Technical round: must relate to tech/work/projects — NOT movies, food, shopping
+        - HR round: must relate to work experiences, behavior, career — NOT random topics
+        """
+        if stage == WI_InterviewStage.COMMUNICATION:
+            return False, None  # Casual round, anything goes
+        
+        if stage == WI_InterviewStage.INTRODUCTION:
+            return False, None
+        
+        r = user_response.lower().strip()
+        words = r.split()
+        word_count = len(words)
+        
+        # Very short answers — handled by "weak" quality, not off-topic
+        if word_count < 5:
+            return False, None
+        
+        # ── Off-topic indicators: topics that NEVER belong in tech/HR answers ──
+        off_topic_categories = {
+            "movies/entertainment": ['movie', 'film', 'netflix', 'series', 'episode', 'actor', 'actress', 'bollywood', 'hollywood', 'avengers', 'marvel', 'dc comics', 'spider-man', 'batman'],
+            "food/cooking": ['recipe', 'cooking', 'biryani', 'pizza', 'burger', 'restaurant', 'kitchen', 'ingredients', 'breakfast', 'lunch', 'dinner', 'snack', 'dessert', 'ice cream'],
+            "shopping": ['shopping', 'mall', 'bought clothes', 'discount', 'sale', 'amazon order', 'flipkart', 'online shopping', 'market', 'grocery'],
+            "sports/games": ['cricket match', 'ipl', 'football match', 'world cup', 'scored goals', 'batting', 'bowling', 'pubg', 'free fire', 'gaming'],
+            "social media": ['instagram', 'snapchat', 'tiktok', 'reels', 'followers', 'viral video', 'trending', 'influencer'],
+            "personal life": ['girlfriend', 'boyfriend', 'dating', 'wedding', 'party last night', 'went to beach', 'vacation photos', 'temple visit', 'pilgrimage'],
+            "random topics": ['weather today', 'traffic jam', 'politics', 'election', 'petrol price', 'gold rate', 'stock market crash', 'lottery', 'horoscope', 'zodiac'],
+        }
+        
+        detected_category = None
+        off_topic_matches = 0
+        
+        for category, keywords in off_topic_categories.items():
+            for kw in keywords:
+                if kw in r:
+                    off_topic_matches += 1
+                    detected_category = category
+        
+        # Need at least 1 off-topic keyword match
+        if off_topic_matches == 0:
+            return False, None
+        
+        # ── On-topic indicators: if user mentions ANY of these, it's likely on-topic ──
+        # (Even if they also mention food — e.g. "I configured the SAP system after lunch")
+        if stage == WI_InterviewStage.TECHNICAL:
+            tech_indicators = [
+                'sap', 'abap', 'fiori', 'hana', 'basis', 'client', 'transaction', 'tcode',
+                't-code', 'config', 'system', 'server', 'data', 'table', 'module', 'rfc',
+                'bapi', 'idoc', 'odata', 'transport', 'landscape', 'kernel', 'profile',
+                'python', 'javascript', 'react', 'node', 'api', 'database', 'mongodb',
+                'docker', 'aws', 'code', 'function', 'class', 'error', 'debug', 'deploy',
+                'project', 'implement', 'configure', 'develop', 'build', 'test', 'query',
+                'algorithm', 'architecture', 'framework', 'library', 'repository', 'git',
+                'sql', 'html', 'css', 'backend', 'frontend', 'microservice', 'pipeline',
+                'work', 'team', 'task', 'requirement', 'sprint', 'agile', 'production',
+            ]
+            # Also check session-extracted technologies
+            if session and session.extracted_technologies:
+                tech_indicators.extend([t.lower() for t in session.extracted_technologies])
+            
+            has_tech = any(t in r for t in tech_indicators)
+            if has_tech:
+                return False, None  # Has tech content, not off-topic
+            
+        elif stage == WI_InterviewStage.HR:
+            hr_indicators = [
+                'team', 'lead', 'manage', 'project', 'deadline', 'challenge', 'conflict',
+                'colleague', 'boss', 'manager', 'feedback', 'improve', 'learn', 'grow',
+                'career', 'goal', 'strength', 'weakness', 'decision', 'responsibility',
+                'initiative', 'collaborate', 'communicate', 'prioritize', 'pressure',
+                'failure', 'success', 'achievement', 'experience', 'situation', 'approach',
+                'problem', 'solution', 'work', 'office', 'company', 'organization',
+                'professional', 'skill', 'role', 'position', 'interview', 'internship',
+            ]
+            has_hr = any(t in r for t in hr_indicators)
+            if has_hr:
+                return False, None  # Has HR-relevant content
+        
+        # Off-topic keyword found AND no on-topic content → it's off-topic
+        logger.info(f"[OFF-TOPIC] Detected category: {detected_category}, matches: {off_topic_matches}")
+        return True, detected_category
+
+    def _assess_answer_quality(self, user_response, stage=None, session=None):
         if not user_response: return "silence"
         if self._is_gibberish(user_response): return "gibberish"
         intent = self._detect_user_intent(user_response)
         if intent != "normal": return "skip" if intent == "skip" else ("repeat" if intent == "repeat" else "cant_answer")
+        # Check for off-topic content (only in technical/HR rounds)
+        if stage and stage in [WI_InterviewStage.TECHNICAL, WI_InterviewStage.HR]:
+            is_offtopic, category = self._is_off_topic(user_response, stage, session)
+            if is_offtopic: return "off_topic"
         words = len(user_response.split())
         if words <= 3: return "weak"
         strong = ["because", "therefore", "for example", "specifically", "implemented", "experience", "i think", "used", "worked", "built", "designed", "configured", "created", "developed", "managed", "handled"]
         if words >= 20 and any(k in user_response.lower() for k in strong): return "strong"
         return "neutral" if words >= 10 else "weak"
+
     async def _evaluate_technical_accuracy(self, session, question, answer, expected_keywords):
         if not answer or len(answer.split()) < 3: return 0.0
         await self.client_manager.initialize()
@@ -1154,11 +1210,13 @@ class WI_OptimizedConversationManager:
                 matches = sum(1 for k in expected_keywords if k.lower() in answer_lower)
                 return min(matches / len(expected_keywords), 1.0)
             return 0.5 if len(answer.split()) > 10 else 0.3
+
     def _extract_topics_from_response(self, response, session=None):
         response_lower = response.lower()
         if session and session.extracted_technologies: return [t for t in session.extracted_technologies if t in response_lower]
         all_tech = ["python", "javascript", "react", "node", "api", "database", "mongodb", "mysql", "docker", "aws", "frontend", "backend", "testing", "debugging", "git", "sap", "abap", "fiori", "hana", "mm", "sd", "fico"]
         return [t for t in all_tech if t in response_lower]
+
     def _get_unique_transition(self, session):
         used = session.conversation_state.used_transitions
         available = [t for t in COMMUNICATION_TRANSITIONS if t not in used] or COMMUNICATION_TRANSITIONS
@@ -1166,10 +1224,12 @@ class WI_OptimizedConversationManager:
         session.conversation_state.used_transitions.append(t)
         if len(session.conversation_state.used_transitions) > 10: session.conversation_state.used_transitions = session.conversation_state.used_transitions[-10:]
         return t
+
     def _should_followup(self, session, quality):
         if quality in ["weak", "cant_answer", "silence", "skip", "repeat"]: return False
         if session.conversation_state.followups_on_topic >= 2: return False
         return random.random() < (0.6 if quality == "strong" else 0.4)
+
     def _extract_question_from_response(self, ai_message):
         if not ai_message: return "Could you please repeat your answer?"
         prefixes_to_remove = ["Of course! The question was:", "Sure, let me repeat:", "No problem! Here it is again:", "Let me repeat that:", "Here's the question again:"]
@@ -1187,10 +1247,12 @@ class WI_OptimizedConversationManager:
             last_q_idx = cleaned.rfind('?')
             return cleaned[:last_q_idx + 1].strip()
         return cleaned
+
     def _adjust_difficulty(self, session, quality):
         if session.current_stage != WI_InterviewStage.TECHNICAL: return
         if quality == "strong": session.current_difficulty = "hard" if session.current_difficulty == "medium" else "medium"
         elif quality in ["weak", "cant_answer"]: session.current_difficulty = "easy"
+
     async def _generate_communication_question(self, session, is_first=False):
         await self.client_manager.initialize()
         asked = session.get_questions_asked_in_round(WI_InterviewStage.COMMUNICATION)
@@ -1208,6 +1270,7 @@ class WI_OptimizedConversationManager:
             if self._is_similar_question(q_lower, asked_q.lower()):
                 q = random.choice([f"What do you think about {chosen_topic}?", f"Tell me about your {chosen_topic}?", f"How do you feel about {chosen_topic}?"]); break
         return q if '?' in q else q + "?"
+
     def _is_similar_question(self, q1, q2):
         q1_clean = q1.lower().strip().rstrip('?').strip(); q2_clean = q2.lower().strip().rstrip('?').strip()
         if q1_clean == q2_clean: return True
@@ -1217,28 +1280,67 @@ class WI_OptimizedConversationManager:
         if len(words1) == 0 or len(words2) == 0: return False
         overlap = len(words1 & words2); min_len = min(len(words1), len(words2))
         return overlap / min_len > 0.4
-    def _get_off_topic_response(self):
-        """Return a random polite off-topic redirect. Never repeats consecutively."""
-        responses = [
-            "I think you might not be aware of that, let me ask you something different.",
-            "No worries, let me move on to a different question.",
-            "That's okay, I'll ask you something else instead.",
-            "I see, let me try a different topic.",
-            "Alright, let's switch to another question.",
-            "No problem at all, let me ask you something you might be more familiar with.",
-            "That's fine, I'll move on to a different one.",
-            "Okay, don't worry about that, here's another question for you.",
-            "Let me ask you something different instead.",
-            "I understand, let's try a different question.",
-            "That doesn't quite answer the question, but no worries, let me ask another one.",
-            "Let me come back to something else.",
-        ]
+
+    def _get_off_topic_response(self, session=None, stage=None):
+        """Return a context-aware off-topic redirect.
+        
+        - 1st off-topic: gentle redirect
+        - 2nd off-topic: firmer redirect mentioning the round
+        - 3rd+ off-topic: firm redirect + warning
+        """
+        if not hasattr(self, '_consecutive_off_topic'): self._consecutive_off_topic = 0
+        self._consecutive_off_topic += 1
+        
+        # Get current round name for context
+        round_name = "this topic"
+        if stage == WI_InterviewStage.TECHNICAL:
+            round_name = "your technical work"
+            if session and session.extracted_technologies:
+                current_techs = [t for t in session.extracted_technologies if t not in (session.silent_topics or [])]
+                if current_techs:
+                    round_name = f"your work with {current_techs[0]}"
+        elif stage == WI_InterviewStage.HR:
+            round_name = "your work experiences and professional situations"
+        
+        if self._consecutive_off_topic >= 3:
+            # Firm warning
+            responses = [
+                f"I notice your answers aren't related to {round_name}. Please try to focus on the question. Let me ask another one.",
+                f"We need to stay focused on {round_name}. Let me try a different question.",
+                f"That's not related to what I asked. Let's get back to {round_name}.",
+            ]
+        elif self._consecutive_off_topic >= 2:
+            # Medium redirect
+            responses = [
+                f"That doesn't seem related to {round_name}. No worries, let me ask something else.",
+                f"I think that's a bit off-topic. Let me ask about {round_name} instead.",
+                f"Let's focus on {round_name}. Here's a different question.",
+            ]
+        else:
+            # Gentle redirect (1st time)
+            responses = [
+                "I think you might not be aware of that, let me ask you something different.",
+                "No worries, let me move on to a different question.",
+                "That's okay, I'll ask you something else instead.",
+                "I see, let me try a different topic.",
+                "Alright, let's switch to another question.",
+                "No problem at all, let me ask you something you might be more familiar with.",
+                "That's fine, I'll move on to a different one.",
+                "Okay, don't worry about that, here's another question for you.",
+                "Let me ask you something different instead.",
+                "I understand, let's try a different question.",
+            ]
+        
         if not hasattr(self, '_last_off_topic_idx'): self._last_off_topic_idx = -1
         idx = random.randint(0, len(responses) - 1)
         while idx == self._last_off_topic_idx and len(responses) > 1:
             idx = random.randint(0, len(responses) - 1)
         self._last_off_topic_idx = idx
         return responses[idx]
+    
+    def _reset_off_topic_counter(self):
+        """Reset consecutive off-topic counter when user gives an on-topic answer."""
+        self._consecutive_off_topic = 0
 
     async def _generate_dynamic_ack(self, context, tone="friendly"):
         await self.client_manager.initialize()
@@ -1260,12 +1362,14 @@ class WI_OptimizedConversationManager:
         except:
             fallbacks = {"weak": "I see. Let me ask something else.", "good": "Nice!", "technical_good": "Good explanation!", "technical_weak": "Okay, let's try another one.", "cant_answer": "No problem! Let's move on.", "transition": "Interesting!", "hr": "Thank you."}
             return fallbacks.get(tone, "Okay!")
+
     async def _generate_communication_followup(self, session, user_response):
         await self.client_manager.initialize()
         prompt = f"""User said: "{user_response[:100]}"\nGenerate a short follow-up question. MAX 12 words."""
         resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.8, max_tokens=30)
         q = resp.choices[0].message.content.strip()
         return q if '?' in q else q + "?"
+
     async def _generate_technical_question(self, session, user_response="", include_behavioral=False):
         await self.client_manager.initialize()
         if not hasattr(session, 'total_technical_questions_generated'): session.total_technical_questions_generated = 0
@@ -1285,7 +1389,7 @@ class WI_OptimizedConversationManager:
             has_irrelevant = any(irr in response_lower for irr in irrelevant)
             is_bad_answer = (word_count < 8 or is_repetitive or has_irrelevant or any(indicator == response_lower.strip() for indicator in bad_indicators) or (word_count < 15 and not has_tech_content))
             if is_bad_answer:
-                response_quality = "bad"; prefix = self._get_off_topic_response() + " "
+                response_quality = "bad"; prefix = self._get_off_topic_response(session=session, stage=WI_InterviewStage.TECHNICAL) + " "
                 if session.exchanges:
                     last_q = session.exchanges[-1].ai_message.lower()
                     for tech in (session.extracted_technologies or []):
@@ -1308,6 +1412,7 @@ class WI_OptimizedConversationManager:
         full_question = f"{prefix}{question}" if prefix else question
         if chosen_tech not in session.technical_topics_covered: session.technical_topics_covered.append(chosen_tech)
         return full_question, [chosen_tech]
+
     async def _generate_technical_behavioral_question_dynamic(self, session, technologies, all_asked, prefix=""):
         await self.client_manager.initialize()
         tech_idx = session.current_tech_index % len(technologies); chosen_tech = technologies[tech_idx]
@@ -1345,28 +1450,38 @@ Generate ONE specific question (MAX 25 words):"""
         session.used_behavioral_questions.append(question)
         logger.info(f"[WI] Technical Behavioral (Dynamic): {question[:60]}...")
         return full_question, [chosen_tech, "technical_behavioral"]
+
     async def _generate_dynamic_question_from_summary(self, session, tech, all_asked):
         await self.client_manager.initialize()
         summary = session.content_context or "General technical work"
 
-        # ── Question Type Rotation ──
-        # Rotate through different question types so we don't ask
-        # "describe a challenge..." every single time.
-        # 40% definition, 30% practical, 20% scenario, 10% comparison
-        if not hasattr(session, '_question_type_index'): session._question_type_index = 0
-        question_types = [
-            "definition", "practical", "definition", "practical",
-            "scenario", "definition", "practical", "comparison",
-            "scenario", "definition",
-        ]
-        q_type = question_types[session._question_type_index % len(question_types)]
+        # ── FIX 1: Question Type Rotation (8 types, shuffled per session) ──
+        # Each session gets a random order of 8 fundamentally different question types
+        # This ensures variety at scale — no two interviews feel the same
+        if not hasattr(session, '_question_type_order'):
+            session._question_type_order = [
+                "theory", "practical", "scenario", "troubleshooting",
+                "comparison", "architecture", "best_practice", "real_world",
+            ]
+            random.shuffle(session._question_type_order)
+            session._question_type_index = 0
+
+        q_type = session._question_type_order[session._question_type_index % len(session._question_type_order)]
         session._question_type_index += 1
 
+        # Track recent question starters to avoid repetitive phrasing
+        if not hasattr(session, '_recent_q_starters'): session._recent_q_starters = []
+        avoid_starters = ", ".join(session._recent_q_starters[-3:]) if session._recent_q_starters else "none"
+
         type_instructions = {
-            "definition": f"Ask a DIRECT KNOWLEDGE question about {tech}. Examples:\n- 'What is {tech} and what is its purpose?'\n- 'What are the key features of {tech}?'\n- 'Explain the role of {tech} in SAP.'\nDo NOT ask about challenges or scenarios. Just test their knowledge.",
-            "practical": f"Ask a HOW-TO / PRACTICAL question about {tech}. Examples:\n- 'How do you perform [specific task] using {tech}?'\n- 'What are the steps to configure {tech}?'\n- 'Walk me through the process of using {tech}.'\nAsk about the PROCESS, not about challenges faced.",
-            "scenario": f"Ask a SCENARIO-BASED question about {tech}. Examples:\n- 'Describe a situation where you used {tech} to solve a problem.'\n- 'Tell me about a challenge you faced with {tech}.'\nAsk about a REAL experience with {tech}.",
-            "comparison": f"Ask a COMPARISON or DIFFERENCE question about {tech}. Examples:\n- 'What is the difference between [concept A] and [concept B] in {tech}?'\n- 'When would you use [approach A] vs [approach B] with {tech}?'\nAsk them to compare or differentiate concepts.",
+            "theory": f"Ask a CONCEPT KNOWLEDGE question about {tech}. Test what they know.\nExamples: 'What is {tech}?', 'What are the key features of {tech}?', 'Explain the purpose of {tech}.'\nDo NOT ask about challenges. Just test their understanding.",
+            "practical": f"Ask a HOW-TO / STEPS question about {tech}. Ask about the PROCESS.\nExamples: 'How do you configure {tech}?', 'What steps do you follow to set up {tech}?', 'Walk me through using {tech}.'",
+            "scenario": f"Ask a REAL EXPERIENCE question about {tech}. Ask about a SPECIFIC situation they faced.\nExamples: 'Tell me about a time you used {tech} to solve a problem.', 'Describe a project where {tech} was critical.'",
+            "troubleshooting": f"Ask a DEBUGGING / ERROR HANDLING question about {tech}.\nExamples: 'What would you do if {tech} threw an error?', 'How do you troubleshoot issues with {tech}?', 'What common problems occur with {tech}?'",
+            "comparison": f"Ask a COMPARE / DIFFERENTIATE question about {tech}.\nExamples: 'What is the difference between [X] and [Y] in {tech}?', 'When would you choose [approach A] over [approach B]?'",
+            "architecture": f"Ask a SYSTEM DESIGN / ARCHITECTURE question about {tech}.\nExamples: 'How does {tech} fit into the overall system?', 'What components interact with {tech}?', 'How would you design a solution using {tech}?'",
+            "best_practice": f"Ask a BEST PRACTICES / STANDARDS question about {tech}.\nExamples: 'What best practices do you follow with {tech}?', 'How do you ensure quality when working with {tech}?', 'What mistakes should be avoided?'",
+            "real_world": f"Ask for a SPECIFIC REAL EXAMPLE from their work with {tech}.\nExamples: 'Give me a concrete example of how you used {tech}.', 'What was the output or result of your {tech} work?', 'Show me your understanding with a real example.'",
         }
 
         prompt = f"""Generate ONE technical interview question for a candidate.
@@ -1388,22 +1503,25 @@ STRICT RULES:
 ALREADY ASKED (DO NOT REPEAT OR ASK SIMILAR):
 {chr(10).join(all_asked[-15:])}
 
+PHRASING RULE: Do NOT start the question with the same words as recent questions.
+Recent question starters to AVOID: {avoid_starters}
+
 MAX 20 words. Just the question:"""
         try:
             resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.8, max_tokens=50)
             question = resp.choices[0].message.content.strip().strip('"').strip("'")
             if not question.endswith('?'): question += '?'
+            # Track question starter for anti-repetition
+            first_words = ' '.join(question.split()[:3])
+            session._recent_q_starters.append(first_words)
+            if len(session._recent_q_starters) > 6: session._recent_q_starters = session._recent_q_starters[-6:]
             logger.info(f"[WI] Technical Q ({q_type}): {question[:60]}...")
             return question
         except Exception as e:
             logger.error(f"Error generating dynamic question: {e}")
             return f"Tell me more about your experience with {tech}?"
-            return question
-        except Exception as e:
-            logger.error(f"Error generating dynamic question: {e}")
-            return f"Tell me more about your experience with {tech}?"
+
     def _get_encouragement(self):
-        """Positive ack for genuinely good answers (20+ words with tech content)."""
         responses = [
             "Good explanation.", "Well explained.", "Good answer.", "Right, good.",
             "That's correct.", "Good point.", "Nice, you know this well.",
@@ -1416,6 +1534,7 @@ MAX 20 words. Just the question:"""
             idx = random.randint(0, len(responses) - 1)
         self._last_enc_idx = idx
         return responses[idx]
+
     async def _generate_followup_from_answer(self, session, user_response, all_asked):
         await self.client_manager.initialize()
         summary = session.content_context[:500] if session.content_context else ""
@@ -1439,6 +1558,7 @@ MAX 15 words. Just the question:"""
             if not is_duplicate: return question
         except: pass
         return None
+
     def _normalize_question(self, question):
         if not question: return ""
         q = question.lower().strip().rstrip('?').strip()
@@ -1543,24 +1663,22 @@ MAX 15 words. Just the question:"""
         resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.7, max_tokens=30)
         q = resp.choices[0].message.content.strip()
         return q if '?' in q else q + "?"
+
     async def generate_first_question(self, session): return await self.generate_introduction(session)
+
     async def generate_introduction(self, session):
         return f"""Hello {session.student_name}! Welcome to your weekly interview session. I'm excited to chat with you today!\n\nWe'll have three rounds:\n• First, a Communication round (about 5 minutes) where we'll have a casual conversation and get to know each other.\n• Then, a Technical round (about 25 minutes) where we'll discuss your recent work and technical knowledge.\n• Finally, an HR round (about 10 minutes) with some behavioral questions.\n\nSo, how are you doing today? Ready to get started?"""
+
     async def generate_silence_response(self, session):
+        # Increment here — this is the single source of truth for silence counting
         session.silence_prompt_count += 1
         responses = [
-            "Take your time.",
-            "I'm here when you're ready.",
-            "Would you like me to repeat the question?",
-            "No rush, think about it.",
-            "It's okay, take a moment to think.",
-            "Whenever you're ready, go ahead.",
-            "No hurry, I'll wait.",
-            "Feel free to take your time and answer.",
-            "Don't worry, there's no pressure.",
-            "I understand, take as much time as you need.",
-            "You can answer whenever you're comfortable.",
-            "It's completely fine, take a moment.",
+            "Take your time.", "I'm here when you're ready.",
+            "Would you like me to repeat the question?", "No rush, think about it.",
+            "It's okay, take a moment to think.", "Whenever you're ready, go ahead.",
+            "No hurry, I'll wait.", "Feel free to take your time and answer.",
+            "Don't worry, there's no pressure.", "I understand, take as much time as you need.",
+            "You can answer whenever you're comfortable.", "It's completely fine, take a moment.",
         ]
         if not hasattr(session, '_last_silence_idx'): session._last_silence_idx = -1
         idx = random.randint(0, len(responses) - 1)
@@ -1571,23 +1689,33 @@ MAX 15 words. Just the question:"""
 
     async def generate_fast_response(self, session, user_response, db_manager=None):
         await self.client_manager.initialize()
-        quality = self._assess_answer_quality(user_response)
+        quality = self._assess_answer_quality(user_response, stage=session.current_stage, session=session)
         logger.info(f"[WI] Quality: {quality}, Stage: {session.current_stage.value}")
         if quality != "silence": session.silence_prompt_count = 0
         session.conversation_state.last_user_response = user_response
         mentioned_tech = self._extract_topics_from_response(user_response, session)
         session.conversation_state.user_mentioned_tech.extend(mentioned_tech)
+
+        # ── FIX 2: Pure question on repeat — no prefix, no add_exchange ──
         if quality == "repeat":
             if session.exchanges:
-                if session.conversation_state.last_pure_question: original_question = session.conversation_state.last_pure_question
+                # Priority 1: Session-level question (survives round transitions)
+                if session._last_real_question:
+                    original_question = session._last_real_question
+                # Priority 2: Conversation state question (current round)
+                elif session.conversation_state.last_pure_question: 
+                    original_question = session.conversation_state.last_pure_question
+                # Priority 3: Extract from last exchange
                 else:
                     last_ai_msg = session.exchanges[-1].ai_message
                     original_question = self._extract_question_from_response(last_ai_msg)
-                repeat_response = f"{random.choice(REPEAT_RESPONSES)} {original_question}"
                 session.last_was_repeat = True
-                logger.info(f"[WI] REPEAT detected - repeating question: {original_question[:50]}...")
-                return repeat_response
+                # Return ONLY the pure question — no "Of course!" prefix
+                # main.py will skip add_exchange so question number stays same
+                logger.info(f"[WI] REPEAT detected - repeating ONLY question: {original_question[:80]}...")
+                return original_question
             return "Let me start with a question!"
+
         session.last_was_repeat = False
         logger.info(f"[WI] Normal response - last_was_repeat=False")
         if session.current_stage == WI_InterviewStage.INTRODUCTION:
@@ -1629,7 +1757,6 @@ MAX 15 words. Just the question:"""
                 session.conversation_state.followups_on_topic += 1; q = await self._generate_communication_followup(session, user_response); session.add_exchange(q, question_type="communication", is_followup=True); ack = await self._generate_dynamic_ack("good response", "good"); return f"{ack} {q}"
             q = await self._generate_communication_question(session); session.add_exchange(q, question_type="communication"); session.conversation_state.followups_on_topic = 0; ack = await self._generate_dynamic_ack("transition", "transition"); return f"{ack} {q}"
         if session.current_stage == WI_InterviewStage.TECHNICAL:
-            # Evaluate accuracy FIRST — this tells us if the answer is actually correct
             accuracy = 0.0
             if session.exchanges and session.exchanges[-1].question_type == "technical":
                 last_ex = session.exchanges[-1]
@@ -1640,12 +1767,26 @@ MAX 15 words. Just the question:"""
             if quality == "skip":
                 q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("skip", "transition"); return f"{ack} {q}"
             if quality == "gibberish": return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
+            if quality == "off_topic":
+                logger.info(f"[WI] OFF-TOPIC detected in Technical round")
+                if session.exchanges:
+                    last_q = session.exchanges[-1].ai_message.lower()
+                    for tech in (session.extracted_technologies or []):
+                        if tech.lower() in last_q and tech not in session.silent_topics:
+                            session.topic_attempt_count[tech] = session.topic_attempt_count.get(tech, 0) + 1
+                            if session.topic_attempt_count[tech] >= 2: session.silent_topics.append(tech)
+                            break
+                session.current_difficulty = "easy"
+                q, keywords = await self._generate_technical_question(session, "", True)
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical", answer_quality="off_topic")
+                ack = self._get_off_topic_response(session=session, stage=WI_InterviewStage.TECHNICAL)
+                return f"{ack} {q}"
             if quality == "silence":
                 if session.exchanges:
                     last_q = session.exchanges[-1].ai_message.lower()
                     for tech in session.extracted_technologies:
                         if tech.lower() in last_q: session.topic_attempt_count[tech] = session.topic_attempt_count.get(tech, 0) + 1; (session.silent_topics.append(tech) if session.topic_attempt_count[tech] >= 2 and tech not in session.silent_topics else None); break
-                session.silence_prompt_count += 1
+                # Check BEFORE incrementing — generate_silence_response will increment
                 if session.silence_prompt_count >= 2:
                     session.silence_prompt_count = 0; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); return f"Let's try something different. {q}"
                 return await self.generate_silence_response(session)
@@ -1655,16 +1796,9 @@ MAX 15 words. Just the question:"""
                     for tech in session.extracted_technologies:
                         if tech.lower() in last_q: session.topic_attempt_count[tech] = session.topic_attempt_count.get(tech, 0) + 1; (session.silent_topics.append(tech) if session.topic_attempt_count[tech] >= 2 and tech not in session.silent_topics else None); break
                 session.current_difficulty = "easy"; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("cant answer technical", "cant_answer"); return f"{ack} {q}"
-
-            # ── ACCURACY-BASED RESPONSE (the key fix) ──
-            # Use the actual accuracy score to decide acknowledgment,
-            # not just word count / keyword presence.
-            #
-            # accuracy >= 0.7 → correct answer → praise + follow-up or next question
-            # accuracy 0.4-0.69 → partial answer → gentle ack + next question
-            # accuracy < 0.4 → wrong/unrelated → "not aware of this" + different question
+            # Reset off-topic counter on any on-topic answer
+            self._reset_off_topic_counter()
             if accuracy >= 0.7:
-                # GOOD answer — praise and maybe follow-up
                 if random.random() < 0.3:
                     q = await self._generate_smart_followup(session, user_response, WI_InterviewStage.TECHNICAL)
                     session.add_exchange(q, question_type="technical", is_followup=True)
@@ -1675,13 +1809,11 @@ MAX 15 words. Just the question:"""
                 ack = self._get_encouragement()
                 return f"{ack} {q}"
             elif accuracy >= 0.4:
-                # PARTIAL answer — gentle acknowledgment, move on
                 q, keywords = await self._generate_technical_question(session, user_response, True)
                 session.add_exchange(q, expected_keywords=keywords, question_type="technical")
                 ack = await self._generate_dynamic_ack("partial technical", "transition")
                 return f"{ack} {q}"
             else:
-                # WRONG / UNRELATED answer — tell them politely, ask different question
                 if session.exchanges:
                     last_q = session.exchanges[-1].ai_message.lower()
                     for tech in (session.extracted_technologies or []):
@@ -1693,10 +1825,9 @@ MAX 15 words. Just the question:"""
                 session.current_difficulty = "easy"
                 q, keywords = await self._generate_technical_question(session, "", True)
                 session.add_exchange(q, expected_keywords=keywords, question_type="technical")
-                ack = self._get_off_topic_response()
+                ack = self._get_off_topic_response(session=session, stage=WI_InterviewStage.TECHNICAL)
                 return f"{ack} {q}"
         if session.current_stage == WI_InterviewStage.HR:
-            # Evaluate accuracy FIRST
             accuracy = 0.0
             if session.exchanges and session.exchanges[-1].question_type == "hr":
                 last_ex = session.exchanges[-1]
@@ -1706,15 +1837,21 @@ MAX 15 words. Just the question:"""
             if quality == "skip":
                 q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); ack = await self._generate_dynamic_ack("skip", "transition"); return f"{ack} {q}"
             if quality == "gibberish": return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
+            if quality == "off_topic":
+                logger.info(f"[WI] OFF-TOPIC detected in HR round")
+                q, keywords = await self._generate_hr_question(session, db_manager)
+                session.add_exchange(q, expected_keywords=keywords, question_type="hr", answer_quality="off_topic")
+                ack = self._get_off_topic_response(session=session, stage=WI_InterviewStage.HR)
+                return f"{ack} {q}"
             if quality == "silence":
-                session.silence_prompt_count += 1
+                # Check BEFORE incrementing — generate_silence_response will increment
                 if session.silence_prompt_count >= 2:
                     session.silence_prompt_count = 0; q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); return f"Let's try a different question. {q}"
                 return await self.generate_silence_response(session)
             if quality == "cant_answer":
                 q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); ack = await self._generate_dynamic_ack("cant answer hr", "cant_answer"); return f"{ack} {q}"
-
-            # ── ACCURACY-BASED RESPONSE FOR HR ──
+            # Reset off-topic counter on any on-topic answer
+            self._reset_off_topic_counter()
             if accuracy >= 0.7:
                 if random.random() < 0.25:
                     q = await self._generate_smart_followup(session, user_response, WI_InterviewStage.HR)
@@ -1733,16 +1870,14 @@ MAX 15 words. Just the question:"""
             else:
                 q, keywords = await self._generate_hr_question(session, db_manager)
                 session.add_exchange(q, expected_keywords=keywords, question_type="hr")
-                ack = self._get_off_topic_response()
+                ack = self._get_off_topic_response(session=session, stage=WI_InterviewStage.HR)
                 return f"{ack} {q}"
         return "That's interesting. Tell me more?"
 
     async def generate_fast_evaluation(self, session) -> Tuple[str, Dict[str, float]]:
-        """Generate comprehensive evaluation with Q&A feedback format per round"""
         await self.client_manager.initialize()
         comm_exchanges = []; tech_exchanges = []; hr_exchanges = []; tech_accuracies = []; hr_accuracies = []
         for ex in session.exchanges:
-            # Skip exchanges that are just silence prompts or repeat confirmations (not real Q&A)
             if ex.answer_quality in ["silence", "gibberish"] and not ex.user_response:
                 continue
             exchange_data = {"question": ex.ai_message, "answer": ex.user_response if ex.user_response else "[SILENT - No response]", "is_silent": not ex.user_response or ex.answer_quality == "silence", "answer_quality": ex.answer_quality, "accuracy": ex.technical_accuracy}
@@ -1826,25 +1961,17 @@ confidence: X"""
             else:
                 if key == "technical": scores[f"{key}_score"] = round(tech_accuracy_avg * 10, 1)
                 else: scores[f"{key}_score"] = 5.0
-
-        # ── HARD SCORE CAPS ──
-        # Even if LLM gives generous scores, force them down based on real metrics.
-        # Technical score MUST reflect actual accuracy
-        tech_cap = tech_accuracy_avg * 10  # 8% accuracy → max 0.8 score
-        if tech_cap < 2.0: tech_cap = max(tech_cap, 1.0)  # minimum 1.0
+        tech_cap = tech_accuracy_avg * 10
+        if tech_cap < 2.0: tech_cap = max(tech_cap, 1.0)
         if scores.get("technical_score", 0) > tech_cap + 1.5:
             logger.info(f"[WI] Capping technical score from {scores['technical_score']} to {round(tech_cap + 1.0, 1)} (accuracy={tech_accuracy_avg:.0%})")
             scores["technical_score"] = round(tech_cap + 1.0, 1)
-
-        # If 0 correct answers, cap all scores
         if session.correct_answers == 0 and session.wrong_answers > 5:
             for key in ["communication", "technical", "leadership", "behaviour", "confidence"]:
                 score_key = f"{key}_score"
                 if scores.get(score_key, 0) > 4.0:
                     logger.info(f"[WI] Capping {key} from {scores[score_key]} to 4.0 (0 correct, {session.wrong_answers} wrong)")
                     scores[score_key] = min(scores[score_key], 4.0)
-
-        # If most answers were gibberish/incoherent, cap communication and confidence
         gibberish_ratio = silent_count / max(total_comm_qs + total_technical_qs + total_hr_qs, 1)
         wrong_ratio = session.wrong_answers / max(total_comm_qs + total_technical_qs + total_hr_qs, 1)
         if wrong_ratio > 0.6 or gibberish_ratio > 0.4:
@@ -1852,7 +1979,6 @@ confidence: X"""
                 score_key = f"{key}_score"
                 if scores.get(score_key, 0) > 3.0:
                     scores[score_key] = min(scores[score_key], 3.0)
-
         scores["technical_accuracy"] = round(tech_accuracy_avg * 100, 1)
         scores["hr_accuracy"] = round(hr_accuracy_avg * 100, 1)
         scores["questions_correct"] = session.correct_answers

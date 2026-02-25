@@ -214,7 +214,9 @@ class UltraFastInterviewManager:
                 return
 
             if session_data.exchanges:
-                answer_quality = self.conversation_manager._assess_answer_quality(transcript)
+                answer_quality = self.conversation_manager._assess_answer_quality(
+                    transcript, stage=session_data.current_stage, session=session_data
+                )
                 session_data.update_last_response(transcript, quality, answer_quality)
 
             exchange_count_before = len(session_data.exchanges)
@@ -258,7 +260,11 @@ class UltraFastInterviewManager:
             exchange_count_after = len(session_data.exchanges)
             already_added = exchange_count_after > exchange_count_before
             
-            if already_added:
+            # FIX: Skip adding exchange for repeat requests
+            # This prevents question number from incrementing when user asks to repeat
+            if getattr(session_data, 'last_was_repeat', False):
+                logger.info("Session %s: REPEAT request - skipping add_exchange (Q# preserved)", session_id)
+            elif already_added:
                 logger.info("Session %s: Exchange already added by generate_fast_response (before=%d, after=%d), skipping duplicate add_exchange",
                            session_id, exchange_count_before, exchange_count_after)
             else:
@@ -266,7 +272,7 @@ class UltraFastInterviewManager:
                 is_followup = self._determine_if_followup(ai_response)
                 answer_quality = session_data.last_answer_quality
                 session_data.add_exchange(ai_response, "", quality, concept, is_followup, answer_quality)
-                logger.info("Session %s: Added exchange from main.py (comm/intro/silence/repeat)", session_id)
+                logger.info("Session %s: Added exchange from main.py (comm/intro/silence)", session_id)
             
             await self._send_response_with_ultra_fast_audio(session_data, ai_response)
             logger.info("Total processing time: %.2fs", time.time() - start_time)
@@ -283,6 +289,54 @@ class UltraFastInterviewManager:
             raise Exception(f"Audio processing failed: {e}")
 
     async def _handle_silence(self, session_data: InterviewSession):
+        """Handle empty/silent audio input.
+        1st silence → gentle "take your time" prompt
+        2nd silence → auto-generate a NEW question instead of repeating prompts
+        """
+        current_stage = session_data.current_stage
+        
+        # Already gave 1 silence prompt and user is STILL silent → generate NEW question
+        if session_data.silence_prompt_count >= 1 and current_stage.value in ["technical", "hr", "communication"]:
+            session_data.silence_prompt_count = 0
+            logger.info("Session %s: Repeated silence in %s round - auto-generating new question", 
+                       session_data.session_id, current_stage.value)
+            
+            try:
+                if current_stage == InterviewStage.TECHNICAL:
+                    # Mark current topic as attempted
+                    if session_data.exchanges:
+                        last_q = session_data.exchanges[-1].ai_message.lower()
+                        for tech in (session_data.extracted_technologies or []):
+                            if tech.lower() in last_q:
+                                session_data.topic_attempt_count[tech] = session_data.topic_attempt_count.get(tech, 0) + 1
+                                if session_data.topic_attempt_count[tech] >= 2 and tech not in session_data.silent_topics:
+                                    session_data.silent_topics.append(tech)
+                                break
+                    q, keywords = await self.conversation_manager._generate_technical_question(session_data, "", True)
+                    session_data.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                    new_response = f"No worries, let's try a different question. {q}"
+                    
+                elif current_stage == InterviewStage.HR:
+                    q, keywords = await self.conversation_manager._generate_hr_question(session_data, self.db_manager)
+                    session_data.add_exchange(q, expected_keywords=keywords, question_type="hr")
+                    new_response = f"That's okay, let me ask you something else. {q}"
+                    
+                elif current_stage == InterviewStage.COMMUNICATION:
+                    q = await self.conversation_manager._generate_communication_question(session_data)
+                    session_data.add_exchange(q, question_type="communication")
+                    new_response = f"No problem! Here's a different question. {q}"
+                else:
+                    new_response = "Take your time, I'm here whenever you're ready."
+                
+                # Send as full ai_response with audio (not as silence_prompt)
+                await self._send_response_with_ultra_fast_audio(session_data, new_response)
+                return
+                
+            except Exception as e:
+                logger.error("Failed to generate new question after silence: %s", e)
+                # Fall through to normal silence prompt if generation fails
+        
+        # First silence → gentle "take your time" prompt
         silence_response = await self.conversation_manager.generate_silence_response(session_data)
         
         await self._send_quick_message(session_data, {
@@ -582,7 +636,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 elif message.get("type") == "manual_stop":
                     session_data.is_active = False
                     break
-
+                elif message.get("type") == "next_question":
+                    # Frontend sends this when awaitingServerAnswerRef has been
+                    # stuck too long (slow Technical round = 2 API calls).
+                    # Acknowledge so frontend clears the lock and resumes
+                    # voice detection — instead of waiting 30s safety timeout.
+                    logger.info("Session %s: next_question received - clearing frontend lock", session_id)
+                    await websocket.send_text(json.dumps({
+                        "type": "lock_cleared",
+                        "text": "Ready for your next answer.",
+                        "interview_continues": True
+                    }))
                 # === NEW: Bluetooth/Headphone device change handlers ===
                 elif message.get("type") == "device_change":
                     device_info = message.get("device", {})
