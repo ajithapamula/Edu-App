@@ -33,6 +33,9 @@ ROUND_DURATIONS = {
     "hr": 600,
 }
 
+# If user gives no real response for 5 consecutive questions, auto-skip to next round
+MAX_CONSECUTIVE_SILENCE = 5
+
 TECHNICAL_QUESTION_TEMPLATES = [
     "Can you explain what {tech} is and how you've used it in your work?",
     "What are the key components or features of {tech} that you worked with?",
@@ -353,6 +356,7 @@ class WI_InterviewSession:
     wrong_answers: int = 0
     is_finalized: bool = False
     _last_real_question: str = ""  # Survives round transitions (unlike conversation_state.last_pure_question)
+    consecutive_no_response: int = 0  # Tracks consecutive questions with no real answer — auto-skip after MAX
     
     def __post_init__(self):
         self.interview_start_time = self.created_at
@@ -365,6 +369,7 @@ class WI_InterviewSession:
         self.current_stage = stage
         self.conversation_state = WI_ConversationState()
         self.silence_prompt_count = 0  # Reset so new round gets fresh silence prompts
+        self.consecutive_no_response = 0  # Reset silence streak for new round
 
     def get_round_elapsed_time(self):
         current_stage_value = self.current_stage.value
@@ -388,7 +393,22 @@ class WI_InterviewSession:
         self.exchanges.append(ex)
         self.questions_per_round[self.current_stage.value] = self.questions_per_round.get(self.current_stage.value, 0) + 1
         self.questions_asked.append(ai_message)
-        if '?' in ai_message:
+        # Don't overwrite _last_real_question with non-question responses (gibberish/silence prompts)
+        non_question_phrases = [
+            "i'm sorry, i didn't catch", "could you please repeat your answer",
+            "take your time", "i'm here when you're ready", "no rush",
+            "whenever you're ready", "no hurry", "don't worry",
+            "i'm listening", "think it through", "no pressure",
+            "are you ready", "can i continue", "still thinking",
+            "repeat your answer", "didn't catch that",
+            "feel free to take", "you can answer whenever", "completely fine",
+            "let me try a different question", "let's move on to something else",
+            "i'll ask you something different",
+            "that concludes", "concludes our hr round", "you did great",
+            "great interview", "generate your detailed feedback",
+        ]
+        is_non_question = any(phrase in ai_message.lower() for phrase in non_question_phrases)
+        if '?' in ai_message and not is_non_question:
             parts = ai_message.split('?')
             for i in range(len(parts) - 1, -1, -1):
                 part = parts[i].strip()
@@ -396,10 +416,9 @@ class WI_InterviewSession:
                     for sep in ['. ', '! ', '\n']:
                         if sep in part: part = part.split(sep)[-1].strip()
                     self.conversation_state.last_pure_question = part + '?'
-                    # Also store on session level (survives round transitions)
                     self._last_real_question = part + '?'
                     break
-        else:
+        elif not is_non_question:
             self.conversation_state.last_pure_question = ai_message
             self._last_real_question = ai_message
 
@@ -1672,14 +1691,32 @@ MAX 15 words. Just the question:"""
     async def generate_silence_response(self, session):
         # Increment here — this is the single source of truth for silence counting
         session.silence_prompt_count += 1
-        responses = [
-            "Take your time.", "I'm here when you're ready.",
-            "Would you like me to repeat the question?", "No rush, think about it.",
-            "It's okay, take a moment to think.", "Whenever you're ready, go ahead.",
-            "No hurry, I'll wait.", "Feel free to take your time and answer.",
-            "Don't worry, there's no pressure.", "I understand, take as much time as you need.",
-            "You can answer whenever you're comfortable.", "It's completely fine, take a moment.",
-        ]
+        count = session.silence_prompt_count
+        
+        # Progressive responses — get more helpful as silence continues
+        if count == 1:
+            responses = [
+                "No rush, just think about it and let me know.",
+                "Take your time, I'm listening.",
+                "It's okay, think it through and answer when ready.",
+                "No pressure at all, just share your thoughts whenever you're ready.",
+                "Take a moment to think, I'll wait.",
+            ]
+        elif count == 2:
+            responses = [
+                "Are you ready? I can repeat the question if that helps.",
+                "Still thinking? That's totally fine. Want me to repeat it?",
+                "Can I help? I can rephrase the question if you'd like.",
+                "Should I move on to a different question, or would you like more time?",
+                "No worries! Want me to repeat, or shall we try a different one?",
+            ]
+        else:
+            responses = [
+                "Let me try a different question, no problem at all.",
+                "That's okay, let's move on to something else.",
+                "No worries, I'll ask you something different.",
+            ]
+        
         if not hasattr(session, '_last_silence_idx'): session._last_silence_idx = -1
         idx = random.randint(0, len(responses) - 1)
         while idx == session._last_silence_idx and len(responses) > 1:
@@ -1689,9 +1726,39 @@ MAX 15 words. Just the question:"""
 
     async def generate_fast_response(self, session, user_response, db_manager=None):
         await self.client_manager.initialize()
+        
+        # ── ECHO DETECTION: If user "response" is just the AI's question echoed back ──
+        # Speaker echo → Whisper transcribes AI's own words → comes back as user response
+        if user_response and session.exchanges:
+            last_ai_msg = session.exchanges[-1].ai_message.lower()
+            user_lower = user_response.lower().strip()
+            # Check word overlap between user response and last AI message
+            user_words = set(user_lower.split())
+            ai_words = set(last_ai_msg.split())
+            if len(user_words) >= 3 and len(ai_words) >= 3:
+                overlap = len(user_words & ai_words)
+                overlap_ratio = overlap / max(len(user_words), 1)
+                if overlap_ratio >= 0.85:  # FIX: Was 0.6 — caught legitimate answers restating question premises
+                    logger.info(f"[WI] ECHO DETECTED: user response has {overlap_ratio:.0%} word overlap with last AI message — treating as silence")
+                    user_response = ""  # Treat as silence
+            # Also check if user response is a substring of AI message (partial echo)
+            if len(user_lower) >= 15 and user_lower in last_ai_msg:
+                logger.info(f"[WI] ECHO DETECTED: user response is substring of last AI message — treating as silence")
+                user_response = ""
+        
         quality = self._assess_answer_quality(user_response, stage=session.current_stage, session=session)
         logger.info(f"[WI] Quality: {quality}, Stage: {session.current_stage.value}")
         if quality != "silence": session.silence_prompt_count = 0
+        # Track consecutive no-response streak (silence/gibberish = no real answer)
+        if quality in ("silence", "gibberish"):
+            session.consecutive_no_response += 1
+            logger.info(f"[WI] Consecutive no-response: {session.consecutive_no_response}/{MAX_CONSECUTIVE_SILENCE}")
+        elif quality not in ("repeat",):
+            # For TECHNICAL and HR stages: defer counter reset until accuracy is evaluated.
+            # This prevents garbage transcripts (quality="neutral" but 0% accuracy) from
+            # resetting the silence streak. The counter will be managed after accuracy check.
+            if session.current_stage not in (WI_InterviewStage.TECHNICAL, WI_InterviewStage.HR):
+                session.consecutive_no_response = 0  # Real answer resets the streak
         session.conversation_state.last_user_response = user_response
         mentioned_tech = self._extract_topics_from_response(user_response, session)
         session.conversation_state.user_mentioned_tech.extend(mentioned_tech)
@@ -1726,22 +1793,22 @@ MAX 15 words. Just the question:"""
         elapsed = session.get_round_elapsed_minutes()
         logger.info(f"[WI] Stage: {session.current_stage.value}, Elapsed: {elapsed:.2f} min")
         if session.current_stage == WI_InterviewStage.COMMUNICATION:
-            if elapsed >= 5:
-                logger.info(f"[WI] TRANSITIONING: Communication -> Technical")
+            if elapsed >= 5 or session.consecutive_no_response >= MAX_CONSECUTIVE_SILENCE:
+                logger.info(f"[WI] TRANSITIONING: Communication -> Technical (elapsed={elapsed:.1f}min, silence_streak={session.consecutive_no_response})")
                 session.start_round(WI_InterviewStage.TECHNICAL)
                 q, keywords = await self._generate_technical_question(session)
-                session.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical_behavioral" if "technical_behavioral" in keywords else "technical")
                 return f"Nice chatting! Now let's discuss your technical work. {q}"
         elif session.current_stage == WI_InterviewStage.TECHNICAL:
-            if elapsed >= 25:
-                logger.info(f"[WI] TRANSITIONING: Technical -> HR")
+            if elapsed >= 25 or session.consecutive_no_response >= MAX_CONSECUTIVE_SILENCE:
+                logger.info(f"[WI] TRANSITIONING: Technical -> HR (elapsed={elapsed:.1f}min, silence_streak={session.consecutive_no_response})")
                 session.start_round(WI_InterviewStage.HR)
                 q, keywords = await self._generate_hr_question(session, db_manager)
                 session.add_exchange(q, expected_keywords=keywords, question_type="hr")
                 return f"Great technical discussion! Now some behavioral questions. {q}"
         elif session.current_stage == WI_InterviewStage.HR:
-            if elapsed >= 10:
-                logger.info(f"[WI] TRANSITIONING: HR -> Complete")
+            if elapsed >= 10 or session.consecutive_no_response >= MAX_CONSECUTIVE_SILENCE:
+                logger.info(f"[WI] TRANSITIONING: HR -> Complete (elapsed={elapsed:.1f}min, silence_streak={session.consecutive_no_response})")
                 session.current_stage = WI_InterviewStage.COMPLETE
                 return "Thank you! Great interview. Let me generate your detailed feedback..."
         if session.current_stage == WI_InterviewStage.COMMUNICATION:
@@ -1758,14 +1825,28 @@ MAX 15 words. Just the question:"""
             q = await self._generate_communication_question(session); session.add_exchange(q, question_type="communication"); session.conversation_state.followups_on_topic = 0; ack = await self._generate_dynamic_ack("transition", "transition"); return f"{ack} {q}"
         if session.current_stage == WI_InterviewStage.TECHNICAL:
             accuracy = 0.0
+            accuracy_evaluated = False
             if session.exchanges and session.exchanges[-1].question_type == "technical":
                 last_ex = session.exchanges[-1]
                 accuracy = await self._evaluate_technical_accuracy(session, last_ex.ai_message, user_response, last_ex.expected_keywords)
                 session.update_last_response(user_response, 0.8, quality, accuracy)
                 logger.info(f"[WI] Technical accuracy: {accuracy:.2f} for quality: {quality}")
+                accuracy_evaluated = True
+            
+            # ===== Counter management for technical round =====
+            # Only runs for non-silence/gibberish/repeat responses (those are handled above)
+            if quality not in ("silence", "gibberish", "skip", "cant_answer", "repeat"):
+                if accuracy_evaluated and accuracy > 0.0:
+                    session.consecutive_no_response = 0  # Real technical answer
+                elif accuracy_evaluated and accuracy == 0.0:
+                    session.consecutive_no_response += 1  # Garbage with 0% accuracy
+                    logger.info(f"[WI] Zero-accuracy response — no-response streak: {session.consecutive_no_response}/{MAX_CONSECUTIVE_SILENCE}")
+                elif not accuracy_evaluated:
+                    # Behavioral question in technical round — quality-based check is sufficient
+                    session.consecutive_no_response = 0
             self._adjust_difficulty(session, quality)
             if quality == "skip":
-                q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("skip", "transition"); return f"{ack} {q}"
+                q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical_behavioral" if "technical_behavioral" in keywords else "technical"); ack = await self._generate_dynamic_ack("skip", "transition"); return f"{ack} {q}"
             if quality == "gibberish": return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
             if quality == "off_topic":
                 logger.info(f"[WI] OFF-TOPIC detected in Technical round")
@@ -1787,15 +1868,16 @@ MAX 15 words. Just the question:"""
                     for tech in session.extracted_technologies:
                         if tech.lower() in last_q: session.topic_attempt_count[tech] = session.topic_attempt_count.get(tech, 0) + 1; (session.silent_topics.append(tech) if session.topic_attempt_count[tech] >= 2 and tech not in session.silent_topics else None); break
                 # Check BEFORE incrementing — generate_silence_response will increment
-                if session.silence_prompt_count >= 2:
-                    session.silence_prompt_count = 0; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); return f"Let's try something different. {q}"
+                # Technical needs more patience (3 prompts ≈ 30s thinking time)
+                if session.silence_prompt_count >= 3:
+                    session.silence_prompt_count = 0; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical_behavioral" if "technical_behavioral" in keywords else "technical"); return f"Let's try something different. {q}"
                 return await self.generate_silence_response(session)
             if quality == "cant_answer":
                 if session.exchanges:
                     last_q = session.exchanges[-1].ai_message.lower()
                     for tech in session.extracted_technologies:
                         if tech.lower() in last_q: session.topic_attempt_count[tech] = session.topic_attempt_count.get(tech, 0) + 1; (session.silent_topics.append(tech) if session.topic_attempt_count[tech] >= 2 and tech not in session.silent_topics else None); break
-                session.current_difficulty = "easy"; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical"); ack = await self._generate_dynamic_ack("cant answer technical", "cant_answer"); return f"{ack} {q}"
+                session.current_difficulty = "easy"; q, keywords = await self._generate_technical_question(session, "", True); session.add_exchange(q, expected_keywords=keywords, question_type="technical_behavioral" if "technical_behavioral" in keywords else "technical"); ack = await self._generate_dynamic_ack("cant answer technical", "cant_answer"); return f"{ack} {q}"
             # Reset off-topic counter on any on-topic answer
             self._reset_off_topic_counter()
             if accuracy >= 0.7:
@@ -1805,12 +1887,12 @@ MAX 15 words. Just the question:"""
                     ack = self._get_encouragement()
                     return f"{ack} {q}"
                 q, keywords = await self._generate_technical_question(session, user_response, True)
-                session.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical_behavioral" if "technical_behavioral" in keywords else "technical")
                 ack = self._get_encouragement()
                 return f"{ack} {q}"
             elif accuracy >= 0.4:
                 q, keywords = await self._generate_technical_question(session, user_response, True)
-                session.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical_behavioral" if "technical_behavioral" in keywords else "technical")
                 ack = await self._generate_dynamic_ack("partial technical", "transition")
                 return f"{ack} {q}"
             else:
@@ -1824,16 +1906,41 @@ MAX 15 words. Just the question:"""
                             break
                 session.current_difficulty = "easy"
                 q, keywords = await self._generate_technical_question(session, "", True)
-                session.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                session.add_exchange(q, expected_keywords=keywords, question_type="technical_behavioral" if "technical_behavioral" in keywords else "technical")
                 ack = self._get_off_topic_response(session=session, stage=WI_InterviewStage.TECHNICAL)
                 return f"{ack} {q}"
         if session.current_stage == WI_InterviewStage.HR:
+            # ===== FIX: End HR round immediately when all categories exhausted =====
+            # Don't wait for 10-minute timer if we've asked all planned questions
+            if hasattr(session, 'hr_category_counts'):
+                HR_CATEGORY_LIMITS = {'introduction': 2, 'behavioral': 3, 'leadership': 3, 'logical_thinking': 2}
+                all_categories_done = all(
+                    session.hr_category_counts.get(cat, 0) >= limit 
+                    for cat, limit in HR_CATEGORY_LIMITS.items()
+                )
+                if all_categories_done:
+                    logger.info(f"[WI] All HR categories exhausted — ending HR round early at {elapsed:.1f} min")
+                    session.current_stage = WI_InterviewStage.COMPLETE
+                    return "Thank you! Great interview. Let me generate your detailed feedback..."
+            
             accuracy = 0.0
+            accuracy_evaluated = False
             if session.exchanges and session.exchanges[-1].question_type == "hr":
                 last_ex = session.exchanges[-1]
                 accuracy = await self._evaluate_technical_accuracy(session, last_ex.ai_message, user_response, last_ex.expected_keywords)
                 session.update_last_response(user_response, 0.8, quality, accuracy)
                 logger.info(f"[WI] HR accuracy: {accuracy:.2f} for quality: {quality}")
+                accuracy_evaluated = True
+            
+            # ===== Counter management for HR round =====
+            if quality not in ("silence", "gibberish", "skip", "cant_answer", "repeat"):
+                if accuracy_evaluated and accuracy > 0.0:
+                    session.consecutive_no_response = 0
+                elif accuracy_evaluated and accuracy == 0.0:
+                    session.consecutive_no_response += 1
+                    logger.info(f"[WI] Zero-accuracy HR response — no-response streak: {session.consecutive_no_response}/{MAX_CONSECUTIVE_SILENCE}")
+                elif not accuracy_evaluated:
+                    session.consecutive_no_response = 0
             if quality == "skip":
                 q, keywords = await self._generate_hr_question(session, db_manager); session.add_exchange(q, expected_keywords=keywords, question_type="hr"); ack = await self._generate_dynamic_ack("skip", "transition"); return f"{ack} {q}"
             if quality == "gibberish": return "I'm sorry, I didn't catch that clearly. Could you please repeat your answer?"
@@ -1882,43 +1989,103 @@ MAX 15 words. Just the question:"""
                 continue
             exchange_data = {"question": ex.ai_message, "answer": ex.user_response if ex.user_response else "[SILENT - No response]", "is_silent": not ex.user_response or ex.answer_quality == "silence", "answer_quality": ex.answer_quality, "accuracy": ex.technical_accuracy}
             if ex.stage == WI_InterviewStage.COMMUNICATION: comm_exchanges.append(exchange_data)
-            elif ex.stage == WI_InterviewStage.TECHNICAL: tech_exchanges.append(exchange_data); (tech_accuracies.append(ex.technical_accuracy) if ex.technical_accuracy is not None else None)
+            elif ex.stage == WI_InterviewStage.TECHNICAL:
+                exchange_data["is_behavioral_in_tech"] = (ex.question_type == "technical_behavioral")
+                tech_exchanges.append(exchange_data); (tech_accuracies.append(ex.technical_accuracy) if ex.technical_accuracy is not None else None)
             elif ex.stage == WI_InterviewStage.HR: hr_exchanges.append(exchange_data); (hr_accuracies.append(ex.technical_accuracy) if ex.technical_accuracy is not None else None)
         tech_accuracy_avg = sum(tech_accuracies) / len(tech_accuracies) if tech_accuracies else 0.5
         hr_accuracy_avg = sum(hr_accuracies) / len(hr_accuracies) if hr_accuracies else 0.5
         total_technical_qs = len(tech_exchanges); total_hr_qs = len(hr_exchanges); total_comm_qs = len(comm_exchanges)
-        async def get_feedback_for_qa(question, answer, round_type, is_silent):
-            if is_silent: return "Candidate remained silent. Try to respond even with partial thoughts."
-            prompt = f"""Give brief feedback (1-2 sentences) for this {round_type} interview answer.\nQuestion: {question}\nAnswer: {answer}\nBe constructive. If good, praise briefly. If weak, suggest improvement."""
+        async def get_batch_feedback(exchanges, round_type):
+            """Get feedback for ALL exchanges in one API call instead of one per question."""
+            if not exchanges:
+                return []
+            qa_text = ""
+            for i, ex in enumerate(exchanges, 1):
+                if ex["is_silent"]:
+                    qa_text += f"\nQ{i}: {ex['question']}\nA{i}: [SILENT - No response]\n"
+                else:
+                    qa_text += f"\nQ{i}: {ex['question']}\nA{i}: {ex['answer'][:200]}\n"
+            prompt = f"""Give brief feedback (1 sentence each) for these {round_type} interview answers.
+Reply in format:
+Q1: feedback here
+Q2: feedback here
+...
+
+{qa_text}
+
+For silent responses, say "No response given. Try to attempt even partial answers."
+Be constructive. If good, praise briefly. If weak, suggest improvement."""
             try:
-                resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.3, max_tokens=100)
-                return resp.choices[0].message.content.strip()
-            except: return "Response recorded."
+                resp = await self.client_manager.openai_client.chat.completions.create(
+                    model=config.OPENAI_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3, max_tokens=len(exchanges) * 60
+                )
+                result_text = resp.choices[0].message.content.strip()
+                feedbacks = []
+                lines = result_text.split('\n')
+                current_fb = ""
+                for line in lines:
+                    line = line.strip()
+                    if re.match(r'^Q\d+:', line):
+                        if current_fb:
+                            feedbacks.append(current_fb)
+                        current_fb = re.sub(r'^Q\d+:\s*', '', line)
+                    elif line and current_fb:
+                        current_fb += " " + line
+                if current_fb:
+                    feedbacks.append(current_fb)
+                # Pad if fewer feedbacks parsed than exchanges
+                while len(feedbacks) < len(exchanges):
+                    feedbacks.append("Response recorded.")
+                return feedbacks[:len(exchanges)]
+            except Exception as e:
+                logger.error(f"[WI] Batch feedback error: {e}")
+                return ["Response recorded." for _ in exchanges]
+
         evaluation_parts = []
+        
+        # Get feedback in batches (1 API call per round instead of 1 per question)
         if comm_exchanges:
+            comm_feedbacks = await get_batch_feedback(comm_exchanges, "communication")
             evaluation_parts.append("=" * 60); evaluation_parts.append("COMMUNICATION ROUND FEEDBACK"); evaluation_parts.append("=" * 60)
-            for i, ex in enumerate(comm_exchanges, 1):
-                feedback = await get_feedback_for_qa(ex["question"], ex["answer"], "communication", ex["is_silent"])
+            for i, (ex, feedback) in enumerate(zip(comm_exchanges, comm_feedbacks), 1):
                 evaluation_parts.append(f"\nQ{i}. AI Question: {ex['question']}"); evaluation_parts.append(f"    User Answer: {ex['answer']}"); evaluation_parts.append(f"    Feedback: {feedback}"); evaluation_parts.append("-" * 40)
         if tech_exchanges:
-            evaluation_parts.append("\n" + "=" * 60); evaluation_parts.append("TECHNICAL ROUND FEEDBACK"); evaluation_parts.append("=" * 60)
-            for i, ex in enumerate(tech_exchanges, 1):
-                feedback = await get_feedback_for_qa(ex["question"], ex["answer"], "technical", ex["is_silent"])
-                accuracy_str = f" (Accuracy: {ex['accuracy']:.0%})" if ex["accuracy"] is not None else ""
-                evaluation_parts.append(f"\nQ{i}. AI Question: {ex['question']}"); evaluation_parts.append(f"    User Answer: {ex['answer']}"); evaluation_parts.append(f"    Feedback: {feedback}{accuracy_str}"); evaluation_parts.append("-" * 40)
+            # Split pure technical from behavioral-in-technical
+            pure_tech_exchanges = [ex for ex in tech_exchanges if not ex.get("is_behavioral_in_tech", False)]
+            behavioral_tech_exchanges = [ex for ex in tech_exchanges if ex.get("is_behavioral_in_tech", False)]
+            
+            if pure_tech_exchanges:
+                pure_tech_feedbacks = await get_batch_feedback(pure_tech_exchanges, "technical")
+                evaluation_parts.append("\n" + "=" * 60); evaluation_parts.append(f"TECHNICAL ROUND FEEDBACK ({len(pure_tech_exchanges)} questions)"); evaluation_parts.append("=" * 60)
+                for i, (ex, feedback) in enumerate(zip(pure_tech_exchanges, pure_tech_feedbacks), 1):
+                    accuracy_str = f" (Accuracy: {ex['accuracy']:.0%})" if ex["accuracy"] is not None else ""
+                    evaluation_parts.append(f"\nQ{i}. AI Question: {ex['question']}"); evaluation_parts.append(f"    User Answer: {ex['answer']}"); evaluation_parts.append(f"    Feedback: {feedback}{accuracy_str}"); evaluation_parts.append("-" * 40)
+            
+            if behavioral_tech_exchanges:
+                beh_feedbacks = await get_batch_feedback(behavioral_tech_exchanges, "technical behavioral")
+                evaluation_parts.append("\n" + "=" * 60); evaluation_parts.append(f"TECHNICAL BEHAVIORAL QUESTIONS ({len(behavioral_tech_exchanges)} questions)"); evaluation_parts.append("=" * 60)
+                for i, (ex, feedback) in enumerate(zip(behavioral_tech_exchanges, beh_feedbacks), 1):
+                    accuracy_str = f" (Accuracy: {ex['accuracy']:.0%})" if ex["accuracy"] is not None else ""
+                    evaluation_parts.append(f"\nQ{i}. AI Question: {ex['question']}"); evaluation_parts.append(f"    User Answer: {ex['answer']}"); evaluation_parts.append(f"    Feedback: {feedback}{accuracy_str}"); evaluation_parts.append("-" * 40)
         if hr_exchanges:
+            hr_feedbacks = await get_batch_feedback(hr_exchanges, "HR/behavioral")
             evaluation_parts.append("\n" + "=" * 60); evaluation_parts.append("HR/BEHAVIORAL ROUND FEEDBACK"); evaluation_parts.append("=" * 60)
-            for i, ex in enumerate(hr_exchanges, 1):
-                feedback = await get_feedback_for_qa(ex["question"], ex["answer"], "HR/behavioral", ex["is_silent"])
+            for i, (ex, feedback) in enumerate(zip(hr_exchanges, hr_feedbacks), 1):
                 evaluation_parts.append(f"\nQ{i}. AI Question: {ex['question']}"); evaluation_parts.append(f"    User Answer: {ex['answer']}"); evaluation_parts.append(f"    Feedback: {feedback}"); evaluation_parts.append("-" * 40)
         evaluation_parts.append("\n" + "=" * 60); evaluation_parts.append("OVERALL SUMMARY"); evaluation_parts.append("=" * 60)
         silent_count = sum(1 for ex in comm_exchanges + tech_exchanges + hr_exchanges if ex["is_silent"])
-        summary_prompt = f"""Provide a brief overall interview summary (4-5 sentences) for {session.student_name}.\n\nMETRICS:\n- Communication Questions: {total_comm_qs}\n- Technical Questions: {total_technical_qs}\n- Technical Accuracy: {tech_accuracy_avg:.0%}\n- HR Questions: {total_hr_qs}\n- Correct Answers: {session.correct_answers}\n- Partial Answers: {session.partial_answers}\n- Weak Answers: {session.wrong_answers}\n- Silent/No Response: {silent_count}\n\nInclude: Overall performance, Key strengths (2-3), Areas to improve (2-3), Final recommendation"""
+        pure_tech_count = sum(1 for ex in tech_exchanges if not ex.get("is_behavioral_in_tech", False))
+        behavioral_in_tech_count = len(tech_exchanges) - pure_tech_count
+        summary_prompt = f"""Provide a brief overall interview summary (4-5 sentences) for {session.student_name}.\n\nMETRICS:\n- Communication Questions: {total_comm_qs}\n- Technical Questions: {pure_tech_count}\n- Technical Behavioral Questions: {behavioral_in_tech_count}\n- Technical Accuracy: {tech_accuracy_avg:.0%}\n- HR Questions: {total_hr_qs}\n- Correct Answers: {session.correct_answers}\n- Partial Answers: {session.partial_answers}\n- Weak Answers: {session.wrong_answers}\n- Silent/No Response: {silent_count}\n\nInclude: Overall performance, Key strengths (2-3), Areas to improve (2-3), Final recommendation"""
         summary_resp = await self.client_manager.openai_client.chat.completions.create(model=config.OPENAI_MODEL, messages=[{"role": "user", "content": summary_prompt}], temperature=0.3, max_tokens=400)
         overall_summary = summary_resp.choices[0].message.content.strip()
         evaluation_parts.append(f"\n{overall_summary}")
         evaluation_parts.append("\n" + "-" * 40); evaluation_parts.append("STATISTICS:")
         evaluation_parts.append(f"  Total Questions: {total_comm_qs + total_technical_qs + total_hr_qs}")
+        evaluation_parts.append(f"  Technical Questions: {pure_tech_count} (+ {behavioral_in_tech_count} behavioral)")
         evaluation_parts.append(f"  Technical Accuracy: {tech_accuracy_avg:.0%}")
         evaluation_parts.append(f"  Questions Answered Well: {session.correct_answers}")
         evaluation_parts.append(f"  Partial Answers: {session.partial_answers}")
@@ -1935,7 +2102,8 @@ ACTUAL PERFORMANCE METRICS (use these to determine scores):
 - Silent/No Response: {silent_count}
 - Total Questions: {total_comm_qs + total_technical_qs + total_hr_qs}
 - Communication Questions: {total_comm_qs}
-- Technical Questions: {total_technical_qs}
+- Technical Questions: {pure_tech_count}
+- Technical Behavioral Questions: {behavioral_in_tech_count}
 - HR Questions: {total_hr_qs}
 
 STRICT SCORING RULES:
@@ -1987,7 +2155,9 @@ confidence: X"""
         scores["questions_silent"] = silent_count
         scores["total_questions"] = total_technical_qs + total_hr_qs + total_comm_qs
         scores["communication_questions"] = total_comm_qs
-        scores["technical_questions"] = total_technical_qs
+        scores["technical_questions"] = pure_tech_count
+        scores["behavioral_in_technical_questions"] = behavioral_in_tech_count
+        scores["technical_questions_total"] = total_technical_qs
         scores["hr_questions"] = total_hr_qs
         w = {"communication_weight": 0.20, "technical_weight": 0.30, "leadership_weight": 0.15, "behaviour_weight": 0.20, "confidence_weight": 0.15}
         scores["weighted_overall"] = round(scores.get("communication_score", 5) * w.get("communication_weight", 0.2) + scores.get("technical_score", 5) * w.get("technical_weight", 0.3) + scores.get("leadership_score", 5) * w.get("leadership_weight", 0.15) + scores.get("behaviour_score", 5) * w.get("behaviour_weight", 0.2) + scores.get("confidence_score", 5) * w.get("confidence_weight", 0.15), 1)

@@ -7,6 +7,8 @@ Real-time WebSocket interview with adaptive difficulty and silence handling
 FIXED: Now properly triggers evaluation when HR round completes
 FIXED: Removed double add_exchange that caused question number skipping
 FIXED: Sends is_repeat flag to frontend for proper question tracking
+FIXED: PDF download proxied through backend (CORS fix)
+FIXED: Silence counters reset on valid response
 """
 
 import os
@@ -49,6 +51,7 @@ from core.ai_services import (
     WI_EnhancedInterviewFragmentManager as EnhancedInterviewFragmentManager,
     WI_OptimizedAudioProcessor as OptimizedAudioProcessor,
     WI_OptimizedConversationManager as OptimizedConversationManager,
+    MAX_CONSECUTIVE_SILENCE,
 )
 from core.tts_processor import UnifiedTTSProcessor as UltraFastTTSProcessor
 from core.prompts import validate_prompts
@@ -103,6 +106,19 @@ def get_s3_presigned_url(s3_key: str, expires_in: int = 3600) -> Optional[str]:
         )
     except Exception as e:
         logger.error("Presigned URL failed: %s", e)
+        return None
+
+
+# ===== FIX: Download PDF bytes from S3 (proxy, avoids CORS) =====
+def download_pdf_from_s3(s3_key: str) -> Optional[bytes]:
+    """Download PDF from S3 and return bytes. Used to proxy PDF through backend."""
+    if not s3_client or not s3_key:
+        return None
+    try:
+        response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+        return response['Body'].read()
+    except Exception as e:
+        logger.error("S3 download failed: %s", e)
         return None
 
 
@@ -191,7 +207,7 @@ class UltraFastInterviewManager:
     
             transcript, quality = await self.audio_processor.transcribe_audio_fast(audio_data)
 
-            # === NEW: Bluetooth/Headphone disconnect handling ===
+            # === Bluetooth/Headphone disconnect handling ===
             if transcript == "__DEVICE_DISCONNECTED__":
                 logger.warning("Session %s: Audio device disconnected", session_id)
                 await self._send_quick_message(session_data, {
@@ -205,7 +221,6 @@ class UltraFastInterviewManager:
             if transcript == "__DEVICE_RECONNECTING__":
                 logger.info("Session %s: Waiting for device reconnection", session_id)
                 return
-            # === END NEW ===
 
             logger.info("Session %s: transcript='%s' quality=%.2f", session_id, (transcript or "").strip()[:50], quality)
             
@@ -213,10 +228,15 @@ class UltraFastInterviewManager:
                 await self._handle_silence(session_data)
                 return
 
+            # ===== FIX: Do NOT reset consecutive_no_response here =====
+            # ai_services.generate_fast_response will reset it only after
+            # confirming the response is actually meaningful (accuracy > 0).
+            # Resetting here allowed garbage transcripts (0% accuracy) to 
+            # break the silence streak, preventing auto-skip from ever firing.
+            session_data.silence_prompt_count = 0
+
             if session_data.exchanges:
-                answer_quality = self.conversation_manager._assess_answer_quality(
-                    transcript, stage=session_data.current_stage, session=session_data
-                )
+                answer_quality = self.conversation_manager._assess_answer_quality(transcript)
                 session_data.update_last_response(transcript, quality, answer_quality)
 
             exchange_count_before = len(session_data.exchanges)
@@ -257,11 +277,21 @@ class UltraFastInterviewManager:
                 logger.info("Total processing time (with evaluation): %.2fs", time.time() - start_time)
                 return
 
+            # ===== CRITICAL FIX: Send round_transition to frontend when stage changes =====
+            stage_after = session_data.current_stage
+            if stage_after != stage_before and stage_after != InterviewStage.COMPLETE:
+                logger.info("Session %s: ROUND TRANSITION %s -> %s — sending round_transition to frontend",
+                           session_id, stage_before.value, stage_after.value)
+                await self._send_quick_message(session_data, {
+                    "type": "round_transition",
+                    "from_stage": stage_before.value,
+                    "to_stage": stage_after.value,
+                    "text": f"Moving to {stage_after.value} round...",
+                })
+
             exchange_count_after = len(session_data.exchanges)
             already_added = exchange_count_after > exchange_count_before
             
-            # FIX: Skip adding exchange for repeat requests
-            # This prevents question number from incrementing when user asks to repeat
             if getattr(session_data, 'last_was_repeat', False):
                 logger.info("Session %s: REPEAT request - skipping add_exchange (Q# preserved)", session_id)
             elif already_added:
@@ -292,18 +322,66 @@ class UltraFastInterviewManager:
         """Handle empty/silent audio input.
         1st silence → gentle "take your time" prompt
         2nd silence → auto-generate a NEW question instead of repeating prompts
+        5+ consecutive silences → auto-skip to next round
         """
         current_stage = session_data.current_stage
         
-        # Already gave 1 silence prompt and user is STILL silent → generate NEW question
-        if session_data.silence_prompt_count >= 1 and current_stage.value in ["technical", "hr", "communication"]:
+        session_data.consecutive_no_response += 1
+        logger.info("Session %s: consecutive_no_response=%d/%d in %s round",
+                     session_data.session_id, session_data.consecutive_no_response, 
+                     MAX_CONSECUTIVE_SILENCE, current_stage.value)
+        
+        # ===== AUTO-SKIP: Too many consecutive silences → move to next round =====
+        if session_data.consecutive_no_response >= MAX_CONSECUTIVE_SILENCE:
+            logger.info("Session %s: %d consecutive silences — auto-skipping %s round",
+                        session_data.session_id, session_data.consecutive_no_response, current_stage.value)
+            
+            if current_stage == InterviewStage.COMMUNICATION:
+                session_data.start_round(InterviewStage.TECHNICAL)
+                q, keywords = await self.conversation_manager._generate_technical_question(session_data)
+                session_data.add_exchange(q, expected_keywords=keywords, question_type="technical")
+                new_response = f"Let's move on to the technical round. {q}"
+            elif current_stage == InterviewStage.TECHNICAL:
+                session_data.start_round(InterviewStage.HR)
+                q, keywords = await self.conversation_manager._generate_hr_question(session_data, self.db_manager)
+                if "hr_complete" in keywords:
+                    session_data.current_stage = InterviewStage.COMPLETE
+                    new_response = "Thank you! Great interview. Let me generate your detailed feedback..."
+                    await self._send_response_with_ultra_fast_audio(session_data, new_response)
+                    await self._finalize_session_fast(session_data)
+                    return
+                session_data.add_exchange(q, expected_keywords=keywords, question_type="hr")
+                new_response = f"Let's move on to some behavioral questions. {q}"
+            elif current_stage == InterviewStage.HR:
+                session_data.current_stage = InterviewStage.COMPLETE
+                new_response = "Thank you! Great interview. Let me generate your detailed feedback..."
+                await self._send_response_with_ultra_fast_audio(session_data, new_response)
+                await self._finalize_session_fast(session_data)
+                return
+            else:
+                new_response = "Take your time, I'm here whenever you're ready."
+            
+            await self._send_response_with_ultra_fast_audio(session_data, new_response)
+            return
+        
+        # Auto-generate new question after enough silence prompts.
+        # Communication: quick questions → move on after 1 silence prompt (~10s)
+        # HR: behavioral needs some thinking → move on after 2 prompts (~20s)
+        # Technical: complex questions → move on after 3 prompts (~30s)
+        silence_threshold_by_round = {
+            "communication": 1,
+            "hr": 2,
+            "technical": 3,
+        }
+        required_silence_prompts = silence_threshold_by_round.get(current_stage.value, 2)
+        
+        if session_data.silence_prompt_count >= required_silence_prompts and current_stage.value in ["technical", "hr", "communication"]:
             session_data.silence_prompt_count = 0
             logger.info("Session %s: Repeated silence in %s round - auto-generating new question", 
                        session_data.session_id, current_stage.value)
             
             try:
                 if current_stage == InterviewStage.TECHNICAL:
-                    # Mark current topic as attempted
                     if session_data.exchanges:
                         last_q = session_data.exchanges[-1].ai_message.lower()
                         for tech in (session_data.extracted_technologies or []):
@@ -318,6 +396,13 @@ class UltraFastInterviewManager:
                     
                 elif current_stage == InterviewStage.HR:
                     q, keywords = await self.conversation_manager._generate_hr_question(session_data, self.db_manager)
+                    if "hr_complete" in keywords:
+                        logger.info("Session %s: All HR categories done — ending interview", session_data.session_id)
+                        session_data.current_stage = InterviewStage.COMPLETE
+                        new_response = "Thank you! Great interview. Let me generate your detailed feedback..."
+                        await self._send_response_with_ultra_fast_audio(session_data, new_response)
+                        await self._finalize_session_fast(session_data)
+                        return
                     session_data.add_exchange(q, expected_keywords=keywords, question_type="hr")
                     new_response = f"That's okay, let me ask you something else. {q}"
                     
@@ -328,13 +413,11 @@ class UltraFastInterviewManager:
                 else:
                     new_response = "Take your time, I'm here whenever you're ready."
                 
-                # Send as full ai_response with audio (not as silence_prompt)
                 await self._send_response_with_ultra_fast_audio(session_data, new_response)
                 return
                 
             except Exception as e:
                 logger.error("Failed to generate new question after silence: %s", e)
-                # Fall through to normal silence prompt if generation fails
         
         # First silence → gentle "take your time" prompt
         silence_response = await self.conversation_manager.generate_silence_response(session_data)
@@ -408,25 +491,45 @@ class UltraFastInterviewManager:
             except Exception as pdf_err:
                 logger.error("PDF generation/upload failed: %s", pdf_err)
 
+            # Build conversation log grouped by round for easy frontend consumption
+            conversation_log_flat = [
+                {
+                    "timestamp": ex.timestamp,
+                    "stage": ex.stage.value,
+                    "ai_message": ex.ai_message,
+                    "user_response": ex.user_response,
+                    "transcript_quality": ex.transcript_quality,
+                    "concept": ex.concept,
+                    "is_followup": ex.is_followup,
+                    "answer_quality": ex.answer_quality,
+                    "question_type": ex.question_type,
+                }
+                for ex in session_data.exchanges
+            ]
+            
+            # Pre-separate by round so frontend doesn't mix them
+            conversation_by_round = {"communication": [], "technical": [], "hr": []}
+            for entry in conversation_log_flat:
+                stage = entry.get("stage", "")
+                if stage in conversation_by_round:
+                    conversation_by_round[stage].append(entry)
+            
+            logger.info(
+                "Session %s: Exchange distribution — communication=%d, technical=%d, hr=%d",
+                session_data.session_id,
+                len(conversation_by_round["communication"]),
+                len(conversation_by_round["technical"]),
+                len(conversation_by_round["hr"]),
+            )
+
             interview_data = {
                 "test_id": session_data.test_id,
                 "session_id": session_data.session_id,
                 "student_id": session_data.student_id,
                 "student_name": session_data.student_name,
                 "timestamp": time.time(),
-                "conversation_log": [
-                    {
-                        "timestamp": ex.timestamp,
-                        "stage": ex.stage.value,
-                        "ai_message": ex.ai_message,
-                        "user_response": ex.user_response,
-                        "transcript_quality": ex.transcript_quality,
-                        "concept": ex.concept,
-                        "is_followup": ex.is_followup,
-                        "answer_quality": ex.answer_quality,
-                    }
-                    for ex in session_data.exchanges
-                ],
+                "conversation_log": conversation_log_flat,
+                "conversation_by_round": conversation_by_round,
                 "evaluation": evaluation,
                 "scores": scores,
                 "duration_minutes": round((time.time() - session_data.created_at) / 60, 1),
@@ -450,6 +553,8 @@ class UltraFastInterviewManager:
                 "text": completion_message,
                 "evaluation": evaluation,
                 "scores": scores,
+                "conversation_by_round": conversation_by_round,
+                "questions_per_round": dict(session_data.questions_per_round),
                 "pdf_url": pdf_url or f"/weekly_interview/download_results/{session_data.test_id}",
                 "status": "complete",
             })
@@ -636,18 +741,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 elif message.get("type") == "manual_stop":
                     session_data.is_active = False
                     break
-                elif message.get("type") == "next_question":
-                    # Frontend sends this when awaitingServerAnswerRef has been
-                    # stuck too long (slow Technical round = 2 API calls).
-                    # Acknowledge so frontend clears the lock and resumes
-                    # voice detection — instead of waiting 30s safety timeout.
-                    logger.info("Session %s: next_question received - clearing frontend lock", session_id)
-                    await websocket.send_text(json.dumps({
-                        "type": "lock_cleared",
-                        "text": "Ready for your next answer.",
-                        "interview_continues": True
-                    }))
-                # === NEW: Bluetooth/Headphone device change handlers ===
+
                 elif message.get("type") == "device_change":
                     device_info = message.get("device", {})
                     logger.info("Audio device changed for session %s: %s", session_id, device_info)
@@ -666,7 +760,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         "text": "Device reconnected. You can continue your interview.",
                         "interview_continues": True
                     }))
-                # === END NEW ===
 
             except asyncio.TimeoutError:
                 break
@@ -689,17 +782,32 @@ async def websocket_endpoint_alias(websocket: WebSocket, session_id: str):
 async def health_check():
     return {"status": "healthy", "active_sessions": len(interview_manager.active_sessions)}
 
+
+# ===== FIX: PDF download — proxy through backend to avoid CORS =====
+# Old code used RedirectResponse to S3 presigned URL, which caused:
+#   "blocked by CORS policy: No 'Access-Control-Allow-Origin' header"
+# New code downloads from S3 and streams directly to the browser.
 @app.get("/download_results/{test_id}")
 async def download_results(test_id: str):
     try:
         result = await interview_manager.get_session_result_fast(test_id)
 
-        # Try S3 presigned URL first
+        # ===== FIX: Proxy PDF through backend (no CORS redirect to S3) =====
         pdf_s3_key = result.get("pdf_s3_key")
-        if pdf_s3_key:
-            presigned_url = get_s3_presigned_url(pdf_s3_key, expires_in=3600)
-            if presigned_url:
-                return RedirectResponse(url=presigned_url)
+        if pdf_s3_key and s3_client:
+            try:
+                s3_response = s3_client.get_object(Bucket=S3_BUCKET, Key=pdf_s3_key)
+                pdf_bytes = s3_response["Body"].read()
+                return StreamingResponse(
+                    io.BytesIO(pdf_bytes),
+                    media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": f"inline; filename=interview_report_{test_id}.pdf",
+                        "Cache-Control": "public, max-age=3600",
+                    },
+                )
+            except Exception as s3_err:
+                logger.warning("S3 fetch failed, generating on-the-fly: %s", s3_err)
 
         # Fallback: generate on-the-fly
         pdf_buffer = await asyncio.get_event_loop().run_in_executor(
@@ -708,10 +816,11 @@ async def download_results(test_id: str):
         return StreamingResponse(
             io.BytesIO(pdf_buffer),
             media_type="application/pdf",
-            headers={"Content-Disposition": f"attachment; filename=interview_report_{test_id}.pdf"},
+            headers={"Content-Disposition": f"inline; filename=interview_report_{test_id}.pdf"},
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
     
 def generate_pdf_report(result: dict, test_id: str) -> bytes:
     """
@@ -778,7 +887,6 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
     elif overall_score >= 4.0: grade, grade_color = "Needs Improvement", HexColor("#e65100")
     else: grade, grade_color = "Poor", DANGER
 
-    # HEADER BANNER
     header_data = [[
         Paragraph(f"<b>{student_name}</b>", styles['ReportTitle']),
         Paragraph(f"<b>{overall_score}/10</b>", ParagraphStyle('HeaderScore', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=28, textColor=white, alignment=TA_RIGHT))
@@ -807,7 +915,6 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
     story.append(meta_table)
     story.append(Spacer(1, 12))
     
-    # SCORE DASHBOARD
     story.append(Paragraph("Score Dashboard", styles['SectionHeading']))
     
     score_keys = [
@@ -862,7 +969,6 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
     story.append(dashboard)
     story.append(Spacer(1, 8))
     
-    # KEY METRICS ROW
     tech_acc = scores.get("technical_accuracy", 0)
     hr_acc = scores.get("hr_accuracy", 0)
     correct = scores.get("questions_correct", 0)
@@ -898,7 +1004,6 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
     story.append(metrics_table)
     story.append(Spacer(1, 10))
     
-    # ROUND-BY-ROUND Q&A FEEDBACK
     ROUND_COLORS = {"communication": HexColor("#0277bd"), "technical": HexColor("#2e7d32"), "hr": HexColor("#6a1b9a")}
     
     rounds_data = eval_details.get("rounds", {}) if eval_details else {}
@@ -963,7 +1068,6 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
         
         story.append(Spacer(1, 8))
     
-    # OVERALL SUMMARY
     story.append(Paragraph("Overall Summary", styles['SectionHeading']))
     
     summary_text = ""
@@ -985,7 +1089,6 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
                 story.append(Paragraph(_escape_xml(para), styles['BodyText2']))
                 story.append(Spacer(1, 4))
     
-    # RECOMMENDATIONS
     recommendations = eval_details.get("recommendations", []) if eval_details else []
     if recommendations:
         story.append(Paragraph("Recommendations", styles['SectionHeading']))
@@ -993,7 +1096,6 @@ def generate_pdf_report(result: dict, test_id: str) -> bytes:
             story.append(Paragraph(f"<font color='{ACCENT.hexval()}'><b>{i}.</b></font> {_escape_xml(rec)}", styles['BodyText2']))
             story.append(Spacer(1, 3))
     
-    # FOOTER
     story.append(Spacer(1, 20))
     story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#e0e0e0")))
     story.append(Spacer(1, 6))
