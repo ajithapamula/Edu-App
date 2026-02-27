@@ -1,6 +1,7 @@
 # weekend_mocktest/core/prompts.py
 # FIXED: Questions generated from MongoDB summaries, NO hard-coded questions
 # Non-dev: STRICTLY blocks Python/programming content
+# UPDATED: Coding questions now generate TEST CASES (HackerRank-style)
 from typing import List, Dict, Any
 from .config import config
 
@@ -13,6 +14,7 @@ class PromptTemplates:
     - Questions are generated from MongoDB summaries (context parameter)
     - NO hard-coded questions
     - Non-dev: NO Python/programming questions
+    - Coding questions now include test cases for Piston execution
     """
 
     @staticmethod
@@ -113,10 +115,14 @@ D) [Option]
 
 Generate {count} MCQ questions from the content. Use === QUESTION N === markers."""
 
+    # ================================================================
+    # DEVELOPER CODING — WITH TEST CASES (HackerRank-style)
+    # ================================================================
+
     @staticmethod
     def _dev_coding_prompt(context: str, count: int) -> str:
-        """Developer coding - Python problems from summaries"""
-        return f"""Generate exactly {count} Python coding problems based on this content:
+        """Developer coding - Python problems with test cases for Piston execution"""
+        return f"""Generate exactly {count} Python coding problems with test cases, like HackerRank.
 
 === COURSE CONTENT ===
 {context}
@@ -124,20 +130,88 @@ Generate {count} MCQ questions from the content. Use === QUESTION N === markers.
 
 Create practical Python coding problems testing concepts from the content.
 
-FORMAT:
+RULES:
+1. Program MUST read from stdin using input() and print output using print()
+2. Each problem MUST have 4-6 test cases with EXACT input and expected output
+3. Include 2 VISIBLE test cases (shown to student) and 2-4 HIDDEN test cases (for final grading)
+4. Test cases MUST be deterministic (same input = same output always)
+5. Keep problems beginner to intermediate level
+
+FORMAT (follow EXACTLY):
 
 === QUESTION 1 ===
-## Title: [Problem Name]
+## Title: Sum of Two Numbers
 ## Difficulty: Easy
 ## Type: coding
 ## Question:
-Write a Python function/program to [problem description].
+Write a Python program that reads two integers from input (one per line) and prints their sum.
 
-**Input:** [describe]
-**Output:** [describe]
-**Example:** Input: [x] → Output: [y]
+**Input Format:**
+- Line 1: First integer
+- Line 2: Second integer
 
-Generate {count} coding problems with === QUESTION N === markers."""
+**Output Format:**
+- A single integer: the sum
+
+**Example:**
+Input:
+3
+5
+Output:
+8
+
+## TestCases:
+TC1|VISIBLE|3\\n5|8
+TC2|VISIBLE|10\\n20|30
+TC3|HIDDEN|0\\n0|0
+TC4|HIDDEN|-5\\n10|5
+TC5|HIDDEN|1000\\n2000|3000
+
+══════════════════════════════════════════════════════════════════
+TEST CASE FORMAT RULES:
+══════════════════════════════════════════════════════════════════
+- Each line: TC<number>|VISIBLE or HIDDEN|<input>|<expected_output>
+- Use \\n for newlines in input (e.g., 3\\n5 means two lines: 3 and 5)
+- Expected output = EXACT print() output (what Python prints)
+- No trailing spaces or extra newlines
+- VISIBLE = shown to student during practice
+- HIDDEN = only used during final submission grading
+- First 2 test cases MUST be VISIBLE, rest HIDDEN
+- Include edge cases in HIDDEN (zero, negative, large numbers, empty)
+
+Generate exactly {count} coding problems with === QUESTION N === markers.
+Each problem MUST have a ## TestCases: section."""
+
+    # ================================================================
+    # STANDALONE TEST CASE GENERATION
+    # (for existing coding questions that don't have test cases yet)
+    # ================================================================
+
+    @staticmethod
+    def create_test_cases_prompt(question: str, num_cases: int = 5) -> str:
+        """Generate test cases for an existing coding question that has none"""
+        return f"""Generate exactly {num_cases} test cases for this coding problem.
+
+CODING QUESTION:
+{question}
+
+RULES:
+1. Program reads from stdin using input() and writes to stdout using print()
+2. Test cases must be deterministic (same input = same output)
+3. Include edge cases (empty input, zero, negative numbers, large values)
+4. First 2 test cases = VISIBLE (shown to student)
+5. Remaining test cases = HIDDEN (for final grading only)
+6. Expected output = EXACT output of print() statement
+
+FORMAT (output ONLY these lines, nothing else):
+TC1|VISIBLE|<input>|<expected_output>
+TC2|VISIBLE|<input>|<expected_output>
+TC3|HIDDEN|<input>|<expected_output>
+TC4|HIDDEN|<input>|<expected_output>
+TC5|HIDDEN|<input>|<expected_output>
+
+Use \\n for multi-line input (e.g., 3\\n5 means line 1 is 3, line 2 is 5).
+Output ONLY the TC lines. No explanations, no code blocks, no extra text."""
 
     # ================================================================
     # NON-DEVELOPER PROMPTS - NO PYTHON/PROGRAMMING!

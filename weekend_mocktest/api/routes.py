@@ -5,22 +5,25 @@ Includes:
 - Test routes (start, submit, results, pdf)
 - Warning routes (add, status, history)
 - Section-wise evaluation with AI explanations
+- Code execution routes (HackerRank-style test case runner)
 """
 
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import io
 
 from ..services.test_service import get_test_service
 from ..services.pdf_service import get_pdf_service
-from ..core.utils import DateTimeUtils
+from ..core.utils import DateTimeUtils, memory_manager
+from ..core.ai_services import get_ai_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 test_service = get_test_service()
 pdf_service = get_pdf_service()
+ai_service = get_ai_service()
 
 
 def _serialize_object(obj):
@@ -368,6 +371,241 @@ async def force_complete_test(request_data: dict):
 
 
 # ================================================================
+# CODE EXECUTION ROUTES (HackerRank-style test case runner)
+#
+# Uses Piston API via ai_service.execute_code() and
+# ai_service.run_test_cases() — NO new files needed.
+#
+# Endpoints:
+#   POST /api/code/execute      — Run code with stdin
+#   POST /api/code/run-tests    — Run code against test cases
+#   GET  /api/code/test-cases   — Get visible test cases for a question
+#   POST /api/code/submit       — Submit code (runs ALL tests incl hidden)
+# ================================================================
+
+@router.post("/api/code/execute")
+async def execute_code_route(request_data: dict):
+    """
+    Execute code with stdin input via Piston API.
+    Frontend "Run Code" button can call this.
+    
+    Body: { "language": "python", "code": "...", "stdin": "5\\n3" }
+    Returns: { "success": true, "stdout": "8", "stderr": "", "overall_result": "Accepted", ... }
+    """
+    try:
+        language = request_data.get("language", "python")
+        code = request_data.get("code", "")
+        stdin = request_data.get("stdin", "")
+
+        if not code or not code.strip():
+            raise HTTPException(status_code=400, detail="No code provided")
+
+        result = await ai_service.execute_code(language=language, code=code, stdin=stdin)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Code execution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/code/run-tests")
+async def run_test_cases_route(request_data: dict):
+    """
+    Run code against test cases (HackerRank-style).
+    Frontend "Run Tests" button calls this.
+    
+    Body: {
+        "language": "python",
+        "code": "a=int(input())\\nb=int(input())\\nprint(a+b)",
+        "test_cases": [
+            {"id": 1, "input": "3\\n5", "expected_output": "8", "is_hidden": false, "label": "Test Case 1"},
+            {"id": 2, "input": "10\\n20", "expected_output": "30", "is_hidden": false, "label": "Test Case 2"}
+        ]
+    }
+    
+    Returns: {
+        "results": [...per test case pass/fail...],
+        "total_passed": 1, "total_failed": 1, "total_cases": 2,
+        "all_passed": false, "score_percentage": 50.0,
+        "overall_result": "Wrong Answer",
+        "execution_summary": "1/2 test cases passed (50.0%)"
+    }
+    """
+    try:
+        language = request_data.get("language", "python")
+        code = request_data.get("code", "")
+        test_cases = request_data.get("test_cases", [])
+
+        if not code or not code.strip():
+            raise HTTPException(status_code=400, detail="No code provided")
+        if not test_cases:
+            raise HTTPException(status_code=400, detail="No test cases provided")
+
+        result = await ai_service.run_test_cases(language=language, code=code, test_cases=test_cases)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Test execution error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/code/test-cases/{test_id}/{question_number}")
+async def get_test_cases_route(test_id: str, question_number: int):
+    """
+    Get visible test cases for a coding question.
+    Frontend fetches this when student opens a coding question.
+    Hidden test cases are NOT returned (used only during final submit).
+    
+    Returns: {
+        "test_cases": [{"id":1, "input":"3\\n5", "expected_output":"8", "label":"Test Case 1"}, ...],
+        "total_visible": 2, "total_hidden": 3, "total_cases": 5
+    }
+    """
+    try:
+        test_session = memory_manager.get_test(test_id)
+        if not test_session:
+            raise HTTPException(status_code=404, detail="Test not found")
+
+        questions = test_session.get("questions", [])
+        question = None
+        for q in questions:
+            if q.get("question_number") == question_number:
+                question = q
+                break
+
+        if not question:
+            raise HTTPException(status_code=404, detail=f"Question {question_number} not found")
+
+        if question.get("question_type") != "coding":
+            raise HTTPException(status_code=400, detail="Not a coding question")
+
+        # Get test cases — generate if missing (backward compat for old questions)
+        all_tc = question.get("test_cases", [])
+        if not all_tc:
+            logger.info(f"🧪 Generating test cases for Q{question_number}...")
+            all_tc = ai_service.generate_test_cases(question.get("question", ""), num_cases=5)
+            question["test_cases"] = all_tc
+
+        # Return ONLY visible test cases
+        visible = [
+            {
+                "id": tc["id"],
+                "input": tc["input"],
+                "expected_output": tc["expected_output"],
+                "label": tc.get("label", f"Test Case {tc['id']}"),
+            }
+            for tc in all_tc if not tc.get("is_hidden", False)
+        ]
+        hidden_count = sum(1 for tc in all_tc if tc.get("is_hidden", False))
+
+        return {
+            "testId": test_id,
+            "test_id": test_id,
+            "questionNumber": question_number,
+            "question_number": question_number,
+            "test_cases": visible,
+            "total_visible": len(visible),
+            "total_hidden": hidden_count,
+            "total_cases": len(all_tc),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Get test cases error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/code/submit")
+async def submit_code_route(request_data: dict):
+    """
+    Submit code for final evaluation — runs ALL test cases (visible + hidden).
+    Called when student submits their coding answer.
+    
+    Body: {
+        "test_id": "abc123",
+        "question_number": 21,
+        "language": "python",
+        "code": "a=int(input())\\nb=int(input())\\nprint(a+b)"
+    }
+    
+    Returns: {
+        "question_number": 21,
+        "is_correct": false,
+        "score": 0.6,
+        "overall_result": "Wrong Answer",
+        "test_case_results": { ...full run_test_cases result... }
+    }
+    """
+    try:
+        test_id = request_data.get("test_id")
+        question_number = request_data.get("question_number")
+        language = request_data.get("language", "python")
+        code = request_data.get("code", "")
+
+        if not test_id or not question_number:
+            raise HTTPException(status_code=400, detail="test_id and question_number required")
+        if not code or not code.strip():
+            raise HTTPException(status_code=400, detail="No code provided")
+
+        test_session = memory_manager.get_test(test_id)
+        if not test_session:
+            raise HTTPException(status_code=404, detail="Test not found")
+
+        questions = test_session.get("questions", [])
+        question = None
+        for q in questions:
+            if q.get("question_number") == question_number:
+                question = q
+                break
+        if not question:
+            raise HTTPException(status_code=404, detail=f"Question {question_number} not found")
+
+        # Get ALL test cases (visible + hidden)
+        all_tc = question.get("test_cases", [])
+        if not all_tc:
+            logger.info(f"🧪 Generating test cases for Q{question_number} (submit)...")
+            all_tc = ai_service.generate_test_cases(question.get("question", ""), num_cases=5)
+            question["test_cases"] = all_tc
+
+        # Run code against ALL test cases
+        test_results = await ai_service.run_test_cases(language=language, code=code, test_cases=all_tc)
+
+        # Store results in session for final evaluation
+        if "coding_test_results" not in test_session:
+            test_session["coding_test_results"] = {}
+        test_session["coding_test_results"][question_number] = test_results
+
+        # Store student's code and language
+        question["user_code"] = code
+        question["user_language"] = language
+
+        score = test_results["score_percentage"] / 100.0
+
+        return {
+            "questionNumber": question_number,
+            "question_number": question_number,
+            "isCorrect": test_results["all_passed"],
+            "is_correct": test_results["all_passed"],
+            "score": score,
+            "overallResult": test_results["overall_result"],
+            "overall_result": test_results["overall_result"],
+            "testCaseResults": test_results,
+            "test_case_results": test_results,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Code submit error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ================================================================
 # WARNING ROUTES (Proctoring - 3 warnings = termination)
 #
 # FIXED:
@@ -407,11 +645,11 @@ async def _handle_add_warning(request_data: dict):
             "face_not_detected", "face_multiple", "face_looking_away",
             "face_turned_left", "face_turned_right",
             "object_phone", "object_book", "object_person",
-            "tab_switch", "right_click", "low_light"
+            "tab_switch", "right_click", "low_light",
         
             # OLD types (backward compatibility)
             "multiple_faces", "object_detected", "face_turning",
-            "face_not_visible", "screenshot"
+            "face_not_visible", "screenshot",
         ]
         
         if warning_type not in valid_types:
@@ -660,7 +898,6 @@ async def get_student_dashboard(student_id: str):
 async def get_specific_question(test_id: str, question_number: int):
     """Get specific question by number (for navigation)"""
     try:
-        from ..core.utils import memory_manager
         import markdown
         
         test_data = memory_manager.get_test(test_id)
@@ -733,7 +970,6 @@ async def get_specific_question(test_id: str, question_number: int):
 async def get_test_status(test_id: str):
     """Get current test status and progress"""
     try:
-        from ..core.utils import memory_manager
         test_data = memory_manager.get_test(test_id)
         if not test_data:
             raise HTTPException(status_code=404, detail="Test not found")

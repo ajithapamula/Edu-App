@@ -9,6 +9,7 @@ FIXED: Removed double add_exchange that caused question number skipping
 FIXED: Sends is_repeat flag to frontend for proper question tracking
 FIXED: PDF download proxied through backend (CORS fix)
 FIXED: Silence counters reset on valid response
+FIXED: 3 consecutive silences → terminate interview (no round skipping)
 """
 
 import os
@@ -58,6 +59,9 @@ from core.prompts import validate_prompts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ===== OVERRIDE: 3 silences → terminate interview (no round skipping) =====
+MAX_CONSECUTIVE_SILENCE = 3
 
 
 # ─── S3 Client Setup ───
@@ -318,116 +322,44 @@ class UltraFastInterviewManager:
                 pass
             raise Exception(f"Audio processing failed: {e}")
 
+    # =========================================================================
+    # SILENCE HANDLING — SIMPLIFIED
+    # 1st silence → gentle prompt ("take your time")
+    # 2nd silence → gentle prompt
+    # 3rd silence → TERMINATE entire interview. No round skipping.
+    # =========================================================================
     async def _handle_silence(self, session_data: InterviewSession):
-        """Handle empty/silent audio input.
-        1st silence → gentle "take your time" prompt
-        2nd silence → auto-generate a NEW question instead of repeating prompts
-        5+ consecutive silences → auto-skip to next round
-        """
         current_stage = session_data.current_stage
-        
         session_data.consecutive_no_response += 1
+
         logger.info("Session %s: consecutive_no_response=%d/%d in %s round",
-                     session_data.session_id, session_data.consecutive_no_response, 
+                     session_data.session_id, session_data.consecutive_no_response,
                      MAX_CONSECUTIVE_SILENCE, current_stage.value)
-        
-        # ===== AUTO-SKIP: Too many consecutive silences → move to next round =====
+
+        # ===== 3 consecutive silences → TERMINATE INTERVIEW =====
         if session_data.consecutive_no_response >= MAX_CONSECUTIVE_SILENCE:
-            logger.info("Session %s: %d consecutive silences — auto-skipping %s round",
+            logger.info("Session %s: %d consecutive silences — TERMINATING interview (was in %s round)",
                         session_data.session_id, session_data.consecutive_no_response, current_stage.value)
-            
-            if current_stage == InterviewStage.COMMUNICATION:
-                session_data.start_round(InterviewStage.TECHNICAL)
-                q, keywords = await self.conversation_manager._generate_technical_question(session_data)
-                session_data.add_exchange(q, expected_keywords=keywords, question_type="technical")
-                new_response = f"Let's move on to the technical round. {q}"
-            elif current_stage == InterviewStage.TECHNICAL:
-                session_data.start_round(InterviewStage.HR)
-                q, keywords = await self.conversation_manager._generate_hr_question(session_data, self.db_manager)
-                if "hr_complete" in keywords:
-                    session_data.current_stage = InterviewStage.COMPLETE
-                    new_response = "Thank you! Great interview. Let me generate your detailed feedback..."
-                    await self._send_response_with_ultra_fast_audio(session_data, new_response)
-                    await self._finalize_session_fast(session_data)
-                    return
-                session_data.add_exchange(q, expected_keywords=keywords, question_type="hr")
-                new_response = f"Let's move on to some behavioral questions. {q}"
-            elif current_stage == InterviewStage.HR:
-                session_data.current_stage = InterviewStage.COMPLETE
-                new_response = "Thank you! Great interview. Let me generate your detailed feedback..."
-                await self._send_response_with_ultra_fast_audio(session_data, new_response)
-                await self._finalize_session_fast(session_data)
-                return
-            else:
-                new_response = "Take your time, I'm here whenever you're ready."
-            
-            await self._send_response_with_ultra_fast_audio(session_data, new_response)
+
+            session_data.current_stage = InterviewStage.COMPLETE
+            termination_message = (
+                "It looks like we're having trouble capturing your audio. "
+                "We'll end the interview here and generate your feedback based on what we have so far. "
+                "Thank you for your time!"
+            )
+            await self._send_response_with_ultra_fast_audio(session_data, termination_message)
+            await self._finalize_session_fast(session_data)
             return
-        
-        # Auto-generate new question after enough silence prompts.
-        # Communication: quick questions → move on after 1 silence prompt (~10s)
-        # HR: behavioral needs some thinking → move on after 2 prompts (~20s)
-        # Technical: complex questions → move on after 3 prompts (~30s)
-        silence_threshold_by_round = {
-            "communication": 1,
-            "hr": 2,
-            "technical": 3,
-        }
-        required_silence_prompts = silence_threshold_by_round.get(current_stage.value, 2)
-        
-        if session_data.silence_prompt_count >= required_silence_prompts and current_stage.value in ["technical", "hr", "communication"]:
-            session_data.silence_prompt_count = 0
-            logger.info("Session %s: Repeated silence in %s round - auto-generating new question", 
-                       session_data.session_id, current_stage.value)
-            
-            try:
-                if current_stage == InterviewStage.TECHNICAL:
-                    if session_data.exchanges:
-                        last_q = session_data.exchanges[-1].ai_message.lower()
-                        for tech in (session_data.extracted_technologies or []):
-                            if tech.lower() in last_q:
-                                session_data.topic_attempt_count[tech] = session_data.topic_attempt_count.get(tech, 0) + 1
-                                if session_data.topic_attempt_count[tech] >= 2 and tech not in session_data.silent_topics:
-                                    session_data.silent_topics.append(tech)
-                                break
-                    q, keywords = await self.conversation_manager._generate_technical_question(session_data, "", True)
-                    session_data.add_exchange(q, expected_keywords=keywords, question_type="technical")
-                    new_response = f"No worries, let's try a different question. {q}"
-                    
-                elif current_stage == InterviewStage.HR:
-                    q, keywords = await self.conversation_manager._generate_hr_question(session_data, self.db_manager)
-                    if "hr_complete" in keywords:
-                        logger.info("Session %s: All HR categories done — ending interview", session_data.session_id)
-                        session_data.current_stage = InterviewStage.COMPLETE
-                        new_response = "Thank you! Great interview. Let me generate your detailed feedback..."
-                        await self._send_response_with_ultra_fast_audio(session_data, new_response)
-                        await self._finalize_session_fast(session_data)
-                        return
-                    session_data.add_exchange(q, expected_keywords=keywords, question_type="hr")
-                    new_response = f"That's okay, let me ask you something else. {q}"
-                    
-                elif current_stage == InterviewStage.COMMUNICATION:
-                    q = await self.conversation_manager._generate_communication_question(session_data)
-                    session_data.add_exchange(q, question_type="communication")
-                    new_response = f"No problem! Here's a different question. {q}"
-                else:
-                    new_response = "Take your time, I'm here whenever you're ready."
-                
-                await self._send_response_with_ultra_fast_audio(session_data, new_response)
-                return
-                
-            except Exception as e:
-                logger.error("Failed to generate new question after silence: %s", e)
-        
-        # First silence → gentle "take your time" prompt
+
+        # ===== 1st or 2nd silence → gentle prompt =====
         silence_response = await self.conversation_manager.generate_silence_response(session_data)
-        
+
         await self._send_quick_message(session_data, {
             "type": "silence_prompt",
             "text": silence_response,
             "stage": session_data.current_stage.value,
         })
-        
+
         try:
             async for audio_chunk in self.tts_processor.generate_ultra_fast_stream(
                 silence_response, session_id=session_data.session_id
@@ -784,15 +716,11 @@ async def health_check():
 
 
 # ===== FIX: PDF download — proxy through backend to avoid CORS =====
-# Old code used RedirectResponse to S3 presigned URL, which caused:
-#   "blocked by CORS policy: No 'Access-Control-Allow-Origin' header"
-# New code downloads from S3 and streams directly to the browser.
 @app.get("/download_results/{test_id}")
 async def download_results(test_id: str):
     try:
         result = await interview_manager.get_session_result_fast(test_id)
 
-        # ===== FIX: Proxy PDF through backend (no CORS redirect to S3) =====
         pdf_s3_key = result.get("pdf_s3_key")
         if pdf_s3_key and s3_client:
             try:
