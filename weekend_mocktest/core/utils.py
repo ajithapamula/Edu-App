@@ -1,5 +1,16 @@
 # weekend_mocktest/core/utils.py
-"""Utilities - Memory Manager for active tests"""
+# ═══════════════════════════════════════════════════════════════════
+# UPDATED: MongoDB-backed MemoryManager
+#
+# WHY: In-memory storage loses active tests on server restart.
+#      Students get "Test not found" errors mid-test.
+#
+# HOW: Active tests stored in MongoDB collection 'active_tests'.
+#      In-memory cache for fast access, MongoDB as fallback.
+#      On restart, tests are recovered from MongoDB automatically.
+#      After completion, cleared from both cache and MongoDB
+#      (results are already saved separately).
+# ═══════════════════════════════════════════════════════════════════
 
 import uuid
 import time
@@ -27,17 +38,109 @@ class DateTimeUtils:
 
 class MemoryManager:
     """
-    In-memory test session manager.
-    Stores active tests temporarily during session.
-    """
+    MongoDB-backed test session manager.
     
+    - In-memory dict for fast reads (cache)
+    - MongoDB 'active_tests' collection as persistent store
+    - On cache miss → check MongoDB (handles server restarts)
+    - On test complete → clear from both (results saved separately)
+    """
+
     def __init__(self):
         self.tests: Dict[str, Dict[str, Any]] = {}
         self.answers: Dict[str, List[Dict[str, Any]]] = {}
-        logger.info("📦 MemoryManager initialized")
+        self._db = None  # Lazy init to avoid circular imports
+        self._collection = None
+        logger.info("📦 MemoryManager initialized (MongoDB-backed)")
+
+    def _get_collection(self):
+        """Lazy-load MongoDB collection to avoid circular imports"""
+        if self._collection is None:
+            try:
+                from .database import get_db_manager
+                db_manager = get_db_manager()
+                self._db = db_manager.db
+                self._collection = self._db["active_tests"]
+                # Index for fast lookups and auto-expiry
+                self._collection.create_index("test_id", unique=True)
+                self._collection.create_index("expires_at", expireAfterSeconds=0)
+                logger.info("✅ MemoryManager connected to MongoDB 'active_tests' collection")
+            except Exception as e:
+                logger.warning(f"⚠️ MongoDB not available for MemoryManager: {e}")
+                logger.warning("   Falling back to in-memory only mode")
+                self._collection = None
+        return self._collection
+
+    def _save_to_db(self, test_id: str):
+        """Save test state to MongoDB"""
+        col = self._get_collection()
+        if col is None:
+            return
+        
+        try:
+            test_data = self.tests.get(test_id)
+            answers_data = self.answers.get(test_id, [])
+            
+            if not test_data:
+                return
+            
+            from datetime import datetime, timezone
+            expires_at = datetime.fromtimestamp(
+                test_data.get("expires_at", time.time() + 7200),
+                tz=timezone.utc
+            )
+            
+            doc = {
+                "test_id": test_id,
+                "test_data": test_data,
+                "answers": answers_data,
+                "expires_at": expires_at,
+                "updated_at": time.time(),
+            }
+            
+            col.update_one(
+                {"test_id": test_id},
+                {"$set": doc},
+                upsert=True
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to save test {test_id} to MongoDB: {e}")
+
+    def _load_from_db(self, test_id: str) -> bool:
+        """Load test from MongoDB into cache. Returns True if found."""
+        col = self._get_collection()
+        if col is None:
+            return False
+        
+        try:
+            doc = col.find_one({"test_id": test_id})
+            if doc:
+                self.tests[test_id] = doc["test_data"]
+                self.answers[test_id] = doc.get("answers", [])
+                logger.info(f"🔄 Recovered test {test_id[:8]}... from MongoDB")
+                return True
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load test {test_id} from MongoDB: {e}")
+        
+        return False
+
+    def _delete_from_db(self, test_id: str):
+        """Remove test from MongoDB"""
+        col = self._get_collection()
+        if col is None:
+            return
+        
+        try:
+            col.delete_one({"test_id": test_id})
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to delete test {test_id} from MongoDB: {e}")
+
+    # ════════════════════════════════════════════════════════════
+    # PUBLIC API (same interface as before)
+    # ════════════════════════════════════════════════════════════
 
     def create_test(self, user_type: str, questions: List[Dict], student_id: int = None) -> str:
-        """Create a new test session"""
+        """Create a new test session — saved to both cache and MongoDB"""
         test_id = str(uuid.uuid4())
         
         self.tests[test_id] = {
@@ -53,16 +156,27 @@ class MemoryManager:
         
         self.answers[test_id] = []
         
+        # Persist to MongoDB
+        self._save_to_db(test_id)
+        
         logger.info(f"📝 Test created: {test_id} ({len(questions)} questions)")
         return test_id
 
     def get_test(self, test_id: str) -> Optional[Dict[str, Any]]:
-        """Get test data"""
-        return self.tests.get(test_id)
+        """Get test data — checks cache first, then MongoDB"""
+        # Check cache
+        if test_id in self.tests:
+            return self.tests[test_id]
+        
+        # Cache miss → try MongoDB (handles server restart)
+        if self._load_from_db(test_id):
+            return self.tests.get(test_id)
+        
+        return None
 
     def get_current_question(self, test_id: str) -> Dict[str, Any]:
         """Get current question for test"""
-        test = self.tests.get(test_id)
+        test = self.get_test(test_id)  # Uses cache + MongoDB fallback
         if not test:
             return {}
         
@@ -84,8 +198,8 @@ class MemoryManager:
         }
 
     def submit_answer(self, test_id: str, question_number: int, answer: str) -> bool:
-        """Submit answer for a question"""
-        test = self.tests.get(test_id)
+        """Submit answer — updates cache and persists to MongoDB"""
+        test = self.get_test(test_id)  # Auto-recovers from MongoDB if needed
         if not test:
             return False
         
@@ -104,7 +218,9 @@ class MemoryManager:
         }
         
         # Ensure answer list is correct size
-        while len(self.answers.get(test_id, [])) < question_number:
+        if test_id not in self.answers:
+            self.answers[test_id] = []
+        while len(self.answers[test_id]) < question_number:
             self.answers[test_id].append({})
         
         self.answers[test_id][question_number - 1] = answer_data
@@ -112,15 +228,26 @@ class MemoryManager:
         # Move to next question
         test["current_question"] = question_number + 1
         
+        # Persist updated state to MongoDB
+        self._save_to_db(test_id)
+        
         return True
 
     def get_test_answers(self, test_id: str) -> List[Dict[str, Any]]:
         """Get all answers for a test"""
-        return self.answers.get(test_id, [])
+        # Check cache first
+        if test_id in self.answers:
+            return self.answers[test_id]
+        
+        # Try loading from MongoDB
+        if self._load_from_db(test_id):
+            return self.answers.get(test_id, [])
+        
+        return []
 
     def is_test_complete(self, test_id: str) -> bool:
         """Check if test is complete"""
-        test = self.tests.get(test_id)
+        test = self.get_test(test_id)
         if not test:
             return False
         
@@ -130,15 +257,20 @@ class MemoryManager:
         return current > total
 
     def cleanup_test(self, test_id: str):
-        """Cleanup test data"""
+        """Cleanup test from both cache and MongoDB (called after completion)"""
+        # Remove from cache
         if test_id in self.tests:
             del self.tests[test_id]
         if test_id in self.answers:
             del self.answers[test_id]
+        
+        # Remove from MongoDB (results already saved separately)
+        self._delete_from_db(test_id)
+        
         logger.info(f"🧹 Test cleaned up: {test_id}")
 
     def cleanup_expired_data(self):
-        """Cleanup expired tests"""
+        """Cleanup expired tests from cache (MongoDB TTL handles DB cleanup)"""
         now = time.time()
         expired = []
         
@@ -160,7 +292,9 @@ memory_manager = MemoryManager()
 def cleanup_all():
     """Cleanup all active tests - called on shutdown"""
     global memory_manager
+    # Don't clear MongoDB on shutdown — that's the whole point!
+    # Only clear the in-memory cache
     expired_count = len(memory_manager.tests)
     memory_manager.tests.clear()
     memory_manager.answers.clear()
-    logger.info(f"🧹 Cleaned up all {expired_count} active tests")
+    logger.info(f"🧹 Cleared {expired_count} tests from memory cache (MongoDB preserved)")

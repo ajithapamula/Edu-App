@@ -1,27 +1,21 @@
 # weekend_mocktest/core/prompts.py
-# FIXED: Questions generated from MongoDB summaries, NO hard-coded questions
-# Non-dev: STRICTLY blocks Python/programming content
-# UPDATED: Coding questions now generate TEST CASES (HackerRank-style)
+# ═══════════════════════════════════════════════════════════════════
+# UPDATED: Language-agnostic prompts — auto-detects from summaries
+#
+# WHAT CHANGED:
+#   - _dev_mcq_prompt: Content-driven, no hardcoded language
+#   - _dev_coding_prompt: Detects language from context (Java/Python/JS/etc.)
+#   - Non-dev prompts: UNCHANGED
+# ═══════════════════════════════════════════════════════════════════
 from typing import List, Dict, Any
 from .config import config
 
 
 class PromptTemplates:
-    """
-    Prompt templates for AI question generation.
-    
-    IMPORTANT:
-    - Questions are generated from MongoDB summaries (context parameter)
-    - NO hard-coded questions
-    - Non-dev: NO Python/programming questions
-    - Coding questions now include test cases for Piston execution
-    """
 
     @staticmethod
     def create_bank_generation_prompt(user_type: str, question_type: str,
                                       context: str, count: int) -> str:
-        """Create prompt for generating questions from MongoDB summaries"""
-        
         if user_type == "dev":
             if question_type == "aptitude":
                 return PromptTemplates._dev_aptitude_prompt(count)
@@ -30,30 +24,43 @@ class PromptTemplates:
             elif question_type == "coding":
                 return PromptTemplates._dev_coding_prompt(context, count)
         else:
-            # NON-DEVELOPER: Only aptitude and mcq, NO CODING EVER
             if question_type == "aptitude":
                 return PromptTemplates._non_dev_aptitude_prompt(count)
             elif question_type == "mcq":
                 return PromptTemplates._non_dev_mcq_prompt(context, count)
             else:
-                # If somehow coding is requested for non-dev, return empty
                 return ""
-        
         return ""
 
     # ================================================================
     # DEVELOPER PROMPTS
     # ================================================================
-    
+
     @staticmethod
     def _dev_aptitude_prompt(count: int) -> str:
-        """Developer aptitude - general math/logic (no context needed)"""
         return f"""Generate exactly {count} aptitude MCQ questions.
 
 These are GENERAL aptitude questions - math, logic, reasoning.
 NOT programming questions.
 
 Topics: Number series, Percentages, Profit/Loss, Time/Work, Ratios, Averages, Logical reasoning.
+
+══════════════════════════════════════════════════════════════════
+CRITICAL — MATHEMATICAL ACCURACY:
+══════════════════════════════════════════════════════════════════
+For EVERY question, you MUST:
+1. Solve the problem yourself step-by-step BEFORE writing the options
+2. Verify your answer is mathematically correct
+3. Make sure the correct option EXACTLY matches your calculated answer
+4. Double-check: plug your answer back into the problem to verify
+5. All 4 options must be distinct numbers/values — no duplicates
+
+COMMON MISTAKES TO AVOID:
+❌ Saying average is 35 when calculation gives 36
+❌ Having correct answer not match any option
+❌ Division errors (always double-check division)
+❌ Ratio problems where parts don't add up to total
+══════════════════════════════════════════════════════════════════
 
 FORMAT (follow exactly):
 
@@ -84,124 +91,240 @@ D) 15%
 ## Correct: B
 
 Generate {count} different aptitude questions with === QUESTION N === markers.
-Each must have 4 options (A, B, C, D) and one correct answer."""
+Each must have 4 options (A, B, C, D) and one correct answer.
+CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble."""
 
     @staticmethod
     def _dev_mcq_prompt(context: str, count: int) -> str:
-        """Developer MCQ - from Python/programming summaries"""
         return f"""Generate exactly {count} MCQ questions based on this course content:
 
 === COURSE CONTENT (from MongoDB summaries) ===
 {context}
 === END CONTENT ===
 
-Create questions that test understanding of the content above.
-Questions should be about Python, programming concepts mentioned in the content.
+══════════════════════════════════════════════════════════════════
+STRICT RULES — READ CAREFULLY:
+══════════════════════════════════════════════════════════════════
+
+1. Every question MUST test a SPECIFIC fact, concept, or detail from the content above.
+2. If the content mentions specific classes, methods, syntax, APIs, frameworks, 
+   or concepts — create questions about THOSE specific things.
+3. Options must include specific technical details, NOT vague descriptions.
+
+BANNED QUESTION PATTERNS (do NOT generate these):
+❌ "What is the purpose of [language]?"
+❌ "What is the purpose of a loop/function/class?"
+❌ "What is a good practice for..."
+❌ "Why is it important to..."
+❌ "What is [language]'s focus on?"
+❌ Any question that could be answered WITHOUT reading the content above
+❌ Any question with options like "To build applications efficiently"
+
+GOOD QUESTION PATTERNS:
+✅ "What does the [specific method/class from content] do?"
+✅ "What is the output of [specific code snippet from content]?"
+✅ "Which [specific concept from content] is used when...?"
+✅ "In [specific topic from content], what happens when...?"
+✅ Questions about specific syntax, parameters, return types mentioned in content
+✅ Questions about specific error types, exception classes mentioned in content
 
 FORMAT:
 
 === QUESTION 1 ===
-## Title: [Topic from content]
+## Title: [Specific topic from content]
 ## Difficulty: Easy
 ## Type: mcq
 ## Question:
-[Question based on the content above]
+[Question testing a SPECIFIC fact from the content above]
 ## Options:
-A) [Option]
-B) [Option]
-C) [Option]
-D) [Option]
+A) [Specific technical answer]
+B) [Specific technical answer]
+C) [Specific technical answer]
+D) [Specific technical answer]
 ## Correct: [A/B/C/D]
 
-Generate {count} MCQ questions from the content. Use === QUESTION N === markers."""
+Generate {count} MCQ questions from the content. Use === QUESTION N === markers.
+CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble text."""
 
     # ================================================================
-    # DEVELOPER CODING — WITH TEST CASES (HackerRank-style)
+    # DEVELOPER CODING — LANGUAGE-AGNOSTIC WITH TEST CASES
     # ================================================================
 
     @staticmethod
     def _dev_coding_prompt(context: str, count: int) -> str:
-        """Developer coding - Python problems with test cases for Piston execution"""
-        return f"""Generate exactly {count} Python coding problems with test cases, like HackerRank.
+        return f"""Generate exactly {count} coding problems with test cases, like HackerRank/LeetCode.
 
-=== COURSE CONTENT ===
+=== COURSE CONTENT (for reference) ===
 {context}
 === END CONTENT ===
 
-Create practical Python coding problems testing concepts from the content.
+══════════════════════════════════════════════════════════════════
+LANGUAGE DETECTION (do NOT output this reasoning — just apply it):
+══════════════════════════════════════════════════════════════════
 
-RULES:
-1. Program MUST read from stdin using input() and print output using print()
-2. Each problem MUST have 4-6 test cases with EXACT input and expected output
-3. Include 2 VISIBLE test cases (shown to student) and 2-4 HIDDEN test cases (for final grading)
-4. Test cases MUST be deterministic (same input = same output always)
-5. Keep problems beginner to intermediate level
+Silently detect the language from the content above and use it:
+- Java content → Java problems (Scanner for input, System.out.println for output)
+- Python content → Python problems (input() and print())
+- JavaScript content → JavaScript problems (readline and console.log)
+- Multiple languages → mix problems across those languages
+- No clear language → default to Python
 
+CRITICAL: Do NOT write any introduction, preamble, or explanation.
+Start your response IMMEDIATELY with === QUESTION 1 ===
+No text before the first === QUESTION 1 === marker.
+
+══════════════════════════════════════════════════════════════════
+STEP 2: GENERATE TESTABLE PROBLEMS
+══════════════════════════════════════════════════════════════════
+
+IMPORTANT: DO NOT generate questions about file I/O, web scraping,
+downloads, threading, networking, or database operations.
+These CANNOT be tested in an automated environment.
+
+Instead, extract the PROGRAMMING CONCEPTS from the content
+(OOP, error handling, data structures, functions, loops, etc.)
+and create ALGORITHMIC problems that test those concepts.
+
+TOPIC CONVERSION TABLE:
+
+If content mentions...          → Generate problems about...
+─────────────────────────────────────────────────────────
+File handling, reading files    → String parsing, processing text input from stdin
+File writing                    → Formatting and printing structured output
+Threading / concurrency         → Processing lists, parallel task simulation with data
+Web scraping / requests         → Parsing structured text (CSV, key:value pairs)
+Database operations             → Dictionary/HashMap/Map CRUD operations
+Exception handling              → Input validation with try/catch or try/except
+OOP / Classes                   → Class design (BankAccount, StudentGrades, ShoppingCart)
+Functions / methods             → Writing reusable functions with clear I/O
+Data structures                 → List/Array/Map operations and algorithms
+Collections framework           → ArrayList, HashMap, TreeSet operations
+
+══════════════════════════════════════════════════════════════════
+QUESTION CATEGORIES (pick from these):
+══════════════════════════════════════════════════════════════════
+
+1. STRING PROCESSING
+   - Reverse words, count vowels, check palindrome
+   - Caesar cipher, remove duplicates, most frequent character
+
+2. MATH & ALGORITHMS
+   - Factorial, Fibonacci, prime check
+   - Sum of digits, GCD/LCM, number patterns
+
+3. LIST / ARRAY OPERATIONS
+   - Sort, filter, find min/max/second-largest
+   - Remove duplicates, merge sorted lists, frequency count
+
+4. MAP / DICTIONARY OPERATIONS
+   - Word frequency counter
+   - Student grade calculator, inventory management
+
+5. CLASS DESIGN (read data from stdin)
+   - BankAccount: deposit, withdraw, check balance
+   - StudentReport: add scores, calculate average, grade
+   - ShoppingCart: add items, calculate total, apply discount
+
+6. INPUT VALIDATION & ERROR HANDLING
+   - Validate and process mixed input
+   - Calculate with graceful error handling
+
+══════════════════════════════════════════════════════════════════
+STRICT RULES:
+══════════════════════════════════════════════════════════════════
+1. MUST read ALL input from stdin
+2. MUST print output to stdout
+3. SELF-CONTAINED — no files, no network, no external libraries
+4. DETERMINISTIC — same input = same output always
+5. NO: file operations, web requests, threading, database, GUI
+6. Questions must be CLEAR with explicit Input/Output format
+7. Each question must have 4-6 test cases
+8. State which language the solution should be written in
+
+FORBIDDEN KEYWORDS IN QUESTIONS:
+❌ "download", "upload", "file", "read from file", "write to file"
+❌ "web", "scrape", "crawl", "URL", "HTTP", "API"
+❌ "database", "SQL", "connect", "server"
+❌ "thread", "concurrent", "parallel" (as actual implementation)
+❌ "GUI", "window", "button", "click"
+
+══════════════════════════════════════════════════════════════════
 FORMAT (follow EXACTLY):
+══════════════════════════════════════════════════════════════════
 
 === QUESTION 1 ===
-## Title: Sum of Two Numbers
+## Title: Calculate Student Average
 ## Difficulty: Easy
 ## Type: coding
 ## Question:
-Write a Python program that reads two integers from input (one per line) and prints their sum.
+Write a program that reads a student's name and their scores in 3 subjects, then prints their average score rounded to 2 decimal places.
 
 **Input Format:**
-- Line 1: First integer
-- Line 2: Second integer
+- Line 1: Student name (string)
+- Line 2: Math score (integer)
+- Line 3: Science score (integer)
+- Line 4: English score (integer)
 
 **Output Format:**
-- A single integer: the sum
+- A single line: the average score rounded to 2 decimal places
 
 **Example:**
 Input:
-3
-5
+Alice
+85
+90
+78
 Output:
-8
+84.33
 
 ## TestCases:
-TC1|VISIBLE|3\\n5|8
-TC2|VISIBLE|10\\n20|30
-TC3|HIDDEN|0\\n0|0
-TC4|HIDDEN|-5\\n10|5
-TC5|HIDDEN|1000\\n2000|3000
+TC1|VISIBLE|Alice\n85\n90\n78|84.33
+TC2|VISIBLE|Bob\n100\n100\n100|100.0
+TC3|HIDDEN|Charlie\n0\n0\n0|0.0
+TC4|HIDDEN|Dave\n70\n80\n90|80.0
+TC5|HIDDEN|Eve\n99\n98\n97|98.0
 
 ══════════════════════════════════════════════════════════════════
-TEST CASE FORMAT RULES:
+TEST CASE FORMAT:
 ══════════════════════════════════════════════════════════════════
-- Each line: TC<number>|VISIBLE or HIDDEN|<input>|<expected_output>
-- Use \\n for newlines in input (e.g., 3\\n5 means two lines: 3 and 5)
-- Expected output = EXACT print() output (what Python prints)
-- No trailing spaces or extra newlines
-- VISIBLE = shown to student during practice
-- HIDDEN = only used during final submission grading
-- First 2 test cases MUST be VISIBLE, rest HIDDEN
-- Include edge cases in HIDDEN (zero, negative, large numbers, empty)
+- TC<N>|VISIBLE or HIDDEN|<input>|<expected_output>
+- Use \\n for newlines in both input and expected output
+- Expected output = EXACT stdout output, no prompts, no labels unless specified
+- First 2 VISIBLE, rest HIDDEN
+- HIDDEN should include edge cases (zero, empty, large, boundary)
 
 Generate exactly {count} coding problems with === QUESTION N === markers.
-Each problem MUST have a ## TestCases: section."""
+Make them DIVERSE — pick different categories from the list above.
+Each MUST have ## TestCases: with 4-6 test cases.
+CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble text."""
 
     # ================================================================
     # STANDALONE TEST CASE GENERATION
-    # (for existing coding questions that don't have test cases yet)
     # ================================================================
 
     @staticmethod
     def create_test_cases_prompt(question: str, num_cases: int = 5) -> str:
-        """Generate test cases for an existing coding question that has none"""
         return f"""Generate exactly {num_cases} test cases for this coding problem.
 
 CODING QUESTION:
 {question}
 
-RULES:
-1. Program reads from stdin using input() and writes to stdout using print()
-2. Test cases must be deterministic (same input = same output)
-3. Include edge cases (empty input, zero, negative numbers, large values)
-4. First 2 test cases = VISIBLE (shown to student)
-5. Remaining test cases = HIDDEN (for final grading only)
-6. Expected output = EXACT output of print() statement
+══════════════════════════════════════════════════════════════════
+CRITICAL RULES:
+══════════════════════════════════════════════════════════════════
+
+1. The program reads ALL data from stdin
+2. The program prints results to stdout
+3. Test cases must be deterministic (same input = same output)
+4. First 2 = VISIBLE, remaining = HIDDEN
+
+IMPORTANT — Expected output rules:
+- Expected output is ONLY the final computed result
+- Do NOT include input prompts in expected output
+- Do NOT include labels unless the question specifically asks for it
+- For numbers: just the number (e.g., "42")
+- For strings: just the string (e.g., "hello")
+- For booleans: language-appropriate ("True"/"False" or "true"/"false")
 
 FORMAT (output ONLY these lines, nothing else):
 TC1|VISIBLE|<input>|<expected_output>
@@ -210,16 +333,15 @@ TC3|HIDDEN|<input>|<expected_output>
 TC4|HIDDEN|<input>|<expected_output>
 TC5|HIDDEN|<input>|<expected_output>
 
-Use \\n for multi-line input (e.g., 3\\n5 means line 1 is 3, line 2 is 5).
+Use \\n for multi-line input (e.g., 3\\n5 means line 1 is "3", line 2 is "5").
 Output ONLY the TC lines. No explanations, no code blocks, no extra text."""
 
     # ================================================================
-    # NON-DEVELOPER PROMPTS - NO PYTHON/PROGRAMMING!
+    # NON-DEVELOPER PROMPTS - NO PROGRAMMING!
     # ================================================================
 
     @staticmethod
     def _non_dev_aptitude_prompt(count: int) -> str:
-        """Non-dev aptitude - general math/logic, NO programming"""
         return f"""Generate exactly {count} aptitude MCQ questions.
 
 RULES:
@@ -228,6 +350,17 @@ RULES:
 - NO technical IT questions
 
 Topics: Number series, Percentages, Profit/Loss, Time/Work, Ratios, Age problems, Speed/Distance.
+
+══════════════════════════════════════════════════════════════════
+CRITICAL — MATHEMATICAL ACCURACY:
+══════════════════════════════════════════════════════════════════
+For EVERY question:
+1. Solve the problem yourself step-by-step BEFORE writing options
+2. Verify your answer is mathematically correct
+3. Double-check: plug your answer back into the problem
+4. The correct option must EXACTLY match your calculated answer
+5. All 4 options must be distinct — no duplicates
+══════════════════════════════════════════════════════════════════
 
 FORMAT:
 
@@ -259,11 +392,11 @@ D) 15%
 
 Generate {count} aptitude questions. Use === QUESTION N === markers.
 Each must have 4 options and one correct answer.
-DO NOT include any programming questions."""
+DO NOT include any programming questions.
+CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble."""
 
     @staticmethod
     def _non_dev_mcq_prompt(context: str, count: int) -> str:
-        """Non-dev MCQ - from SAP/Business summaries, NO PYTHON"""
         return f"""You are an expert SAP/Business instructor. Generate exactly {count} MCQ questions STRICTLY based on the summary content provided below.
 
 ══════════════════════════════════════════════════════════════════
@@ -296,21 +429,6 @@ Step 1: EXTRACT from summary:
 
 Step 2: CREATE one question for each extracted fact
 
-Example - If summary says:
-"SAP supports up to 1,000 clients per system, identified by a three-digit number ranging from 000 to 999"
-
-Generate questions like:
-- "How many clients can SAP support per system?" → Answer: 1,000
-- "What is the valid range for SAP client numbers?" → Answer: 000 to 999
-- "How many digits are used to identify an SAP client?" → Answer: Three digits
-
-Example - If summary says:
-"Use T-code SCC4 to access client administration"
-
-Generate:
-- "Which transaction code is used for client administration?" → Answer: SCC4
-- "What is T-code SCC4 used for?" → Answer: Client administration
-
 ══════════════════════════════════════════════════════════════════
 SUMMARY CONTENT (Generate questions ONLY from this):
 ══════════════════════════════════════════════════════════════════
@@ -340,36 +458,27 @@ Generate exactly {count} questions using === QUESTION N === markers.
 CHECKLIST before responding:
 ✓ Every question is based on a SPECIFIC fact from the summary
 ✓ No two questions test the same concept
-✓ If summary has numbers → include number questions
-✓ If summary has T-codes → include T-code questions  
-✓ If summary has types/categories → include type questions
-✓ If summary has steps → include 1-2 process questions (not more)
-✓ If summary has troubleshooting → include troubleshooting questions
-✓ If summary has best practices → include best practice questions
 ✓ NO "primary goal" or "main purpose" questions
-✓ Options are specific facts, not vague phrases"""
+✓ Options are specific facts, not vague phrases
+✓ Start IMMEDIATELY with === QUESTION 1 === — no introduction or preamble"""
 
     # ================================================================
-    # EVALUATION PROMPTS
+    # EVALUATION PROMPTS (UNCHANGED)
     # ================================================================
 
     @staticmethod
     def create_section_evaluation_prompt(section_type: str, qa_pairs: List[Dict[str, Any]]) -> str:
-        """Create evaluation prompt for a section"""
         question_count = len(qa_pairs)
-        
         formatted = []
         for i, qa in enumerate(qa_pairs, 1):
             q = qa.get("question", "")
             a = qa.get("answer", "")
             options = qa.get("options", [])
             correct = qa.get("correct_answer") or qa.get("correct_option_text", "")
-            
             opts_str = ""
             if options:
                 for j, opt in enumerate(options):
                     opts_str += f"\n   {chr(65+j)}) {opt}"
-            
             formatted.append(f"""
 QUESTION {i}:
 {q}{opts_str}
@@ -377,9 +486,7 @@ QUESTION {i}:
 CORRECT ANSWER: {correct}
 USER'S ANSWER: {a if a and a.strip() else "[NO ANSWER]"}
 """)
-        
         qa_content = "\n".join(formatted)
-        
         return f"""Evaluate these {section_type.upper()} answers.
 
 {qa_content}
@@ -397,9 +504,7 @@ Evaluate all {question_count} questions now:"""
 
     @staticmethod
     def create_evaluation_prompt(user_type: str, qa_pairs: List[Dict[str, Any]]) -> str:
-        """Create full evaluation prompt"""
         question_count = len(qa_pairs)
-
         formatted = []
         for i, qa in enumerate(qa_pairs, 1):
             q = qa.get("question", "")
@@ -412,9 +517,7 @@ Q{i} [{q_type.upper()}]:
 CORRECT: {correct}
 USER ANSWER: {a if a else "[BLANK]"}
 """)
-
         qa_content = "\n---\n".join(formatted)
-
         return f"""Evaluate this test.
 
 {qa_content}

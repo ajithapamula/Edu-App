@@ -556,7 +556,7 @@ class TestService:
         """Get time limit in seconds"""
         if user_type == "non_dev":
             return {"aptitude": 60, "mcq": 60}.get(q_type, 60)
-        return {"aptitude": 120, "mcq": 120, "coding": 240}.get(q_type, 120)
+        return {"aptitude": 60, "mcq": 60, "coding": 600}.get(q_type, 60)
 
     def _create_start_response(self, test_id: str, test_data: Dict, current_q: Dict, 
                                 time_limit: int, exam_structure: Dict, user_type: str):
