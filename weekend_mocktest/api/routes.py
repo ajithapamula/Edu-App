@@ -17,6 +17,9 @@ from ..services.test_service import get_test_service
 from ..services.pdf_service import get_pdf_service
 from ..core.utils import DateTimeUtils, memory_manager
 from ..core.ai_services import get_ai_service
+import pymysql
+import pymysql.cursors
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,71 @@ router = APIRouter()
 test_service = get_test_service()
 pdf_service = get_pdf_service()
 ai_service = get_ai_service()
+
+
+def _get_student_profile(student_id: int) -> dict | None:
+    """
+    Fetch full student profile from MySQL tbl_Student.
+    Returns dict with all fields needed for question generation + result storage.
+    Returns None if not found or DB error.
+
+    Configure via env vars:
+      MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
+    """
+    try:
+        conn = pymysql.connect(
+            host            = os.getenv("DB_HOST",     "192.168.48.201"),
+            port            = int(os.getenv("DB_PORT", "3306")),
+            user            = os.getenv("DB_USER",     "sa"),
+            password        = os.getenv("DB_PASSWORD", "Welcome@123"),
+            database        = os.getenv("DB_NAME",     "SuperDB"),
+            cursorclass     = pymysql.cursors.DictCursor,
+            connect_timeout = 5,
+            read_timeout    = 5,
+        )
+        with conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT
+                        ID                                     AS student_id,
+                        CONCAT(First_Name, ' ', Last_Name)     AS student_name,
+                        Email                                  AS email,
+                        Mobile_Number                          AS mobile,
+                        Course                                 AS course,
+                        Batch                                  AS batch,
+                        Role_Type                              AS role_type,
+                        Experience_Category                    AS experience,
+                        Passout_Year                           AS passout_year,
+                        Org_ID                                 AS org_id
+                    FROM tbl_Student
+                    WHERE ID = %s AND status = 1
+                    LIMIT 1
+                """, (student_id,))
+                row = cursor.fetchone()
+
+        if not row:
+            logger.warning(f"⚠️ Student {student_id} not found in MySQL")
+            return None
+
+        # Resolve user_type from Role_Type
+        role = (row.get("role_type") or "").strip()
+        if role == "Developer":
+            row["user_type"] = "dev"
+        elif role == "Non-Developer":
+            row["user_type"] = "non_dev"
+        else:
+            row["user_type"] = None   # caller uses fallback
+            logger.warning(f"⚠️ Student {student_id} Role_Type is NULL — will use fallback")
+
+        logger.info(
+            f"✅ Student fetched: [{student_id}] {row['student_name']} | "
+            f"Role: {role} | Course: {row['course']} | Batch: {row['batch']}"
+        )
+        return row
+
+    except Exception as e:
+        logger.error(f"❌ MySQL student lookup failed for {student_id}: {e}")
+        return None
 
 
 def _serialize_object(obj):
@@ -59,20 +127,42 @@ async def start_test(request_data: dict):
     try:
         logger.info(f"📥 RECEIVED FROM FRONTEND: {request_data}")
         
-        user_type = request_data.get("user_type", "dev")
         student_id = request_data.get("student_id")
-        
+        user_type  = request_data.get("user_type", "dev")   # fallback if MySQL unavailable
+
+        # ── Fetch full student profile from MySQL ────────────────────────
+        # Frontend only needs to send student_id.
+        # user_type is auto-detected from Role_Type.
+        # Full profile (name, course, batch, role) stored with results
+        # so reports show "Student X | Java | Batch 2025 | Score 80%".
+        student_profile = None
+        if student_id:
+            student_profile = _get_student_profile(int(student_id))
+            if student_profile and student_profile.get("user_type"):
+                user_type = student_profile["user_type"]
+                logger.info(
+                    f"🎯 user_type='{user_type}' auto-detected for "
+                    f"student {student_id} ({student_profile.get('student_name')})"
+                )
+            else:
+                logger.warning(
+                    f"⚠️ Could not detect user_type for student {student_id}. "
+                    f"Using frontend-supplied value: '{user_type}'"
+                )
+        # ─────────────────────────────────────────────────────────────────
+
+        # Normalize whatever we have
         original_user_type = user_type
-        if user_type in ["developer", "dev"]:
+        if user_type in ["developer", "dev", "Developer"]:
             user_type = "dev"
-        elif user_type in ["non-developer", "non_dev", "nondev", "non-dev"]:
+        elif user_type in ["non-developer", "non_dev", "nondev", "non-dev", "Non-Developer"]:
             user_type = "non_dev"
         else:
             logger.warning(f"⚠️ Unknown user_type '{user_type}', defaulting to 'dev'")
             user_type = "dev"
-        
+
         logger.info(f"🎯 Starting test: original_type='{original_user_type}' → normalized='{user_type}', student_id={student_id}")
-        test_response = await test_service.start_test(user_type, student_id)
+        test_response = await test_service.start_test(user_type, student_id, student_profile)
         
         section_info      = _serialize_object(getattr(test_response, 'section_info', None))
         current_section   = _serialize_object(getattr(test_response, 'current_section', None))
@@ -144,7 +234,7 @@ async def submit_answer(request_data: dict):
         coding_results  = None
         if test_session:
             stored = test_session.get("coding_test_results", {})
-            coding_results = stored.get(question_number)
+            coding_results = stored.get(str(question_number))
             if coding_results:
                 logger.info(
                     f"✅ Found stored test results for Q{question_number}: "
@@ -406,7 +496,7 @@ async def run_test_cases_route(request_data: dict):
             if test_session:
                 if "coding_test_results" not in test_session:
                     test_session["coding_test_results"] = {}
-                test_session["coding_test_results"][question_number] = result
+                test_session["coding_test_results"][str(question_number)] = result
                 # Also store the code and language for later use
                 questions = test_session.get("questions", [])
                 q = next((q for q in questions if q.get("question_number") == question_number), None)
@@ -509,7 +599,7 @@ async def submit_code_route(request_data: dict):
         # ── Store results in session — /api/test/submit reads this ────────
         if "coding_test_results" not in test_session:
             test_session["coding_test_results"] = {}
-        test_session["coding_test_results"][question_number] = test_results
+        test_session["coding_test_results"][str(question_number)] = test_results
         logger.info(
             f"💾 Stored coding results for Q{question_number}: "
             f"{test_results['overall_result']} "

@@ -318,7 +318,7 @@ class PDFService:
         score = doc.get("score", 0)
         total = doc.get("total_questions", 0)
         percentage = doc.get("score_percentage", 0)
-        student_id = doc.get("Student_ID", "N/A")
+        student_id = doc.get("student_id") or doc.get("Student_ID") or "N/A"
         warning_count = doc.get("warning_count", 0)
         terminated = doc.get("terminated_by_warnings", False)
         timestamp = doc.get("timestamp", 0)

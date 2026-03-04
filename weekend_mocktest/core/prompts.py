@@ -1,12 +1,4 @@
 # weekend_mocktest/core/prompts.py
-# ═══════════════════════════════════════════════════════════════════
-# UPDATED: Language-agnostic prompts — auto-detects from summaries
-#
-# WHAT CHANGED:
-#   - _dev_mcq_prompt: Content-driven, no hardcoded language
-#   - _dev_coding_prompt: Detects language from context (Java/Python/JS/etc.)
-#   - Non-dev prompts: UNCHANGED
-# ═══════════════════════════════════════════════════════════════════
 from typing import List, Dict, Any
 from .config import config
 
@@ -32,34 +24,34 @@ class PromptTemplates:
                 return ""
         return ""
 
-    # ================================================================
-    # DEVELOPER PROMPTS
-    # ================================================================
+    # ════════════════════════════════════════════════════════════
+    # DEVELOPER APTITUDE
+    # ════════════════════════════════════════════════════════════
 
     @staticmethod
     def _dev_aptitude_prompt(count: int) -> str:
         return f"""Generate exactly {count} aptitude MCQ questions.
 
-These are GENERAL aptitude questions - math, logic, reasoning.
-NOT programming questions.
+GENERAL aptitude only — math, logic, reasoning. NOT programming.
 
 Topics: Number series, Percentages, Profit/Loss, Time/Work, Ratios, Averages, Logical reasoning.
 
 ══════════════════════════════════════════════════════════════════
 CRITICAL — MATHEMATICAL ACCURACY:
 ══════════════════════════════════════════════════════════════════
-For EVERY question, you MUST:
-1. Solve the problem yourself step-by-step BEFORE writing the options
-2. Verify your answer is mathematically correct
-3. Make sure the correct option EXACTLY matches your calculated answer
-4. Double-check: plug your answer back into the problem to verify
-5. All 4 options must be distinct numbers/values — no duplicates
+For EVERY question:
+1. Solve step-by-step BEFORE writing options
+2. Verify answer is mathematically correct
+3. Plug answer back into problem to verify
+4. Correct option MUST exactly match your calculated answer
+5. All 4 options must be distinct — no duplicates
+6. NEVER repeat a question concept already used in this batch
 
 COMMON MISTAKES TO AVOID:
 ❌ Saying average is 35 when calculation gives 36
-❌ Having correct answer not match any option
-❌ Division errors (always double-check division)
-❌ Ratio problems where parts don't add up to total
+❌ Correct answer not matching any option
+❌ Division errors
+❌ Ratio parts not adding up to total
 ══════════════════════════════════════════════════════════════════
 
 FORMAT (follow exactly):
@@ -77,56 +69,62 @@ C) 44
 D) 36
 ## Correct: B
 
-=== QUESTION 2 ===
-## Title: Percentage
-## Difficulty: Medium
-## Type: aptitude
-## Question:
-If price increases from Rs.200 to Rs.250, what is the percentage increase?
-## Options:
-A) 20%
-B) 25%
-C) 30%
-D) 15%
-## Correct: B
+Generate {count} DIFFERENT aptitude questions. Each question must test a DIFFERENT concept.
+CRITICAL: Start IMMEDIATELY with === QUESTION 1 ===. No introduction."""
 
-Generate {count} different aptitude questions with === QUESTION N === markers.
-Each must have 4 options (A, B, C, D) and one correct answer.
-CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble."""
+    # ════════════════════════════════════════════════════════════
+    # DEVELOPER MCQ — CONTENT-SPECIFIC, NO GENERIC QUESTIONS
+    # ════════════════════════════════════════════════════════════
 
     @staticmethod
     def _dev_mcq_prompt(context: str, count: int) -> str:
-        return f"""Generate exactly {count} MCQ questions based on this course content:
+        return f"""Generate exactly {count} MCQ questions based STRICTLY on this course content.
 
-=== COURSE CONTENT (from MongoDB summaries) ===
+=== COURSE CONTENT ===
 {context}
 === END CONTENT ===
 
 ══════════════════════════════════════════════════════════════════
-STRICT RULES — READ CAREFULLY:
+ABSOLUTE RULES — VIOLATIONS WILL MAKE QUESTIONS USELESS:
 ══════════════════════════════════════════════════════════════════
 
-1. Every question MUST test a SPECIFIC fact, concept, or detail from the content above.
-2. If the content mentions specific classes, methods, syntax, APIs, frameworks, 
-   or concepts — create questions about THOSE specific things.
-3. Options must include specific technical details, NOT vague descriptions.
+RULE 1 — EVERY question must test a SPECIFIC fact from the content above.
+RULE 2 — NO two questions can test the same concept. All {count} must be unique.
+RULE 3 — Options must be specific technical facts, not vague phrases.
 
-BANNED QUESTION PATTERNS (do NOT generate these):
-❌ "What is the purpose of [language]?"
-❌ "What is the purpose of a loop/function/class?"
-❌ "What is a good practice for..."
-❌ "Why is it important to..."
+COMPLETELY BANNED — do NOT generate any of these:
+❌ "What is the purpose of [language/loop/function/class/method]?"
+❌ "What is the main focus/goal/benefit of [language]?"
+❌ "What is a good practice for [anything]?"
+❌ "Why is it important to [anything]?"
+❌ "What are the prerequisites for [anything]?"
+❌ "What is [language] primarily used for?"
 ❌ "What is [language]'s focus on?"
-❌ Any question that could be answered WITHOUT reading the content above
-❌ Any question with options like "To build applications efficiently"
+❌ Questions answerable without reading the content above
+❌ Questions with options like "To improve performance" or "To organize code"
+❌ Generic Java/Python intro questions (installing JDK, writing first program, etc.)
 
-GOOD QUESTION PATTERNS:
-✅ "What does the [specific method/class from content] do?"
-✅ "What is the output of [specific code snippet from content]?"
-✅ "Which [specific concept from content] is used when...?"
-✅ "In [specific topic from content], what happens when...?"
-✅ Questions about specific syntax, parameters, return types mentioned in content
-✅ Questions about specific error types, exception classes mentioned in content
+ALSO BANNED — duplicate concept questions:
+❌ If Q3 asks about control structures, Q7 CANNOT also ask about control structures
+❌ Each question must cover a completely different topic
+
+GOOD QUESTION PATTERNS (use these):
+✅ "What does [specific method/class from content] return when called with [input]?"
+✅ "What is the output of this code: [specific snippet from content]?"
+✅ "Which [specific exception from content] is thrown when [condition]?"
+✅ "What is the correct syntax for [specific operation from content]?"
+✅ "In [specific topic from content], what is the difference between X and Y?"
+✅ "What parameter does [specific method from content] accept?"
+✅ Questions about specific T-codes, transaction types, module names from content
+✅ Questions about specific error codes, return values, data types from content
+
+══════════════════════════════════════════════════════════════════
+BEFORE WRITING EACH QUESTION, ASK YOURSELF:
+══════════════════════════════════════════════════════════════════
+1. "Can this question ONLY be answered by someone who read the content?" → If NO, discard it
+2. "Did I already write a question about this concept?" → If YES, pick a different concept
+3. "Are my options specific technical details?" → If NO, make them specific
+══════════════════════════════════════════════════════════════════
 
 FORMAT:
 
@@ -135,7 +133,7 @@ FORMAT:
 ## Difficulty: Easy
 ## Type: mcq
 ## Question:
-[Question testing a SPECIFIC fact from the content above]
+[Specific question about a fact in the content above]
 ## Options:
 A) [Specific technical answer]
 B) [Specific technical answer]
@@ -143,164 +141,98 @@ C) [Specific technical answer]
 D) [Specific technical answer]
 ## Correct: [A/B/C/D]
 
-Generate {count} MCQ questions from the content. Use === QUESTION N === markers.
-CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble text."""
+Generate {count} questions. Use === QUESTION N === markers.
+CRITICAL: Start IMMEDIATELY with === QUESTION 1 ===. No preamble."""
 
-    # ================================================================
-    # DEVELOPER CODING — LANGUAGE-AGNOSTIC WITH TEST CASES
-    # ================================================================
+    # ════════════════════════════════════════════════════════════
+    # DEVELOPER CODING
+    # ════════════════════════════════════════════════════════════
 
     @staticmethod
     def _dev_coding_prompt(context: str, count: int) -> str:
         return f"""Generate exactly {count} coding problems with test cases, like HackerRank/LeetCode.
 
-=== COURSE CONTENT (for reference) ===
+=== COURSE CONTENT (for language detection only) ===
 {context}
 === END CONTENT ===
 
 ══════════════════════════════════════════════════════════════════
-LANGUAGE DETECTION (do NOT output this reasoning — just apply it):
+STEP 1: DETECT LANGUAGE (do NOT write this in output)
 ══════════════════════════════════════════════════════════════════
+Silently detect from content above:
+- Java content → Java problems
+- Python content → Python problems
+- JavaScript → JavaScript problems
+- No clear language → Python
 
-Silently detect the language from the content above and use it:
-- Java content → Java problems (Scanner for input, System.out.println for output)
-- Python content → Python problems (input() and print())
-- JavaScript content → JavaScript problems (readline and console.log)
-- Multiple languages → mix problems across those languages
-- No clear language → default to Python
-
-CRITICAL: Do NOT write any introduction, preamble, or explanation.
-Start your response IMMEDIATELY with === QUESTION 1 ===
-No text before the first === QUESTION 1 === marker.
+CRITICAL: Start IMMEDIATELY with === QUESTION 1 ===. No introduction whatsoever.
 
 ══════════════════════════════════════════════════════════════════
 STEP 2: GENERATE TESTABLE PROBLEMS
 ══════════════════════════════════════════════════════════════════
 
-IMPORTANT: DO NOT generate questions about file I/O, web scraping,
-downloads, threading, networking, or database operations.
-These CANNOT be tested in an automated environment.
+FORBIDDEN — cannot be auto-tested:
+❌ File I/O, web scraping, downloads, threading, networking, GUI, database
 
-Instead, extract the PROGRAMMING CONCEPTS from the content
-(OOP, error handling, data structures, functions, loops, etc.)
-and create ALGORITHMIC problems that test those concepts.
+REQUIRED — all problems must:
+✅ Read ALL input from stdin
+✅ Print output to stdout only
+✅ Be deterministic (same input = same output)
+✅ Be self-contained (no external libraries beyond standard)
+✅ State clearly which language to use
 
-TOPIC CONVERSION TABLE:
-
-If content mentions...          → Generate problems about...
-─────────────────────────────────────────────────────────
-File handling, reading files    → String parsing, processing text input from stdin
-File writing                    → Formatting and printing structured output
-Threading / concurrency         → Processing lists, parallel task simulation with data
-Web scraping / requests         → Parsing structured text (CSV, key:value pairs)
-Database operations             → Dictionary/HashMap/Map CRUD operations
-Exception handling              → Input validation with try/catch or try/except
-OOP / Classes                   → Class design (BankAccount, StudentGrades, ShoppingCart)
-Functions / methods             → Writing reusable functions with clear I/O
-Data structures                 → List/Array/Map operations and algorithms
-Collections framework           → ArrayList, HashMap, TreeSet operations
-
-══════════════════════════════════════════════════════════════════
-QUESTION CATEGORIES (pick from these):
-══════════════════════════════════════════════════════════════════
-
-1. STRING PROCESSING
-   - Reverse words, count vowels, check palindrome
-   - Caesar cipher, remove duplicates, most frequent character
-
-2. MATH & ALGORITHMS
-   - Factorial, Fibonacci, prime check
-   - Sum of digits, GCD/LCM, number patterns
-
-3. LIST / ARRAY OPERATIONS
-   - Sort, filter, find min/max/second-largest
-   - Remove duplicates, merge sorted lists, frequency count
-
-4. MAP / DICTIONARY OPERATIONS
-   - Word frequency counter
-   - Student grade calculator, inventory management
-
-5. CLASS DESIGN (read data from stdin)
-   - BankAccount: deposit, withdraw, check balance
-   - StudentReport: add scores, calculate average, grade
-   - ShoppingCart: add items, calculate total, apply discount
-
-6. INPUT VALIDATION & ERROR HANDLING
-   - Validate and process mixed input
-   - Calculate with graceful error handling
-
-══════════════════════════════════════════════════════════════════
-STRICT RULES:
-══════════════════════════════════════════════════════════════════
-1. MUST read ALL input from stdin
-2. MUST print output to stdout
-3. SELF-CONTAINED — no files, no network, no external libraries
-4. DETERMINISTIC — same input = same output always
-5. NO: file operations, web requests, threading, database, GUI
-6. Questions must be CLEAR with explicit Input/Output format
-7. Each question must have 4-6 test cases
-8. State which language the solution should be written in
-
-FORBIDDEN KEYWORDS IN QUESTIONS:
-❌ "download", "upload", "file", "read from file", "write to file"
-❌ "web", "scrape", "crawl", "URL", "HTTP", "API"
-❌ "database", "SQL", "connect", "server"
-❌ "thread", "concurrent", "parallel" (as actual implementation)
-❌ "GUI", "window", "button", "click"
+PICK FROM THESE CATEGORIES (use variety, no repeats):
+1. String processing (reverse, palindrome, frequency, cipher)
+2. Math/algorithms (factorial, fibonacci, prime, patterns)
+3. Array/list operations (sort, filter, min/max, duplicates)
+4. Map/dictionary operations (frequency count, lookup)
+5. Class design with stdin (BankAccount, StudentGrades, ShoppingCart)
+6. Input validation and error handling
 
 ══════════════════════════════════════════════════════════════════
 FORMAT (follow EXACTLY):
 ══════════════════════════════════════════════════════════════════
 
 === QUESTION 1 ===
-## Title: Calculate Student Average
+## Title: Reverse a String
 ## Difficulty: Easy
 ## Type: coding
 ## Question:
-Write a program that reads a student's name and their scores in 3 subjects, then prints their average score rounded to 2 decimal places.
+Write a Java program that reads a string from stdin and prints its reverse.
 
 **Input Format:**
-- Line 1: Student name (string)
-- Line 2: Math score (integer)
-- Line 3: Science score (integer)
-- Line 4: English score (integer)
+- Line 1: A string
 
 **Output Format:**
-- A single line: the average score rounded to 2 decimal places
+- The reversed string
 
 **Example:**
 Input:
-Alice
-85
-90
-78
+hello
 Output:
-84.33
+olleh
 
 ## TestCases:
-TC1|VISIBLE|Alice\n85\n90\n78|84.33
-TC2|VISIBLE|Bob\n100\n100\n100|100.0
-TC3|HIDDEN|Charlie\n0\n0\n0|0.0
-TC4|HIDDEN|Dave\n70\n80\n90|80.0
-TC5|HIDDEN|Eve\n99\n98\n97|98.0
+TC1|VISIBLE|hello|olleh
+TC2|VISIBLE|Java|avaJ
+TC3|HIDDEN|racecar|racecar
+TC4|HIDDEN|12345|54321
+TC5|HIDDEN|a|a
 
-══════════════════════════════════════════════════════════════════
 TEST CASE FORMAT:
-══════════════════════════════════════════════════════════════════
 - TC<N>|VISIBLE or HIDDEN|<input>|<expected_output>
-- Use \\n for newlines in both input and expected output
-- Expected output = EXACT stdout output, no prompts, no labels unless specified
+- Use \\n for newlines in input
+- Expected output = EXACT stdout, no labels or prompts
 - First 2 VISIBLE, rest HIDDEN
-- HIDDEN should include edge cases (zero, empty, large, boundary)
+- HIDDEN = edge cases (empty, single char, numbers, special chars)
 
-Generate exactly {count} coding problems with === QUESTION N === markers.
-Make them DIVERSE — pick different categories from the list above.
+Generate exactly {count} problems using === QUESTION N === markers.
 Each MUST have ## TestCases: with 4-6 test cases.
-CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble text."""
+CRITICAL: Start IMMEDIATELY with === QUESTION 1 ===."""
 
-    # ================================================================
+    # ════════════════════════════════════════════════════════════
     # STANDALONE TEST CASE GENERATION
-    # ================================================================
+    # ════════════════════════════════════════════════════════════
 
     @staticmethod
     def create_test_cases_prompt(question: str, num_cases: int = 5) -> str:
@@ -310,44 +242,37 @@ CODING QUESTION:
 {question}
 
 ══════════════════════════════════════════════════════════════════
-CRITICAL RULES:
+RULES:
 ══════════════════════════════════════════════════════════════════
+1. All input read from stdin, all output to stdout
+2. Deterministic — same input = same output
+3. First 2 = VISIBLE, remaining = HIDDEN
+4. Expected output = ONLY the computed result, no prompts or labels
+5. For numbers: just the number (e.g., "42" not "Answer: 42")
+6. HIDDEN cases must test edge cases (zero, empty, large, negative, boundary)
 
-1. The program reads ALL data from stdin
-2. The program prints results to stdout
-3. Test cases must be deterministic (same input = same output)
-4. First 2 = VISIBLE, remaining = HIDDEN
-
-IMPORTANT — Expected output rules:
-- Expected output is ONLY the final computed result
-- Do NOT include input prompts in expected output
-- Do NOT include labels unless the question specifically asks for it
-- For numbers: just the number (e.g., "42")
-- For strings: just the string (e.g., "hello")
-- For booleans: language-appropriate ("True"/"False" or "true"/"false")
-
-FORMAT (output ONLY these lines, nothing else):
+FORMAT — output ONLY these lines, nothing else:
 TC1|VISIBLE|<input>|<expected_output>
 TC2|VISIBLE|<input>|<expected_output>
 TC3|HIDDEN|<input>|<expected_output>
 TC4|HIDDEN|<input>|<expected_output>
 TC5|HIDDEN|<input>|<expected_output>
 
-Use \\n for multi-line input (e.g., 3\\n5 means line 1 is "3", line 2 is "5").
-Output ONLY the TC lines. No explanations, no code blocks, no extra text."""
+Use \\n for multi-line input (e.g., 3\\n5 = line1 is "3", line2 is "5").
+Output ONLY the TC lines. No explanations, no code, no extra text."""
 
-    # ================================================================
-    # NON-DEVELOPER PROMPTS - NO PROGRAMMING!
-    # ================================================================
+    # ════════════════════════════════════════════════════════════
+    # NON-DEVELOPER APTITUDE
+    # ════════════════════════════════════════════════════════════
 
     @staticmethod
     def _non_dev_aptitude_prompt(count: int) -> str:
         return f"""Generate exactly {count} aptitude MCQ questions.
 
 RULES:
-- General aptitude only: math, logic, reasoning
-- NO programming, coding, Python, Java questions
-- NO technical IT questions
+- General aptitude ONLY: math, logic, reasoning
+- NO programming, coding, Python, Java questions whatsoever
+- Each question must test a DIFFERENT concept — no repeats
 
 Topics: Number series, Percentages, Profit/Loss, Time/Work, Ratios, Age problems, Speed/Distance.
 
@@ -355,11 +280,10 @@ Topics: Number series, Percentages, Profit/Loss, Time/Work, Ratios, Age problems
 CRITICAL — MATHEMATICAL ACCURACY:
 ══════════════════════════════════════════════════════════════════
 For EVERY question:
-1. Solve the problem yourself step-by-step BEFORE writing options
-2. Verify your answer is mathematically correct
-3. Double-check: plug your answer back into the problem
-4. The correct option must EXACTLY match your calculated answer
-5. All 4 options must be distinct — no duplicates
+1. Solve step-by-step BEFORE writing options
+2. Verify answer is correct — plug it back in
+3. Correct option MUST exactly match calculated answer
+4. All 4 options must be distinct — no duplicates
 ══════════════════════════════════════════════════════════════════
 
 FORMAT:
@@ -377,102 +301,73 @@ C) 324
 D) 108
 ## Correct: B
 
-=== QUESTION 2 ===
-## Title: Percentage
-## Difficulty: Medium
-## Type: aptitude
-## Question:
-A shopkeeper buys an item for Rs.400 and sells for Rs.500. What is the profit percentage?
-## Options:
-A) 20%
-B) 25%
-C) 30%
-D) 15%
-## Correct: B
+Generate {count} questions. Use === QUESTION N === markers.
+CRITICAL: Start IMMEDIATELY with === QUESTION 1 ===. No introduction."""
 
-Generate {count} aptitude questions. Use === QUESTION N === markers.
-Each must have 4 options and one correct answer.
-DO NOT include any programming questions.
-CRITICAL: Start your response IMMEDIATELY with === QUESTION 1 ===. No introduction or preamble."""
+    # ════════════════════════════════════════════════════════════
+    # NON-DEVELOPER MCQ
+    # ════════════════════════════════════════════════════════════
 
     @staticmethod
     def _non_dev_mcq_prompt(context: str, count: int) -> str:
-        return f"""You are an expert SAP/Business instructor. Generate exactly {count} MCQ questions STRICTLY based on the summary content provided below.
+        return f"""Generate exactly {count} MCQ questions STRICTLY based on the summary content below.
 
 ══════════════════════════════════════════════════════════════════
-CRITICAL RULE: ALL QUESTIONS MUST COME FROM THE SUMMARY BELOW!
-- Read the summary carefully
-- Extract ALL key facts, numbers, T-codes, terms, processes
-- Create questions that test knowledge of THAT SPECIFIC content
-- Do NOT create generic business questions
+CRITICAL RULE: ALL QUESTIONS MUST COME FROM THE SUMMARY BELOW.
+No two questions can test the same concept — all {count} must be unique.
 ══════════════════════════════════════════════════════════════════
 
-FORBIDDEN (never use):
+COMPLETELY BANNED:
 ❌ "What is the primary goal of...?"
 ❌ "What is the main purpose of...?"
 ❌ Generic options like "maximize/minimize/optimize X"
-❌ Python, Java, coding, programming questions
+❌ Python, Java, programming questions
+❌ Questions not answerable from the summary below
+❌ Duplicate concept questions (if Q3 covers topic X, no other question can)
+
+HOW TO CREATE QUESTIONS — extract from summary:
+- Definitions → "What is X defined as in this context?"
+- Numbers/Ranges → "How many X are there according to the content?"
+- T-codes/Transactions → "Which T-code is used for X?"
+- Types/Categories → "What are the types of X mentioned?"
+- Steps/Processes → "What is the first/last step in X?"
+- Tools/Prerequisites → "What is required before X?"
 
 ══════════════════════════════════════════════════════════════════
-HOW TO CREATE QUESTIONS FROM THE SUMMARY:
-══════════════════════════════════════════════════════════════════
-
-Step 1: EXTRACT from summary:
-- Definitions (What is X?)
-- Numbers/Ranges (How many? What range?)
-- T-codes/Transactions (Which T-code for X?)
-- Types/Categories (What are the types of X?)
-- Steps/Processes (What is step 1/2/3?)
-- Tools/Prerequisites (What is required for X?)
-- Best Practices (Why is X recommended?)
-- Troubleshooting (What causes X? How to fix?)
-
-Step 2: CREATE one question for each extracted fact
-
-══════════════════════════════════════════════════════════════════
-SUMMARY CONTENT (Generate questions ONLY from this):
+SUMMARY CONTENT:
 ══════════════════════════════════════════════════════════════════
 {context}
 ══════════════════════════════════════════════════════════════════
 
-FORMAT (follow exactly):
+FORMAT:
 
 === QUESTION 1 ===
-## Title: [Topic from summary]
+## Title: [Specific topic from summary]
 ## Difficulty: Easy
 ## Type: mcq
 ## Question:
-[Question based on SPECIFIC fact from summary above]
+[Question about SPECIFIC fact from summary]
 ## Options:
-A) [Correct or incorrect specific answer]
-B) [Correct or incorrect specific answer]
-C) [Correct or incorrect specific answer]
-D) [Correct or incorrect specific answer]
+A) [Specific answer]
+B) [Specific answer]
+C) [Specific answer]
+D) [Specific answer]
 ## Correct: [A/B/C/D]
 
-=== QUESTION 2 ===
-...continue...
+Generate {count} questions using === QUESTION N === markers.
+CRITICAL: Start IMMEDIATELY with === QUESTION 1 ===. No preamble."""
 
-Generate exactly {count} questions using === QUESTION N === markers.
-
-CHECKLIST before responding:
-✓ Every question is based on a SPECIFIC fact from the summary
-✓ No two questions test the same concept
-✓ NO "primary goal" or "main purpose" questions
-✓ Options are specific facts, not vague phrases
-✓ Start IMMEDIATELY with === QUESTION 1 === — no introduction or preamble"""
-
-    # ================================================================
-    # EVALUATION PROMPTS (UNCHANGED)
-    # ================================================================
+    # ════════════════════════════════════════════════════════════
+    # EVALUATION PROMPTS
+    # ════════════════════════════════════════════════════════════
 
     @staticmethod
     def create_section_evaluation_prompt(section_type: str, qa_pairs: List[Dict[str, Any]]) -> str:
         question_count = len(qa_pairs)
         formatted = []
         for i, qa in enumerate(qa_pairs, 1):
-            q = qa.get("question", "")
-            a = qa.get("answer", "")
+            q       = qa.get("question", "")
+            a       = qa.get("answer", "")
             options = qa.get("options", [])
             correct = qa.get("correct_answer") or qa.get("correct_option_text", "")
             opts_str = ""
@@ -507,8 +402,8 @@ Evaluate all {question_count} questions now:"""
         question_count = len(qa_pairs)
         formatted = []
         for i, qa in enumerate(qa_pairs, 1):
-            q = qa.get("question", "")
-            a = qa.get("answer", "")
+            q      = qa.get("question", "")
+            a      = qa.get("answer", "")
             q_type = qa.get("question_type", "mcq")
             correct = qa.get("correct_answer") or qa.get("correct_option_text", "")
             formatted.append(f"""
@@ -528,11 +423,3 @@ OUTPUT FORMAT:
 SCORES: [{','.join(['0 or 1'] * question_count)}]
 
 Evaluate all {question_count} questions:"""
-
-
-
-
-
-
-
-

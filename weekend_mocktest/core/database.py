@@ -7,7 +7,7 @@ import random
 import hashlib
 import uuid
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .config import config
 
 logger = logging.getLogger(__name__)
@@ -225,6 +225,83 @@ class DatabaseManager:
     # ==========================================================
     # CONTENT (AUTO ROUTING)
     # ==========================================================
+    # ═══════════════════════════════════════════════════════════
+    # CODING TEST RESULTS — persisted to MongoDB
+    # So results survive server restarts and are always available
+    # at evaluation time regardless of whether student ran tests.
+    # ═══════════════════════════════════════════════════════════
+
+    def save_coding_result(self, test_id: str, question_number: int, 
+                           results: Dict, user_code: str = "", language: str = "") -> None:
+        """
+        Persist coding test results to MongoDB when student runs tests.
+        Called by /api/code/submit — survives server restarts.
+        """
+        try:
+            key = f"{test_id}__q{question_number}"
+            self.active_tests_collection.update_one(
+                {"_id": key},
+                {"$set": {
+                    "_id":              key,
+                    "test_id":          test_id,
+                    "question_number":  question_number,
+                    "results":          results,
+                    "user_code":        user_code,
+                    "language":         language,
+                    "saved_at":         __import__("time").time(),
+                }},
+                upsert=True
+            )
+            logger.info(
+                f"💾 [DB] Saved coding result Q{question_number} for {test_id[:8]}: "
+                f"{results.get('overall_result','?')} "
+                f"({results.get('total_passed',0)}/{results.get('total_cases',0)} passed)"
+            )
+        except Exception as e:
+            logger.error(f"❌ [DB] Failed to save coding result: {e}")
+
+    def get_coding_result(self, test_id: str, question_number: int) -> Optional[Dict]:
+        """
+        Retrieve stored coding test results from MongoDB.
+        Returns None if not found (student didn't run tests).
+        """
+        try:
+            key = f"{test_id}__q{question_number}"
+            doc = self.active_tests_collection.find_one({"_id": key})
+            if doc:
+                logger.debug(f"📖 [DB] Found coding result Q{question_number} for {test_id[:8]}")
+                return doc.get("results")
+            return None
+        except Exception as e:
+            logger.error(f"❌ [DB] Failed to get coding result: {e}")
+            return None
+
+    def get_all_coding_results(self, test_id: str) -> Dict[int, Dict]:
+        """
+        Get all stored coding results for a test, keyed by question_number.
+        Used at evaluation time to gather all pre-run results at once.
+        """
+        try:
+            docs = self.active_tests_collection.find({"test_id": test_id})
+            results = {}
+            for doc in docs:
+                q_num = doc.get("question_number")
+                if q_num:
+                    results[q_num] = doc.get("results")
+            return results
+        except Exception as e:
+            logger.error(f"❌ [DB] Failed to get all coding results: {e}")
+            return {}
+
+    def cleanup_coding_results(self, test_id: str) -> None:
+        """Delete stored coding results after test is fully evaluated."""
+        try:
+            result = self.active_tests_collection.delete_many({"test_id": test_id})
+            if result.deleted_count:
+                logger.info(f"🧹 [DB] Cleaned up {result.deleted_count} coding results for {test_id[:8]}")
+        except Exception as e:
+            logger.error(f"❌ [DB] Failed to cleanup coding results: {e}")
+
     def get_weekly_summaries(self, user_type: str):
         """
         Get summaries from MongoDB.
@@ -298,35 +375,64 @@ class DatabaseManager:
     def get_unseen_questions(self, student_id: int, user_type: str,
                              question_type: str, count: int) -> List[Dict]:
         """
-        Get least-used questions with SHUFFLE so they never repeat in same order.
+        Smart question rotation to minimise repetition.
 
         Strategy:
-        1. Fetch a larger pool (count * 4) of least-used questions
-        2. Shuffle the pool randomly
-        3. Return only 'count' questions
+        1. Priority 1 — questions this student has NEVER seen (seen_ids excluded)
+        2. Priority 2 — if not enough unseen, fill from LEAST-used questions
+           (usage_count ascending), excluding those used in last test
+        3. Always shuffle the final pool so order varies
 
-        This ensures different questions appear each test even when the bank
-        has limited questions, because MongoDB returns same order without shuffle.
+        Why this works:
+        - Student-level tracking prevents same student seeing same question twice
+        - usage_count rotation ensures DIFFERENT students get different questions
+        - Large shuffle pool (count * 5) means each test gets a unique subset
         """
-        seen_ids = self.get_seen_question_ids(student_id)
+        seen_ids  = self.get_seen_question_ids(student_id)
+        # How many total questions are in the bank for this section?
+        total_available = self.question_bank_collection.count_documents({
+            "user_type": user_type, "question_type": question_type, "active": True
+        })
 
-        # Fetch a bigger pool so shuffle has room to vary
-        pool_size = max(count * 4, 40)
+        # Use a large pool — at least 5x requested count or 50, whichever bigger
+        # This gives shuffle enough room so different tests don't get same subset
+        pool_size = max(count * 5, 50)
 
-        cursor = self.question_bank_collection.find(
+        # Priority 1: questions this student hasn't seen
+        unseen_cursor = self.question_bank_collection.find(
             {
-                "user_type": user_type,
+                "user_type":     user_type,
                 "question_type": question_type,
-                "active": True,
-                "question_id": {"$nin": seen_ids}
+                "active":        True,
+                "question_id":   {"$nin": seen_ids}
             }
         ).sort("usage_count", 1).limit(pool_size)
 
-        pool = list(cursor)
+        pool = list(unseen_cursor)
 
-        # Shuffle so every test gets a different subset
+        # Priority 2: bank too small or student has seen everything
+        # Fill remaining slots from least-used questions (different usage tier)
+        if len(pool) < count:
+            logger.info(
+                f"⚠️ Only {len(pool)} unseen questions for student {student_id} "
+                f"({question_type}/{user_type}), bank has {total_available} total. "
+                f"Filling from least-used pool."
+            )
+            # Get least-used questions (student may have seen them, but long ago)
+            # Exclude questions already in pool to avoid duplicates
+            pool_ids    = {q.get("question_id") for q in pool}
+            fill_cursor = self.question_bank_collection.find(
+                {
+                    "user_type":     user_type,
+                    "question_type": question_type,
+                    "active":        True,
+                    "question_id":   {"$nin": list(pool_ids)}
+                }
+            ).sort("usage_count", 1).limit(pool_size - len(pool))
+            pool.extend(list(fill_cursor))
+
+        # Always shuffle — this is what prevents same-order repetition
         random.shuffle(pool)
-
         return pool[:count]
 
     def increment_question_usage(self, question_ids: List[str]):

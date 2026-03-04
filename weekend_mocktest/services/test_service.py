@@ -31,9 +31,12 @@ logger = logging.getLogger(__name__)
 class TestService:
 
     # ── Bank refresh config ──────────────────────────────────────
-    REFRESH_THRESHOLD  = 20   # trigger refresh when available questions drop below this
-    REFRESH_BATCH_SIZE = 15   # how many new questions to generate per refresh
-    MAX_USAGE_COUNT    = 5    # deactivate questions used this many times
+    # Keep a large bank so shuffle has enough variety to prevent repeats.
+    # With 100 questions per section and tests needing 10,
+    # the chance of two students getting the same 10 is very low.
+    REFRESH_THRESHOLD  = 60   # trigger refresh when bank drops below 60 per section
+    REFRESH_BATCH_SIZE = 30   # generate 30 new questions per refresh
+    MAX_USAGE_COUNT    = 10   # retire questions after 10 uses (seen by ~10 students)
     # ─────────────────────────────────────────────────────────────
 
     PROGRAMMING_KEYWORDS = [
@@ -76,6 +79,30 @@ class TestService:
         self.ai_service       = get_ai_service()
         self.content_service  = get_content_service()
         logger.info("🚀 Test Service initialized with Auto Bank Refresh")
+        # Warmup bank on startup so first tests never hit a tiny bank
+        asyncio.ensure_future(self._warmup_bank())
+
+    async def _warmup_bank(self):
+        """
+        On startup:
+        1. Auto-clean all generic/banned questions from existing bank
+        2. Fill any sections that dropped below threshold after cleanup
+        No manual MongoDB deletion needed — this handles it automatically.
+        """
+        try:
+            await asyncio.sleep(5)  # let app fully start first
+            logger.info("🔥 Bank warmup starting...")
+            for user_type in ["dev", "non_dev"]:
+                # Step 1: clean bad questions first
+                bad = self._deactivate_bad_questions(user_type)
+                over = self._deactivate_overused_questions(user_type)
+                if bad or over:
+                    logger.info(f"🧹 Startup cleanup: removed {bad} generic + {over} overused ({user_type})")
+                # Step 2: refill whatever was removed
+                await self._refresh_question_bank(user_type)
+            logger.info("✅ Bank warmup complete")
+        except Exception as e:
+            logger.error(f"❌ Bank warmup failed: {e}")
 
     # ════════════════════════════════════════════════════════════
     # AUTO BANK REFRESH
@@ -95,8 +122,18 @@ class TestService:
             if deactivated:
                 logger.info(f"🗑️  [BG] Deactivated {deactivated} over-used questions")
 
+            # Auto-clean generic/banned questions — no manual DB cleanup needed
+            bad_removed = self._deactivate_bad_questions(user_type)
+            if bad_removed:
+                logger.info(f"🧹 [BG] Removed {bad_removed} generic questions — will regenerate")
+
             context  = self.content_service.get_context_for_questions(user_type)
             sections = ["aptitude", "mcq", "coding"] if user_type == "dev" else ["aptitude", "mcq"]
+
+            # Detect dominant language ONCE for the whole batch
+            # so all coding questions in this refresh use the same language
+            dominant_lang = self._detect_dominant_language(context)
+            logger.info(f"🔤 [BG] Dominant language detected: {dominant_lang}")
 
             for section in sections:
                 available = self._count_available_questions(user_type, section)
@@ -107,6 +144,9 @@ class TestService:
                     logger.info(f"⚡ [BG] Generating {needed} new {section} questions...")
 
                     section_context = "" if section == "aptitude" else context
+                    # For coding, prepend language hint so AI stays consistent
+                    if section == "coding" and dominant_lang:
+                        section_context = f"PRIMARY LANGUAGE: {dominant_lang}\n\n{section_context}"
                     new_qs = self.ai_service.generate_questions_for_bank(
                         user_type, section, section_context, needed
                     )
@@ -125,6 +165,28 @@ class TestService:
         except Exception as e:
             logger.error(f"❌ [BG] Bank refresh failed: {e}")
 
+    # ── Generic/banned question patterns ────────────────────────
+    # These are detected and deactivated automatically on every refresh
+    BANNED_MCQ_PATTERNS = [
+        "what is the purpose of",
+        "what is the main focus",
+        "what is a good practice",
+        "why is it important",
+        "what are the prerequisites",
+        "what is java primarily used for",
+        "what is the goal of",
+        "what is the benefit of",
+        "what is the best practice",
+        "what is a best practice",
+        "what type of programming language is java",
+        "what type of programming concepts does java",
+        "what is the design of java",
+        "what is the last step in writing",
+        "what is the file extension",
+        "what is the first step",
+    ]
+    # ─────────────────────────────────────────────────────────────
+
     def _deactivate_overused_questions(self, user_type: str) -> int:
         """Deactivate questions used >= MAX_USAGE_COUNT times so they stop appearing."""
         result = self.db_manager.question_bank_collection.update_many(
@@ -132,6 +194,40 @@ class TestService:
             {"$set": {"active": False}}
         )
         return result.modified_count
+
+    def _deactivate_bad_questions(self, user_type: str) -> int:
+        """
+        Auto-detect and deactivate generic/banned MCQ questions.
+        Runs on every bank refresh — no manual MongoDB cleanup needed.
+        Matches against BANNED_MCQ_PATTERNS (case-insensitive substring match).
+        """
+        deactivated = 0
+        try:
+            # Fetch all active MCQ questions for this user_type
+            cursor = self.db_manager.question_bank_collection.find({
+                "user_type":     user_type,
+                "question_type": "mcq",
+                "active":        True
+            }, {"_id": 1, "question": 1})
+
+            bad_ids = []
+            for doc in cursor:
+                q_text = doc.get("question", "").lower().strip()
+                if any(pattern in q_text for pattern in self.BANNED_MCQ_PATTERNS):
+                    bad_ids.append(doc["_id"])
+
+            if bad_ids:
+                result = self.db_manager.question_bank_collection.update_many(
+                    {"_id": {"$in": bad_ids}},
+                    {"$set": {"active": False}}
+                )
+                deactivated = result.modified_count
+                logger.info(f"🧹 Auto-deactivated {deactivated} generic/banned MCQ questions for {user_type}")
+
+        except Exception as e:
+            logger.error(f"❌ _deactivate_bad_questions failed: {e}")
+
+        return deactivated
 
     def _count_available_questions(self, user_type: str, question_type: str) -> int:
         return self.db_manager.question_bank_collection.count_documents({
@@ -199,18 +295,25 @@ class TestService:
     # START TEST
     # ════════════════════════════════════════════════════════════
 
-    async def start_test(self, user_type: str, student_id=None):
+    async def start_test(self, user_type: str, student_id=None, student_profile: dict = None):
         logger.info("=" * 70)
         logger.info(f"🟢 STARTING {'DEVELOPER' if user_type == 'dev' else 'NON-DEVELOPER'} TEST")
+        if student_profile:
+            logger.info(
+                f"   Student: [{student_profile.get('student_id')}] "
+                f"{student_profile.get('student_name')} | "
+                f"Course: {student_profile.get('course')} | "
+                f"Batch: {student_profile.get('batch')}"
+            )
         logger.info("=" * 70)
 
         if not self.ValidationUtils.validate_user_type(user_type):
             raise ValueError("Invalid user type. Use 'dev' or 'non_dev'")
 
         try:
-            student_id    = self._normalize_student_id(student_id)
+            student_id     = self._normalize_student_id(student_id)
             exam_structure = self.config.get_exam_structure(user_type)
-            questions     = self._generate_questions_no_repeat(user_type, exam_structure, student_id)
+            questions      = self._generate_questions_no_repeat(user_type, exam_structure, student_id)
 
             if not questions:
                 raise Exception("Failed to generate questions")
@@ -220,8 +323,24 @@ class TestService:
 
             test_id   = self.memory_manager.create_test(user_type, questions, student_id)
             test_data = self.memory_manager.get_test(test_id)
-            test_data["student_id"]    = student_id
+            test_data["student_id"]     = student_id
             test_data["exam_structure"] = exam_structure
+
+            # Store full student profile so results carry name/course/batch/role
+            # This enables large-scale queries like:
+            #   "show all Batch-2025 Java students who scored > 60%"
+            #   "show results for student ID 35280"
+            if student_profile:
+                test_data["student_profile"] = {
+                    "student_id":   student_profile.get("student_id"),
+                    "student_name": student_profile.get("student_name"),
+                    "email":        student_profile.get("email"),
+                    "course":       student_profile.get("course"),
+                    "batch":        student_profile.get("batch"),
+                    "role_type":    student_profile.get("role_type"),
+                    "experience":   student_profile.get("experience"),
+                    "org_id":       student_profile.get("org_id"),
+                }
 
             question_ids = [q.get("question_id") for q in questions if q.get("question_id")]
             if question_ids:
@@ -260,12 +379,22 @@ class TestService:
                 ("mcq",      sections.get("mcq",      {}).get("question_count", 20), True),
             ]
 
+        dominant_lang = self._detect_dominant_language(context)
+        logger.info(f"🔤 Dominant language for this test: {dominant_lang}")
+
         for q_type, count, is_mcq in section_config:
             if user_type == "non_dev" and q_type == "coding":
                 continue
+            # For coding, prepend language hint so all questions use same language
+            if q_type == "coding" and dominant_lang:
+                section_context = f"PRIMARY LANGUAGE: {dominant_lang}\n\n{context}"
+            elif q_type == "aptitude":
+                section_context = ""
+            else:
+                section_context = context
             section_qs = self._get_section_questions_no_repeat(
                 student_id, user_type, q_type, count, is_mcq,
-                "" if q_type == "aptitude" else context
+                section_context
             )
             if user_type == "non_dev":
                 section_qs = self._filter_programming_questions(section_qs, user_type)
@@ -350,7 +479,7 @@ class TestService:
                 if q.get("question_type") == "coding":
                     if "coding_test_results" not in test_data:
                         test_data["coding_test_results"] = {}
-                    test_data["coding_test_results"][question_number] = test_results
+                    test_data["coding_test_results"][str(question_number)] = test_results
                     logger.info(f"💾 Stored test results for Q{question_number}: {test_results.get('overall_result', '?')} ({test_results.get('total_passed', 0)}/{test_results.get('total_cases', 0)} passed)")
 
             if self.memory_manager.is_test_complete(test_id):
@@ -368,7 +497,51 @@ class TestService:
             logger.error(f"❌ Submit failed: {e}")
             raise
 
+    # Sentinel values the frontend sends when student skips or uses final submit
+    SENTINEL_VALUES = {"__SKIPPED__", "__FINAL_SUBMIT__", "__SKIP__", "__TIMEOUT__", ""}
+
+    def _detect_dominant_language(self, context: str) -> str:
+        """
+        Count language signals in course content and return the dominant one.
+        Used to ensure all coding questions in a test use the same language.
+        """
+        if not context:
+            return "python"
+        ctx = context.lower()
+        scores = {
+            "java":       sum(ctx.count(s) for s in [
+                              "scanner", "system.out", "public class", "arraylist",
+                              "hashmap", "import java", "void main", "string[]",
+                              "integer", "bufferedreader", "throws", ".java"]),
+            "python":     sum(ctx.count(s) for s in [
+                              "def ", "print(", "input(", "import numpy", "import pandas",
+                              "elif ", "list(", "dict(", "tuple(", ".py", "python"]),
+            "javascript": sum(ctx.count(s) for s in [
+                              "console.log", "const ", "let ", "var ", "require(",
+                              "node.js", "javascript", "async/await", "=>"]),
+            "cpp":        sum(ctx.count(s) for s in [
+                              "cout", "cin", "#include", "std::", "iostream", ".cpp"]),
+        }
+        dominant = max(scores, key=scores.get)
+        # Only return a language if it has a clear signal, else default python
+        if scores[dominant] == 0:
+            return "python"
+        logger.debug(f"Language scores: {scores} → {dominant}")
+        return dominant
+
     def _process_answer(self, answer, test_id, q_num):
+        # Treat frontend sentinel values as empty (no answer given)
+        if not answer or answer.strip() in self.SENTINEL_VALUES:
+            # For coding questions, try to recover actual code from stored user_code
+            try:
+                q = self.memory_manager.get_test(test_id)["questions"][q_num - 1]
+                if q.get("question_type") == "coding" and q.get("user_code"):
+                    logger.info(f"♻️  Recovering stored code for Q{q_num} (sentinel answer)")
+                    return q["user_code"]
+            except:
+                pass
+            return ""   # empty = skipped
+
         if answer.isdigit():
             try:
                 q       = self.memory_manager.get_test(test_id)["questions"][q_num - 1]
@@ -418,21 +591,59 @@ class TestService:
             if user_type == "non_dev" and q_type not in ["aptitude", "mcq"]:
                 q_type = "mcq"
             if q_type in sections:
+                stored_answer = ans_data.get("answer", "")
+                # For coding: if answer is empty/sentinel, recover from user_code
+                if q_type == "coding" and (not stored_answer or stored_answer in self.SENTINEL_VALUES):
+                    stored_answer = q.get("user_code", "")
+                    if stored_answer:
+                        logger.info(f"♻️  Recovered code from user_code for Q{i+1}")
                 sections[q_type].append({
-                    "question":          q.get("question", ans_data.get("question", "")),
-                    "answer":            ans_data.get("answer", ""),
-                    "question_type":     q_type,
-                    "options":           q.get("options", []),
-                    "correct_answer":    q.get("correct_answer"),
+                    "question":            q.get("question", ans_data.get("question", "")),
+                    "answer":              stored_answer,
+                    "question_number":     q.get("question_number", i + 1),
+                    "question_type":       q_type,
+                    "options":             q.get("options", []),
+                    "correct_answer":      q.get("correct_answer"),
                     "correct_option_text": q.get("correct_option_text"),
                 })
 
-        # Pass stored test results so coding is evaluated on actual execution, not AI guessing
+        # ── Run test cases for any coding questions that weren't pre-run ──────
+        # If student submitted without clicking "Run Tests", no results are stored.
+        # Run them now so we always score on actual execution, never AI guessing.
         coding_test_results = test_data.get("coding_test_results", {})
+
+        if user_type == "dev":
+            for i, ans_data in enumerate(answers):
+                q      = questions[i] if i < len(questions) else {}
+                q_num  = q.get("question_number", i + 1)
+                q_type = q.get("question_type", "mcq")
+
+                if q_type == "coding" and str(q_num) not in coding_test_results:
+                    user_code = ans_data.get("answer", "").strip()
+                    all_tc    = q.get("test_cases", [])
+
+                    if user_code and all_tc:
+                        # Detect language from question or default java (dev track)
+                        lang = q.get("user_language") or                                self.ai_service._detect_language_from_question(q.get("question", ""))
+                        logger.info(f"🔄 Running test cases for Q{q_num} ({lang}) — not pre-run by student")
+                        try:
+                            import asyncio
+                            tc_results = await self.ai_service.run_test_cases(lang, user_code, all_tc)
+                            coding_test_results[str(q_num)] = tc_results
+                            logger.info(
+                                f"✅ Q{q_num} test results: {tc_results['overall_result']} "
+                                f"({tc_results['total_passed']}/{tc_results['total_cases']} passed)"
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ Failed to run test cases for Q{q_num}: {e}")
+                    elif not user_code:
+                        logger.info(f"⏭️  Q{q_num}: no code submitted — marking as 0")
+                    elif not all_tc:
+                        logger.warning(f"⚠️  Q{q_num}: no test cases stored — falling back to AI")
+
         if coding_test_results:
             logger.info(f"✅ Passing {len(coding_test_results)} coding test results to evaluator")
-        else:
-            logger.warning("⚠️ No coding test results stored — coding will be evaluated by AI comparison")
+        # ─────────────────────────────────────────────────────────────────────
 
         eval_result = self.ai_service.evaluate_by_section(user_type, sections, coding_test_results)
         logger.info(f"✅ {eval_result.get('total_correct', 0)}/{len(answers)} correct")
@@ -539,27 +750,61 @@ class TestService:
 
         wd = self.db_manager.get_warnings(test_id)
 
+        # Build student info for storage
+        # student_profile comes from MySQL (name, course, batch, role_type etc.)
+        # This is what enables large-scale reporting:
+        #   - Filter by batch, course, role_type
+        #   - Track individual student progress over multiple tests
+        #   - Compare dev vs non-dev performance
+        student_profile = test_data.get("student_profile", {})
+
         self.db_manager.test_results_collection.update_one(
             {"test_id": test_id},
             {"$set": {
-                "test_id": test_id, "user_type": test_data.get("user_type"),
-                "Student_ID": test_data.get("student_id"),
-                "score": total_correct, "total_questions": total_q,
-                "score_percentage": pct, "final_message": final_msg,
-                "section_scores": eval_result.get("section_scores", {}),
-                "section_details": section_details,
-                "evaluation_report": eval_result.get("evaluation_report", ""),
-                "scores": scores, "feedbacks": feedbacks,
+                # ── Test identity ──────────────────────────────────
+                "test_id":   test_id,
+                "user_type": test_data.get("user_type"),
+
+                # ── Student identity (from MySQL) ──────────────────
+                # Stored here so MongoDB results are self-contained.
+                # No need to join MySQL at query time.
+                "student_id":   test_data.get("student_id"),
+                "student_name": student_profile.get("student_name", ""),
+                "email":        student_profile.get("email", ""),
+                "course":       student_profile.get("course", ""),
+                "batch":        student_profile.get("batch", ""),
+                "role_type":    student_profile.get("role_type", ""),
+                "experience":   student_profile.get("experience", ""),
+                "org_id":       student_profile.get("org_id"),
+
+                # ── Scores ─────────────────────────────────────────
+                "score":              total_correct,
+                "total_questions":    total_q,
+                "score_percentage":   pct,
+                "final_message":      final_msg,
+                "section_scores":     eval_result.get("section_scores", {}),
+                "section_details":    section_details,
+                "evaluation_report":  eval_result.get("evaluation_report", ""),
+                "scores":             scores,
+                "feedbacks":          feedbacks,
                 "conversation_pairs": conversation_pairs,
-                "test_completed": True, "timestamp": time.time(),
-                "warning_count": wd.get("warning_count", 0),
-                "warnings": wd.get("warnings", []),
+
+                # ── Meta ───────────────────────────────────────────
+                "test_completed":        True,
+                "timestamp":             time.time(),
+                "warning_count":         wd.get("warning_count", 0),
+                "warnings":              wd.get("warnings", []),
                 "terminated_by_warnings": wd.get("terminated", False),
-                "termination_reason": wd.get("termination_reason"),
+                "termination_reason":    wd.get("termination_reason"),
             }},
             upsert=True
         )
-        logger.info(f"💾 Saved: {test_id} | {total_correct}/{total_q} ({pct}%)")
+        logger.info(
+            f"💾 Saved: {test_id} | "
+            f"student={test_data.get('student_id')} ({student_profile.get('student_name', 'unknown')}) | "
+            f"{total_correct}/{total_q} ({pct}%) | "
+            f"course={student_profile.get('course')} batch={student_profile.get('batch')}"
+        )
 
     # ════════════════════════════════════════════════════════════
     # RESPONSE BUILDERS

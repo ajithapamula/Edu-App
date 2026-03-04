@@ -324,6 +324,31 @@ class AIService:
     #  TEST CASE PARSING & GENERATION
     # ══════════════════════════════════════════════════════════
 
+    def _validate_test_case(self, input_str: str, expected_output: str) -> bool:
+        """
+        Sanity-check a test case before storing it.
+        Rejects test cases where expected_output is clearly wrong or nonsensical.
+        Returns True if valid, False if should be discarded.
+        """
+        # Must have non-empty expected output
+        if not expected_output or not expected_output.strip():
+            return False
+
+        # Input and expected output should not be identical for non-trivial inputs
+        # (e.g. "ruoy" → "ruoy" for a cipher is suspicious)
+        if input_str.strip() == expected_output.strip() and len(input_str.strip()) > 2:
+            logger.warning(f"⚠️ Suspicious test case: input == expected_output: '{input_str.strip()}'")
+            return False
+
+        # Expected output should not contain prompt artifacts
+        bad_phrases = ["expected", "output:", "result:", "answer:", "->", "=>", "test case"]
+        exp_lower = expected_output.lower()
+        if any(p in exp_lower for p in bad_phrases):
+            logger.warning(f"⚠️ Test case expected_output contains artifact: '{expected_output.strip()}'")
+            return False
+
+        return True
+
     def _parse_test_cases_from_section(self, part: str) -> List[Dict]:
         test_cases = []
         tc_match = re.search(r'##\s*TestCases:\s*\n(.+?)(?=\n\n|===|$)', part, re.DOTALL)
@@ -337,11 +362,16 @@ class AIService:
             if len(parts) < 4:
                 continue
             id_match = re.search(r'(\d+)', parts[0])
-            tc_id = int(id_match.group(1)) if id_match else len(test_cases) + 1
+            tc_id    = int(id_match.group(1)) if id_match else len(test_cases) + 1
+            inp      = parts[2].strip().replace('\\n', '\n')
+            exp      = parts[3].strip().replace('\\n', '\n')
+            if not self._validate_test_case(inp, exp):
+                logger.warning(f"⚠️ Discarding invalid test case TC{tc_id}: input='{inp}' expected='{exp}'")
+                continue
             test_cases.append({
                 "id": tc_id,
-                "input":           parts[2].strip().replace('\\n', '\n'),
-                "expected_output": parts[3].strip().replace('\\n', '\n'),
+                "input":           inp,
+                "expected_output": exp,
                 "is_hidden":       parts[1].strip().upper() == "HIDDEN",
                 "label": f"Test Case {tc_id}", "weight": 1,
             })
@@ -369,10 +399,15 @@ class AIService:
                     continue
                 id_match = re.search(r'(\d+)', parts[0])
                 tc_id    = int(id_match.group(1)) if id_match else len(test_cases) + 1
+                inp = parts[2].strip().replace('\\n', '\n')
+                exp = parts[3].strip().replace('\\n', '\n')
+                if not self._validate_test_case(inp, exp):
+                    logger.warning(f"⚠️ Discarding invalid generated TC{tc_id}")
+                    continue
                 test_cases.append({
                     "id":              tc_id,
-                    "input":           parts[2].strip().replace('\\n', '\n'),
-                    "expected_output": parts[3].strip().replace('\\n', '\n'),
+                    "input":           inp,
+                    "expected_output": exp,
                     "is_hidden":       parts[1].strip().upper() == "HIDDEN",
                     "label": f"Test Case {tc_id}", "weight": 1,
                 })
@@ -700,7 +735,8 @@ class AIService:
     def evaluate_code_with_test_results(self, question: str, user_code: str,
                                         test_results: Dict) -> Dict:
         all_passed       = test_results.get("all_passed", False)
-        correct_solution = self.generate_correct_code(question)
+        # Pass user_code so correct solution is generated in the same language
+        correct_solution = self.generate_correct_code(question, user_code)
         explanation      = self.generate_coding_explanation(
             question, user_code, correct_solution["code"], all_passed, test_results)
         return {
@@ -711,7 +747,7 @@ class AIService:
 
     def evaluate_code_answer(self, question: str, user_code: str) -> Dict:
         try:
-            correct_solution = self.generate_correct_code(question)
+            correct_solution = self.generate_correct_code(question, user_code)
             correct_code     = correct_solution["code"]
             prompt = f"""Compare the student's code with the correct solution.
 Question: {question}
@@ -764,9 +800,34 @@ ISSUES: List issues or "None" """
                     return lang
         return "python"
 
-    def generate_correct_code(self, question: str) -> Dict[str, str]:
+    def _detect_language_from_code(self, code: str) -> Optional[str]:
+        """Detect language from the user's actual submitted code — more reliable than question text."""
+        if not code:
+            return None
+        code_lower = code.lower()
+        # Java: strong signals
+        if any(s in code for s in ["public class ", "public static void main", "System.out.", "Scanner ", "import java."]):
+            return "java"
+        # Python: strong signals
+        if any(s in code for s in ["def ", "print(", "input(", "import numpy", "import pandas", "elif "]):
+            return "python"
+        # JavaScript
+        if any(s in code for s in ["console.log(", "const ", "let ", "var ", "require(", "=>"]):
+            return "javascript"
+        # C++
+        if any(s in code for s in ["#include", "cout <<", "cin >>", "std::"]):
+            return "cpp"
+        # C
+        if any(s in code for s in ["printf(", "scanf(", "#include <stdio"]):
+            return "c"
+        return None
+
+    def generate_correct_code(self, question: str, user_code: str = "") -> Dict[str, str]:
         try:
-            lang = self._detect_language_from_question(question)
+            # Detect from user's actual code first (most reliable signal)
+            lang = self._detect_language_from_code(user_code) if user_code else None
+            if not lang:
+                lang = self._detect_language_from_question(question)
             lang_instructions = {
                 "python":     "Use input() for stdin, print() for stdout.",
                 "java":       "Use Scanner for stdin with nextInt()/nextDouble()/next()/nextLine(). NEVER use Integer.parseInt(scanner.nextLine()). Use System.out.println for stdout. Include a Main class. Call scanner.close() at the end.",
@@ -893,6 +954,9 @@ Explain what went wrong based on the actual test case failure:"""
         section_details  = {}
         coding_test_results = coding_test_results or {}
 
+        # Sentinel values that mean "no answer given"
+        SENTINELS = {"__skipped__", "__final_submit__", "__skip__", "__timeout__"}
+
         for section_name, qa_pairs in sections.items():
             if not qa_pairs:
                 continue
@@ -901,7 +965,9 @@ Explain what went wrong based on the actual test case failure:"""
             section_results = []
 
             for idx, qa in enumerate(qa_pairs):
-                user_answer    = str(qa.get("answer", "")).strip()
+                raw_answer  = str(qa.get("answer", "")).strip()
+                # Treat frontend sentinel values as empty (no answer)
+                user_answer = "" if raw_answer.lower() in SENTINELS else raw_answer
                 correct_letter = str(qa.get("correct_answer", "")).strip().upper()
                 correct_text   = str(qa.get("correct_option_text", "")).strip()
                 question_text  = qa.get("question", "")
@@ -909,7 +975,7 @@ Explain what went wrong based on the actual test case failure:"""
                 q_number       = qa.get("question_number", idx + 1)
 
                 if section_name == "coding":
-                    tc_results = coding_test_results.get(q_number)
+                    tc_results = coding_test_results.get(str(q_number)) or coding_test_results.get(q_number)
                     if tc_results:
                         code_eval = self.evaluate_code_with_test_results(question_text, user_answer, tc_results)
                     else:
@@ -922,7 +988,7 @@ Explain what went wrong based on the actual test case failure:"""
                     if is_correct: section_correct += 1
                     section_results.append({
                         "question_number": idx + 1, "question": question_text[:200],
-                        "user_answer":     user_answer or "No answer",
+                        "user_answer":     user_answer if user_answer else "No answer (Skipped)",
                         "correct_answer":  code_eval["correct_code"], "is_correct": is_correct,
                         "explanation":     code_eval["explanation"],
                         "test_case_results": code_eval.get("test_case_results"),
@@ -935,7 +1001,7 @@ Explain what went wrong based on the actual test case failure:"""
                     if is_correct: section_correct += 1
                     section_results.append({
                         "question_number": idx + 1, "question": question_text[:200],
-                        "user_answer":     user_answer or "No answer",
+                        "user_answer":     user_answer if user_answer else "No answer (Skipped)",
                         "correct_answer":  correct_text or correct_letter,
                         "is_correct":      is_correct, "options": options, "explanation": "",
                     })
