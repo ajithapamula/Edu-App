@@ -1,5 +1,5 @@
 # weekend_mocktest/core/database.py
-# PRODUCTION READY – FULL VERSION WITH WARNINGS (FIXED)
+# PRODUCTION READY – FIXED: Stable student_id generation (no more random IDs)
 
 import logging
 import pymongo
@@ -46,7 +46,7 @@ class DatabaseManager:
 
         # Active tests collection
         self.active_tests_collection = self.db["active_tests"]
-        
+
         # Warnings collection for proctoring (3 warnings = termination)
         self.warnings_collection = self.db["test_warnings"]
 
@@ -68,22 +68,10 @@ class DatabaseManager:
 
     # ==========================================================
     # WARNINGS (3 warnings = termination)
-    #
-    # UPDATED: Now accepts both OLD and NEW frontend warning types
-    #
-    # NEW types (from ProctorCamera BlazeFace + COCO-SSD):
-    #   face_not_detected, face_multiple, face_looking_away
-    #   object_phone, object_book, object_person
-    #   tab_switch, right_click, low_light
-    #
-    # OLD types (kept for backward compatibility):
-    #   multiple_faces, object_detected, face_turning,
-    #   face_not_visible, screenshot
     # ==========================================================
-    
+
     MAX_WARNINGS = 3
 
-    # Human-readable messages for ALL warning types (old + new)
     WARNING_MESSAGES = {
         # NEW frontend types (BlazeFace + COCO-SSD)
         "face_not_detected": "Face not visible in camera",
@@ -97,7 +85,7 @@ class DatabaseManager:
         "tab_switch": "Tab or window switching detected",
         "right_click": "Right-click attempted during exam",
         "low_light": "Low lighting conditions detected",
-        
+
         # OLD types (backward compatibility)
         "multiple_faces": "Multiple faces detected",
         "object_detected": "Suspicious object detected",
@@ -106,23 +94,19 @@ class DatabaseManager:
         "screenshot": "Screenshot attempt detected",
     }
 
-    def add_warning(self, test_id: str, student_id: int, warning_type: str, 
+    def add_warning(self, test_id: str, student_id: int, warning_type: str,
                     details: Dict = None) -> Dict[str, Any]:
         """
         Add a proctoring warning.
         After 3 warnings, test is terminated.
-        
-        Accepts ALL warning types (old + new frontend).
-        Unknown types are logged but still recorded (never rejected).
         """
         import time
-        
-        # Don't reject unknown types — just log them
+
         if warning_type not in self.WARNING_MESSAGES:
             logger.warning(f"⚠️ Unknown warning type: {warning_type} — recording anyway")
-        
+
         timestamp = time.time()
-        
+
         warning_event = {
             "type": warning_type,
             "timestamp": timestamp,
@@ -130,12 +114,11 @@ class DatabaseManager:
             "description": self.WARNING_MESSAGES.get(warning_type, f"Warning: {warning_type}"),
             "details": details or {}
         }
-        
+
         existing = self.warnings_collection.find_one({"test_id": test_id})
-        
+
         if existing:
             new_count = existing.get("warning_count", 0) + 1
-            
             self.warnings_collection.update_one(
                 {"test_id": test_id},
                 {
@@ -162,13 +145,12 @@ class DatabaseManager:
                 "termination_reason": None,
                 "created_at": timestamp
             })
-        
+
         should_terminate = new_count >= self.MAX_WARNINGS
-        
+
         if should_terminate:
             self._mark_test_terminated(test_id)
-        
-        # Build user-friendly message
+
         description = self.WARNING_MESSAGES.get(warning_type, f"Warning: {warning_type}")
         if new_count >= self.MAX_WARNINGS:
             message = f"FINAL WARNING: {description}. Test will be terminated."
@@ -176,12 +158,12 @@ class DatabaseManager:
             message = f"LAST CHANCE: {description}. One more warning = termination!"
         else:
             message = f"Warning {new_count}/{self.MAX_WARNINGS}: {description}. {self.MAX_WARNINGS - new_count} remaining."
-        
+
         logger.warning(
             f"⚠️ Warning #{new_count}/{self.MAX_WARNINGS} for test {test_id[:8]}: "
             f"{warning_type} — {'TERMINATING' if should_terminate else message}"
         )
-        
+
         return {
             "warning_count": new_count,
             "max_warnings": self.MAX_WARNINGS,
@@ -195,10 +177,16 @@ class DatabaseManager:
         """Mark test as terminated due to warnings"""
         doc = self.warnings_collection.find_one({"test_id": test_id})
         warnings_list = doc.get("warnings", []) if doc else []
-        
-        warning_summary = [f"{w['type']} at {w.get('timestamp_readable', 'unknown')}" for w in warnings_list]
-        termination_reason = f"Test terminated after {self.MAX_WARNINGS} warnings: " + "; ".join(warning_summary)
-        
+
+        warning_summary = [
+            f"{w['type']} at {w.get('timestamp_readable', 'unknown')}"
+            for w in warnings_list
+        ]
+        termination_reason = (
+            f"Test terminated after {self.MAX_WARNINGS} warnings: "
+            + "; ".join(warning_summary)
+        )
+
         self.warnings_collection.update_one(
             {"test_id": test_id},
             {
@@ -209,7 +197,7 @@ class DatabaseManager:
                 }
             }
         )
-        
+
         logger.error(f"🚫 Test {test_id[:8]} TERMINATED: {termination_reason}")
 
     def get_warnings(self, test_id: str) -> Dict[str, Any]:
@@ -240,30 +228,26 @@ class DatabaseManager:
     def get_weekly_summaries(self, user_type: str):
         """
         Get summaries from MongoDB.
-        
-        ROUTING:
-        - dev → Developer collection (Python/Coding content)
-        - non_dev → Non-Developer collection (SAP/Business content)
+        dev → Developer collection
+        non_dev → Non-Developer collection
         """
         if user_type == "dev":
             collection = self.developer_collection
             collection_name = "Developer"
-            logger.info(f"📂 DB Query: {collection_name} collection (Python/Coding)")
         else:
             collection = self.non_developer_collection
             collection_name = "Non-Developer"
-            logger.info(f"📂 DB Query: {collection_name} collection (SAP/Business)")
-        
-        # Query for documents with valid summary field
+
+        logger.info(f"📂 DB Query: {collection_name} collection")
+
         result = list(
             collection.find(
                 {"summary": {"$exists": True, "$ne": "", "$type": "string"}},
                 {"summary": 1}
             ).limit(50)
         )
-        
-        logger.info(f"📂 DB Result: Found {len(result)} documents with 'summary' field in {collection_name}")
-        
+
+        logger.info(f"📂 DB Result: Found {len(result)} documents in {collection_name}")
         return result
 
     # ==========================================================
@@ -311,11 +295,24 @@ class DatabaseManager:
         )
         return [doc["question_id"] for doc in cursor]
 
-    def get_unseen_questions(self, student_id: int, user_type: str, 
+    def get_unseen_questions(self, student_id: int, user_type: str,
                              question_type: str, count: int) -> List[Dict]:
-        """Get questions student has NOT seen yet"""
+        """
+        Get least-used questions with SHUFFLE so they never repeat in same order.
+
+        Strategy:
+        1. Fetch a larger pool (count * 4) of least-used questions
+        2. Shuffle the pool randomly
+        3. Return only 'count' questions
+
+        This ensures different questions appear each test even when the bank
+        has limited questions, because MongoDB returns same order without shuffle.
+        """
         seen_ids = self.get_seen_question_ids(student_id)
-        
+
+        # Fetch a bigger pool so shuffle has room to vary
+        pool_size = max(count * 4, 40)
+
         cursor = self.question_bank_collection.find(
             {
                 "user_type": user_type,
@@ -323,9 +320,14 @@ class DatabaseManager:
                 "active": True,
                 "question_id": {"$nin": seen_ids}
             }
-        ).sort("usage_count", 1).limit(count)  # Prefer less-used questions
-        
-        return list(cursor)
+        ).sort("usage_count", 1).limit(pool_size)
+
+        pool = list(cursor)
+
+        # Shuffle so every test gets a different subset
+        random.shuffle(pool)
+
+        return pool[:count]
 
     def increment_question_usage(self, question_ids: List[str]):
         """Increment usage count for questions"""
@@ -335,7 +337,7 @@ class DatabaseManager:
         )
 
     # ==========================================================
-    # TEST RESULTS (EVALUATION + PDF)
+    # TEST RESULTS
     # ==========================================================
     def save_test_results(
         self,
@@ -344,8 +346,6 @@ class DatabaseManager:
         evaluation_result: Dict[str, Any]
     ):
         """Save test results with warning info"""
-        
-        # Get warnings info
         warnings_data = self.get_warnings(test_id)
 
         doc = {
@@ -353,24 +353,17 @@ class DatabaseManager:
             "user_type": test_data.get("user_type"),
             "student_id": test_data.get("student_id"),
             "total_questions": test_data.get("total_questions"),
-
-            # Scores
             "score": evaluation_result.get("total_correct", 0),
             "score_percentage": round(
                 (evaluation_result.get("total_correct", 0) /
                  max(test_data.get("total_questions", 1), 1)) * 100, 1
             ),
-
-            # Evaluation details
             "scores": evaluation_result.get("scores", []),
             "feedbacks": evaluation_result.get("feedbacks", []),
             "section_scores": evaluation_result.get("section_scores", {}),
             "evaluation_report": evaluation_result.get("evaluation_report", ""),
-
             "answers": test_data.get("answers", []),
             "created_at": datetime.utcnow().timestamp(),
-            
-            # WARNING INFO (audit trail)
             "warning_count": warnings_data.get("warning_count", 0),
             "warnings": warnings_data.get("warnings", []),
             "terminated_by_warnings": warnings_data.get("terminated", False),
@@ -386,10 +379,30 @@ class DatabaseManager:
         logger.info(f"💾 Saved test {test_id} | Warnings: {warnings_data.get('warning_count', 0)}")
 
     # ==========================================================
-    # STUDENT
+    # STUDENT — FIX: Stable ID from identifier, not random
     # ==========================================================
-    def _get_student_info(self):
-        return {"student_id": random.randint(1000, 9999)}
+    def _get_student_info(self, identifier: str = None) -> Dict:
+        """
+        Generate a STABLE student_id.
+
+        - If identifier is given (e.g. from localStorage): hash it → consistent 5-digit ID
+        - If no identifier: use time-based ID (consistent within session via test_service)
+
+        This fixes the question repetition bug where random IDs broke seen-question tracking.
+        """
+        if identifier:
+            hash_val = int(hashlib.md5(str(identifier).encode()).hexdigest(), 16)
+            student_id = (hash_val % 90000) + 10000  # Always 5-digit, always same for same input
+            logger.info(f"🎓 Stable student_id={student_id} from identifier='{identifier}'")
+        else:
+            import time
+            # Time-based: not truly stable across restarts, but test_service
+            # should pass student_id from frontend to avoid hitting this path
+            student_id = int(time.time() * 1000) % 90000 + 10000
+            logger.warning(f"⚠️ No identifier provided — using time-based student_id={student_id}. "
+                           f"Pass student_id from frontend localStorage for true persistence.")
+
+        return {"student_id": student_id}
 
 
 # ==========================================================

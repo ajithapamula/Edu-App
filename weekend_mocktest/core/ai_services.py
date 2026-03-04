@@ -1,12 +1,9 @@
 # weekend_mocktest/core/ai_services.py
 # ═══════════════════════════════════════════════════════════════════
-# UPDATED: LOCAL SUBPROCESS execution + ROBUST question parsing
-# 
 # FIXES IN THIS VERSION:
-#   1. Java version check: uses -version (writes to stderr)
-#   2. MCQ max_tokens increased to 8000 (was 4000, caused truncation)
-#   3. _parse_questions: 5 fallback parsing strategies
-#   4. Debug logging when parser returns 0 questions
+#   1. _parse_questions Strategy 1: skip parts[0] (always preamble)
+#   2. _extract_question_from_part: expanded preamble_signals list
+#   3. generate_questions_for_bank: stronger system prompt
 # ═══════════════════════════════════════════════════════════════════
 
 import json
@@ -76,16 +73,13 @@ class AIService:
         self._check_local_runtimes()
         logger.info(f"AIService initialized | Groq: {self.model} | Executor: LOCAL subprocess")
 
-    # ═══════════════════════════════════════════════════════════
-    # FIX 1: java -version writes to stderr, not stdout
-    # ═══════════════════════════════════════════════════════════
     def _check_local_runtimes(self):
         checks = {
             "python": ["python3", "--version"],
-            "node": ["node", "--version"],
-            "g++": ["g++", "--version"],
-            "gcc": ["gcc", "--version"],
-            "java": ["java", "-version"],
+            "node":   ["node", "--version"],
+            "g++":    ["g++", "--version"],
+            "gcc":    ["gcc", "--version"],
+            "java":   ["java", "-version"],
         }
         for name, cmd in checks.items():
             try:
@@ -100,7 +94,6 @@ class AIService:
                 logger.warning(f"  ❌ {name}: NOT FOUND")
             except Exception as e:
                 logger.warning(f"  ⚠️ {name}: check failed — {e}")
-
 
     # ══════════════════════════════════════════════════════════
     #  CODE EXECUTION (LOCAL SUBPROCESS)
@@ -184,7 +177,7 @@ class AIService:
             try:
                 run_result = await asyncio.to_thread(
                     subprocess.run, run_cmd,
-                    input=stdin.encode('utf-8') if stdin else None,
+                    input=stdin.encode('utf-8') if stdin else b'',
                     capture_output=True, timeout=timeout, cwd=tmp_dir
                 )
                 stdout = run_result.stdout.decode('utf-8', errors='replace')
@@ -220,6 +213,9 @@ class AIService:
                     pass
 
     def _flexible_output_match(self, actual: str, expected: str) -> bool:
+        # Normalize: strip trailing whitespace from both sides before all comparisons
+        actual   = actual.rstrip()
+        expected = expected.rstrip()
         if actual == expected:
             return True
         a_lines = [l.rstrip() for l in actual.split("\n") if l.strip()]
@@ -268,54 +264,61 @@ class AIService:
                     "total_cases": 0, "all_passed": False, "score_percentage": 0.0,
                     "overall_result": "No Test Cases", "execution_summary": "No test cases provided"}
         sem = asyncio.Semaphore(5)
+
         async def _run_one(tc):
             async with sem:
-                tc_id = tc.get("id", 0)
-                tc_input = tc.get("input", "")
-                expected = tc.get("expected_output", "").strip()
+                tc_id     = tc.get("id", 0)
+                tc_input  = tc.get("input", "")
+                expected  = tc.get("expected_output", "").strip()
                 is_hidden = tc.get("is_hidden", False)
-                weight = tc.get("weight", 1)
-                res = await self.execute_code(language, code, stdin=tc_input)
-                actual = res.get("stdout", "").strip()
-                passed = False
+                weight    = tc.get("weight", 1)
+                res       = await self.execute_code(language, code, stdin=tc_input)
+                actual    = res.get("stdout", "").strip()
+                passed    = False
                 if res.get("exit_code", -1) == 0 and not res.get("is_compile_error"):
                     passed = self._flexible_output_match(actual, expected)
                 return {
                     "id": tc_id, "label": f"Test Case {tc_id}", "passed": passed,
                     "is_hidden": is_hidden, "weight": weight,
-                    "input": tc_input if not is_hidden else "[Hidden]",
-                    "expected_output": expected if not is_hidden else "[Hidden]",
-                    "actual_output": actual if not is_hidden else ("[Hidden]" if not passed else actual),
+                    "input":           tc_input  if not is_hidden else "[Hidden]",
+                    "expected_output": expected  if not is_hidden else "[Hidden]",
+                    "actual_output":   actual    if not is_hidden else ("[Hidden]" if not passed else actual),
                     "execution_time_ms": res.get("execution_time_ms", 0),
-                    "stderr": res.get("stderr", "") if not is_hidden else "",
+                    "stderr":          res.get("stderr", "") if not is_hidden else "",
                     "is_compile_error": res.get("is_compile_error", False),
                     "is_runtime_error": res.get("is_runtime_error", False),
-                    "is_timeout": res.get("is_timeout", False),
+                    "is_timeout":       res.get("is_timeout", False),
                 }
-        results = sorted(await asyncio.gather(*[_run_one(tc) for tc in test_cases]), key=lambda r: r["id"])
+
+        results      = sorted(await asyncio.gather(*[_run_one(tc) for tc in test_cases]), key=lambda r: r["id"])
         total_passed = sum(1 for r in results if r["passed"])
         total_weight = sum(r["weight"] for r in results) or 1
         passed_weight = sum(r["weight"] for r in results if r["passed"])
-        score_pct = round((passed_weight / total_weight) * 100, 1)
-        if any(r["is_compile_error"] for r in results): overall = "Compilation Error"
-        elif any(r["is_timeout"] for r in results): overall = "Time Limit Exceeded"
+        score_pct    = round((passed_weight / total_weight) * 100, 1)
+
+        if   any(r["is_compile_error"] for r in results): overall = "Compilation Error"
+        elif any(r["is_timeout"]       for r in results): overall = "Time Limit Exceeded"
         elif any(r["is_runtime_error"] for r in results): overall = "Runtime Error"
-        elif total_passed == len(results): overall = "Accepted"
-        else: overall = "Wrong Answer"
+        elif total_passed == len(results):                overall = "Accepted"
+        else:                                             overall = "Wrong Answer"
+
         summary = (f"All {len(results)} test cases passed!" if total_passed == len(results)
                    else f"{total_passed}/{len(results)} test cases passed ({score_pct}%)")
         logger.info(f"Test run: {summary} | Result: {overall}")
-        return {"results": results, "total_passed": total_passed,
-                "total_failed": len(results) - total_passed, "total_cases": len(results),
-                "all_passed": total_passed == len(results), "score_percentage": score_pct,
-                "overall_result": overall, "execution_summary": summary}
+        return {
+            "results": results, "total_passed": total_passed,
+            "total_failed": len(results) - total_passed, "total_cases": len(results),
+            "all_passed": total_passed == len(results), "score_percentage": score_pct,
+            "overall_result": overall, "execution_summary": summary,
+        }
 
     def _exec_error(self, msg: str, start: float) -> Dict[str, Any]:
-        return {"success": False, "stdout": "", "stderr": msg, "exit_code": -1,
-                "execution_time_ms": int((time.time() - start) * 1000), "language": "unknown",
-                "is_compile_error": False, "is_runtime_error": False,
-                "is_timeout": False, "overall_result": "System Error"}
-
+        return {
+            "success": False, "stdout": "", "stderr": msg, "exit_code": -1,
+            "execution_time_ms": int((time.time() - start) * 1000), "language": "unknown",
+            "is_compile_error": False, "is_runtime_error": False,
+            "is_timeout": False, "overall_result": "System Error",
+        }
 
     # ══════════════════════════════════════════════════════════
     #  TEST CASE PARSING & GENERATION
@@ -337,9 +340,9 @@ class AIService:
             tc_id = int(id_match.group(1)) if id_match else len(test_cases) + 1
             test_cases.append({
                 "id": tc_id,
-                "input": parts[2].strip().replace('\\n', '\n'),
+                "input":           parts[2].strip().replace('\\n', '\n'),
                 "expected_output": parts[3].strip().replace('\\n', '\n'),
-                "is_hidden": parts[1].strip().upper() == "HIDDEN",
+                "is_hidden":       parts[1].strip().upper() == "HIDDEN",
                 "label": f"Test Case {tc_id}", "weight": 1,
             })
         return test_cases
@@ -351,11 +354,11 @@ class AIService:
                 model=self.model,
                 messages=[
                     {"role": "system", "content": "Output ONLY test case lines in TC format. Nothing else."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user",   "content": prompt}
                 ],
                 temperature=0.3, max_tokens=1000,
             )
-            content = response.choices[0].message.content.strip()
+            content    = response.choices[0].message.content.strip()
             test_cases = []
             for line in content.split('\n'):
                 line = line.strip()
@@ -365,12 +368,12 @@ class AIService:
                 if len(parts) < 4:
                     continue
                 id_match = re.search(r'(\d+)', parts[0])
-                tc_id = int(id_match.group(1)) if id_match else len(test_cases) + 1
+                tc_id    = int(id_match.group(1)) if id_match else len(test_cases) + 1
                 test_cases.append({
-                    "id": tc_id,
-                    "input": parts[2].strip().replace('\\n', '\n'),
+                    "id":              tc_id,
+                    "input":           parts[2].strip().replace('\\n', '\n'),
                     "expected_output": parts[3].strip().replace('\\n', '\n'),
-                    "is_hidden": parts[1].strip().upper() == "HIDDEN",
+                    "is_hidden":       parts[1].strip().upper() == "HIDDEN",
                     "label": f"Test Case {tc_id}", "weight": 1,
                 })
             logger.info(f"Generated {len(test_cases)} test cases for question")
@@ -379,16 +382,15 @@ class AIService:
             logger.error(f"Test case generation failed: {e}")
             return []
 
-
     # ══════════════════════════════════════════════════════════
     #  CONTENT FILTERING
     # ══════════════════════════════════════════════════════════
 
     def _is_coding_question(self, question_data: Dict) -> bool:
         question_text = str(question_data.get("question", "")).lower()
-        title = str(question_data.get("title", "")).lower()
-        options = question_data.get("options", [])
-        options_text = ""
+        title         = str(question_data.get("title", "")).lower()
+        options       = question_data.get("options", [])
+        options_text  = ""
         if isinstance(options, list):
             options_text = " ".join([str(opt) for opt in options]).lower()
         elif isinstance(options, dict):
@@ -409,7 +411,7 @@ class AIService:
 
     def _filter_coding_questions_for_nondev(self, questions: List[Dict]) -> List[Dict]:
         filtered = []
-        blocked = 0
+        blocked  = 0
         for q in questions:
             if q.get("question_type") == "coding":
                 blocked += 1; continue
@@ -421,10 +423,8 @@ class AIService:
             logger.info(f"Blocked {blocked} programming questions for non-dev")
         return filtered
 
-
     # ══════════════════════════════════════════════════════════
     #  QUESTION GENERATION
-    #  FIX 2: Debug logging + increased max_tokens for MCQ
     # ══════════════════════════════════════════════════════════
 
     def generate_questions_for_bank(self, user_type: str, question_type: str,
@@ -432,6 +432,7 @@ class AIService:
         if user_type == "non_dev" and question_type == "coding":
             logger.warning("Blocked coding generation for non-dev")
             return []
+
         logger.info(f"Generating {count} {question_type} questions for {user_type}")
         try:
             prompt = PromptTemplates.create_bank_generation_prompt(
@@ -440,44 +441,44 @@ class AIService:
             if not prompt:
                 return []
 
-            # FIX: MCQ max_tokens increased from 4000 → 8000 to prevent truncation
-            if question_type == "coding":
-                max_tok = 6000
-            elif question_type == "mcq":
-                max_tok = 8000
-            else:
-                max_tok = 4000
+            if question_type == "coding":   max_tok = 6000
+            elif question_type == "mcq":    max_tok = 8000
+            else:                           max_tok = 4000
 
-            # Temperature: lower for aptitude (math accuracy), higher for creative MCQ/coding
-            if question_type == "aptitude":
-                temp = 0.4  # Lower = more accurate math
-            elif question_type == "coding":
-                temp = 0.6
-            else:
-                temp = 0.7
+            if question_type == "aptitude": temp = 0.4
+            elif question_type == "coding": temp = 0.6
+            else:                           temp = 0.7
+
+            # ── FIX 3: Stronger system prompt ─────────────────────────────
+            system_prompt = (
+                "You are an expert question generator. "
+                "The VERY FIRST characters of your entire response MUST be '=== QUESTION 1 ==='. "
+                "NEVER write any introduction, language detection text, preamble, or explanation. "
+                "Output ONLY the === QUESTION N === blocks, nothing else before or after. "
+                "Follow the format in the user prompt exactly."
+            )
+            # ──────────────────────────────────────────────────────────────
 
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert question generator. Follow the format exactly. Use === QUESTION N === markers for each question. Start IMMEDIATELY with === QUESTION 1 === — no introduction, no preamble, no explanation before the first question."},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": prompt}
                 ],
                 temperature=temp,
                 max_tokens=max_tok,
             )
-            content = response.choices[0].message.content
+            content   = response.choices[0].message.content
             questions = self._parse_questions(content, question_type)
 
-            # FIX: Debug logging when parser returns 0 questions
             if not questions:
                 logger.error(f"⚠️ PARSER RETURNED 0 QUESTIONS for {question_type}")
-                logger.error(f"   AI response length: {len(content)} chars")
                 logger.error(f"   First 800 chars:\n{content[:800]}")
                 logger.error(f"   Last 200 chars:\n{content[-200:]}")
 
             for q in questions:
                 q["question_type"] = question_type
-                q["user_type"] = user_type
+                q["user_type"]     = user_type
             if user_type == "non_dev":
                 questions = self._filter_coding_questions_for_nondev(questions)
             logger.info(f"Generated {len(questions)} {question_type} questions")
@@ -486,10 +487,8 @@ class AIService:
             logger.error(f"AI generation failed: {e}")
             return []
 
-
     # ══════════════════════════════════════════════════════════
     #  QUESTION PARSING
-    #  FIX 3: 5 fallback strategies for robust parsing
     # ══════════════════════════════════════════════════════════
 
     def _parse_questions(self, content: str, question_type: str = "mcq") -> List[Dict]:
@@ -500,10 +499,12 @@ class AIService:
 
         questions = []
 
-        # Strategy 1: === QUESTION N === markers (case-insensitive)
+        # ── FIX 1: Strategy 1 — skip parts[0] (always pre-marker preamble) ──
         try:
             parts = re.split(r'===\s*QUESTION\s*\d+\s*===', content, flags=re.IGNORECASE)
-            for part in parts:
+            # parts[0] is everything BEFORE the first === QUESTION 1 === marker
+            # It is ALWAYS preamble/intro text — skip it unconditionally
+            for part in parts[1:]:
                 if not part.strip():
                     continue
                 q = self._extract_question_from_part(part, question_type)
@@ -518,7 +519,7 @@ class AIService:
         # Strategy 2: **Question N** or ## Question N
         try:
             parts = re.split(r'(?:\*\*|##)\s*Question\s*\d+\s*\*?\*?', content, flags=re.IGNORECASE)
-            for part in parts:
+            for part in parts[1:]:
                 if not part.strip():
                     continue
                 q = self._extract_question_from_part(part, question_type)
@@ -533,7 +534,7 @@ class AIService:
         # Strategy 3: Numbered Q1. or Q1) or 1. patterns
         try:
             parts = re.split(r'\n\s*(?:Q?\d+[\.\):]|Question\s+\d+\s*[:\.])', content, flags=re.IGNORECASE)
-            for part in parts:
+            for part in parts[1:]:
                 if not part.strip():
                     continue
                 q = self._extract_question_from_part(part, question_type)
@@ -577,17 +578,14 @@ class AIService:
         """Extract a single question from a text block."""
         q = {}
 
-        # Title
         m = re.search(r'(?:##\s*)?Title:\s*(.+)', part, re.IGNORECASE)
         if m:
             q['title'] = m.group(1).strip().strip('*')
 
-        # Difficulty
         m = re.search(r'(?:##\s*)?Difficulty:\s*(\w+)', part, re.IGNORECASE)
         if m:
             q['difficulty'] = m.group(1).strip()
 
-        # Question text
         m = re.search(
             r'(?:##\s*)?Question:\s*\n(.+?)(?=(?:##\s*)?Options:|(?:##\s*)?TestCases:|(?:##\s*)?Correct:|$)',
             part, re.DOTALL | re.IGNORECASE
@@ -595,8 +593,7 @@ class AIService:
         if m:
             q['question'] = m.group(1).strip()
         else:
-            # Fallback: collect lines before options
-            lines = part.strip().split('\n')
+            lines      = part.strip().split('\n')
             text_lines = []
             for line in lines:
                 ls = line.strip()
@@ -608,7 +605,6 @@ class AIService:
             if text_lines:
                 q['question'] = '\n'.join(text_lines)
 
-        # Options
         m = re.search(
             r'(?:##\s*)?Options:\s*\n(.+?)(?=(?:##\s*)?Correct:|(?:##\s*)?TestCases:|$)',
             part, re.DOTALL | re.IGNORECASE
@@ -622,7 +618,6 @@ class AIService:
             if len(options) >= 4:
                 q['options'] = options[:4]
 
-        # Correct answer
         m = re.search(r'(?:##\s*)?Correct(?:\s*Answer)?:\s*([A-Da-d])', part, re.IGNORECASE)
         if not m:
             m = re.search(r'Answer:\s*([A-Da-d])\b', part, re.IGNORECASE)
@@ -634,59 +629,69 @@ class AIService:
                 if 0 <= idx < len(q['options']):
                     q['correct_option_text'] = q['options'][idx]
 
-        # Test cases for coding
         if question_type == "coding":
             tcs = self._parse_test_cases_from_section(part)
             if tcs:
                 q['test_cases'] = tcs
 
         if q.get('question') and len(q['question']) > 10:
-            # Reject preamble/intro text that isn't a real question
             q_lower = q['question'].lower()
+
+            # ── FIX 2: Expanded preamble_signals ──────────────────────────
             preamble_signals = [
+                # Original signals
                 'here are', 'here is', 'below are', 'following are',
-                'i will generate', 'i have generated', 'i\'ll create',
+                'i will generate', 'i have generated', "i'll create",
                 'programming language detected', 'language detected',
                 'based on the content', 'based on the course',
                 'let me generate', 'let me create',
+                # New signals that caught the Q24 bug
+                'the programming language',
+                'coding problems in java', 'coding problems in python',
+                'coding problems in javascript', 'coding problems in',
+                'problems in java', 'problems in python', 'problems in',
+                'following the specified format', 'following the rules',
+                'following the format',
+                'here are 15', 'here are 10', 'here are 5',
+                'i am generating', 'i am creating',
+                'as requested', 'as per your request',
+                'noted, here', 'sure, here', 'certainly, here',
+                'of course, here',
             ]
+            # ──────────────────────────────────────────────────────────────
+
             if any(signal in q_lower for signal in preamble_signals):
+                logger.debug(f"  ⚠️ Rejected preamble block: {q['question'][:80]!r}")
                 return None
-            # For MCQ: must have options
+
             if question_type == "mcq" and not q.get('options'):
                 return None
             return q
         return None
 
     def _parse_by_options_blocks(self, content: str, question_type: str) -> List[Dict]:
-        """Find question blocks by looking for A) B) C) D) option patterns."""
-        questions = []
-        # Find all positions where options appear
+        questions        = []
         option_positions = [m.start() for m in re.finditer(r'\nA\)\s', content)]
 
         for i, pos in enumerate(option_positions):
-            # Find the start of this question (look backward for question text)
-            # Start from previous options block end, or beginning
             if i > 0:
                 prev_end = content.rfind('\n\n', option_positions[i-1], pos)
-                start = prev_end if prev_end > option_positions[i-1] else option_positions[i-1]
+                start    = prev_end if prev_end > option_positions[i-1] else option_positions[i-1]
             else:
                 start = max(0, content.rfind('\n\n', 0, pos))
 
-            # Find the end (next question or end)
             if i + 1 < len(option_positions):
                 next_start = content.rfind('\n\n', pos, option_positions[i+1])
-                end = next_start if next_start > pos else option_positions[i+1]
+                end        = next_start if next_start > pos else option_positions[i+1]
             else:
                 end = len(content)
 
             block = content[start:end]
-            q = self._extract_question_from_part(block, question_type)
+            q     = self._extract_question_from_part(block, question_type)
             if q:
                 questions.append(q)
 
         return questions
-
 
     # ══════════════════════════════════════════════════════════
     #  CODE EVALUATION
@@ -694,18 +699,20 @@ class AIService:
 
     def evaluate_code_with_test_results(self, question: str, user_code: str,
                                         test_results: Dict) -> Dict:
-        all_passed = test_results.get("all_passed", False)
+        all_passed       = test_results.get("all_passed", False)
         correct_solution = self.generate_correct_code(question)
-        explanation = self.generate_coding_explanation(
+        explanation      = self.generate_coding_explanation(
             question, user_code, correct_solution["code"], all_passed, test_results)
-        return {"is_correct": all_passed, "correct_code": correct_solution["code"],
-                "explanation": explanation, "test_case_results": test_results,
-                "overall_result": test_results.get("overall_result", "Unknown")}
+        return {
+            "is_correct": all_passed, "correct_code": correct_solution["code"],
+            "explanation": explanation, "test_case_results": test_results,
+            "overall_result": test_results.get("overall_result", "Unknown"),
+        }
 
     def evaluate_code_answer(self, question: str, user_code: str) -> Dict:
         try:
             correct_solution = self.generate_correct_code(question)
-            correct_code = correct_solution["code"]
+            correct_code     = correct_solution["code"]
             prompt = f"""Compare the student's code with the correct solution.
 Question: {question}
 Student's Code:
@@ -718,52 +725,54 @@ ISSUES: List issues or "None" """
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": "You are a strict code evaluator."},
-                          {"role": "user", "content": prompt}],
+                          {"role": "user",   "content": prompt}],
                 temperature=0.2, max_tokens=300)
-            content = response.choices[0].message.content.strip()
+            content    = response.choices[0].message.content.strip()
             is_correct = "IS_CORRECT: YES" in content.upper()
             explanation = self.generate_coding_explanation(question, user_code, correct_code, is_correct)
-            return {"is_correct": is_correct, "correct_code": correct_code,
-                    "explanation": explanation, "test_case_results": None,
-                    "overall_result": "Accepted" if is_correct else "Wrong Answer"}
+            return {
+                "is_correct": is_correct, "correct_code": correct_code,
+                "explanation": explanation, "test_case_results": None,
+                "overall_result": "Accepted" if is_correct else "Wrong Answer",
+            }
         except Exception as e:
             logger.error(f"Code evaluation failed: {e}")
             correct_solution = self.generate_correct_code(question)
-            return {"is_correct": False, "correct_code": correct_solution["code"],
-                    "explanation": "Evaluation failed.", "test_case_results": None,
-                    "overall_result": "System Error"}
-
+            return {
+                "is_correct": False, "correct_code": correct_solution["code"],
+                "explanation": "Evaluation failed.", "test_case_results": None,
+                "overall_result": "System Error",
+            }
 
     # ══════════════════════════════════════════════════════════
     #  EXPLANATION GENERATION
     # ══════════════════════════════════════════════════════════
 
     def _detect_language_from_question(self, question: str) -> str:
-        """Detect programming language from question text."""
         q_lower = question.lower()
         lang_signals = {
-            "java": ["java program", "in java", "write a java", "using java", "scanner", "system.out", "public static void main", "arraylist", "hashmap"],
+            "java":       ["java program", "in java", "write a java", "using java", "scanner", "system.out", "public static void main", "arraylist", "hashmap"],
             "javascript": ["javascript", "in js", "node.js", "console.log", "readline", "const ", "let "],
-            "cpp": ["c++ program", "in c++", "using c++", "cout", "cin", "#include", "iostream"],
-            "c": ["c program", "in c language", "using c language", "printf", "scanf", "#include <stdio"],
+            "cpp":        ["c++ program", "in c++", "using c++", "cout", "cin", "#include", "iostream"],
+            "c":          ["c program", "in c language", "using c language", "printf", "scanf", "#include <stdio"],
             "typescript": ["typescript", "in ts"],
-            "python": ["python program", "in python", "using python", "print(", "input(", "def "],
+            "python":     ["python program", "in python", "using python", "print(", "input(", "def "],
         }
         for lang, signals in lang_signals.items():
             for signal in signals:
                 if signal in q_lower:
                     return lang
-        return "python"  # default fallback
+        return "python"
 
     def generate_correct_code(self, question: str) -> Dict[str, str]:
         try:
             lang = self._detect_language_from_question(question)
             lang_instructions = {
-                "python": "Use input() for stdin, print() for stdout.",
-                "java": "Use Scanner for stdin, System.out.println for stdout. Include a Main class.",
+                "python":     "Use input() for stdin, print() for stdout.",
+                "java":       "Use Scanner for stdin with nextInt()/nextDouble()/next()/nextLine(). NEVER use Integer.parseInt(scanner.nextLine()). Use System.out.println for stdout. Include a Main class. Call scanner.close() at the end.",
                 "javascript": "Use readline or process.stdin for input, console.log for output.",
-                "cpp": "Use cin for stdin, cout for stdout. Include necessary headers.",
-                "c": "Use scanf for stdin, printf for stdout. Include necessary headers.",
+                "cpp":        "Use cin for stdin, cout for stdout. Include necessary headers.",
+                "c":          "Use scanf for stdin, printf for stdout. Include necessary headers.",
                 "typescript": "Use readline for input, console.log for output.",
             }
             instructions = lang_instructions.get(lang, "Read from stdin, write to stdout.")
@@ -774,22 +783,18 @@ Return ONLY code inside a ``` code block."""
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": f"Return only {lang} code in a ``` code block."},
-                          {"role": "user", "content": prompt}],
+                          {"role": "user",   "content": prompt}],
                 temperature=0.3, max_tokens=800)
-            content = response.choices[0].message.content.strip()
-            # Try language-specific block first, then generic
+            content    = response.choices[0].message.content.strip()
             code_match = re.search(r'```(?:python|java|javascript|cpp|c|typescript)?\s*(.*?)\s*```', content, re.DOTALL)
-            if code_match:
-                code = code_match.group(1).strip()
-            else:
-                code = content
+            code       = code_match.group(1).strip() if code_match else content
             return {"code": code, "explanation": ""}
         except Exception as e:
             logger.error(f"Code generation failed: {e}")
             return {"code": "# Unable to generate", "explanation": ""}
 
     def generate_explanation(self, question: str, user_answer: str, correct_answer: str,
-                            question_type: str, options: List[str] = None) -> str:
+                             question_type: str, options: List[str] = None) -> str:
         try:
             options_text = ""
             if options:
@@ -806,7 +811,7 @@ Do NOT contradict yourself — if your calculation gives a different number than
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": "Brief, accurate educational explanations. For math questions, always verify the calculation."},
-                          {"role": "user", "content": prompt}],
+                          {"role": "user",   "content": prompt}],
                 temperature=0.3, max_tokens=200)
             return response.choices[0].message.content.strip()
         except:
@@ -818,8 +823,8 @@ Do NOT contradict yourself — if your calculation gives a different number than
         try:
             tc_context = ""
             if test_results:
-                p = test_results.get("total_passed", 0)
-                t = test_results.get("total_cases", 0)
+                p  = test_results.get("total_passed", 0)
+                t  = test_results.get("total_cases", 0)
                 tc_context = f"\nTest Results: {p}/{t} passed. Overall: {test_results.get('overall_result', 'N/A')}"
                 failed = [r for r in test_results.get("results", []) if not r["passed"] and not r.get("is_hidden")]
                 if failed:
@@ -850,7 +855,7 @@ Explain what went wrong based on the actual test case failure:"""
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": "You are a programming tutor. Give brief, ACCURATE feedback based ONLY on the test case results provided. Never invent or hallucinate code issues."},
-                          {"role": "user", "content": prompt}],
+                          {"role": "user",   "content": prompt}],
                 temperature=0.3, max_tokens=200)
             return response.choices[0].message.content.strip()
         except:
@@ -859,11 +864,11 @@ Explain what went wrong based on the actual test case failure:"""
     def generate_batch_explanations(self, qa_pairs: List[Dict], question_type: str) -> List[str]:
         explanations = []
         for qa in qa_pairs:
-            question = qa.get("question", "")
-            user_answer = qa.get("answer", "No answer")
+            question       = qa.get("question", "")
+            user_answer    = qa.get("answer", "No answer")
             correct_answer = qa.get("correct_option_text") or qa.get("correct_answer", "N/A")
-            options = qa.get("options", [])
-            is_correct = qa.get("is_correct", False)
+            options        = qa.get("options", [])
+            is_correct     = qa.get("is_correct", False)
             if question_type == "coding":
                 explanation = self.generate_coding_explanation(
                     question, user_answer, qa.get("generated_correct_code", ""),
@@ -876,33 +881,32 @@ Explain what went wrong based on the actual test case failure:"""
             explanations.append(explanation)
         return explanations
 
-
     # ══════════════════════════════════════════════════════════
     #  SECTION-WISE EVALUATION
     # ══════════════════════════════════════════════════════════
 
     def evaluate_by_section(self, user_type: str, sections: Dict,
                             coding_test_results: Dict = None) -> Dict:
-        all_scores = []
-        all_feedbacks = []
-        section_scores = {}
-        section_details = {}
+        all_scores       = []
+        all_feedbacks    = []
+        section_scores   = {}
+        section_details  = {}
         coding_test_results = coding_test_results or {}
 
         for section_name, qa_pairs in sections.items():
             if not qa_pairs:
                 continue
             section_correct = 0
-            section_total = len(qa_pairs)
+            section_total   = len(qa_pairs)
             section_results = []
 
             for idx, qa in enumerate(qa_pairs):
-                user_answer = str(qa.get("answer", "")).strip()
+                user_answer    = str(qa.get("answer", "")).strip()
                 correct_letter = str(qa.get("correct_answer", "")).strip().upper()
-                correct_text = str(qa.get("correct_option_text", "")).strip()
-                question_text = qa.get("question", "")
-                options = qa.get("options", [])
-                q_number = qa.get("question_number", idx + 1)
+                correct_text   = str(qa.get("correct_option_text", "")).strip()
+                question_text  = qa.get("question", "")
+                options        = qa.get("options", [])
+                q_number       = qa.get("question_number", idx + 1)
 
                 if section_name == "coding":
                     tc_results = coding_test_results.get(q_number)
@@ -912,17 +916,18 @@ Explain what went wrong based on the actual test case failure:"""
                         code_eval = self.evaluate_code_answer(question_text, user_answer)
                     is_correct = code_eval["is_correct"]
                     qa["generated_correct_code"] = code_eval["correct_code"]
-                    qa["is_correct"] = is_correct
-                    qa["test_case_results"] = code_eval.get("test_case_results")
+                    qa["is_correct"]             = is_correct
+                    qa["test_case_results"]      = code_eval.get("test_case_results")
                     all_scores.append(1 if is_correct else 0)
                     if is_correct: section_correct += 1
                     section_results.append({
                         "question_number": idx + 1, "question": question_text[:200],
-                        "user_answer": user_answer or "No answer",
-                        "correct_answer": code_eval["correct_code"], "is_correct": is_correct,
-                        "explanation": code_eval["explanation"],
+                        "user_answer":     user_answer or "No answer",
+                        "correct_answer":  code_eval["correct_code"], "is_correct": is_correct,
+                        "explanation":     code_eval["explanation"],
                         "test_case_results": code_eval.get("test_case_results"),
-                        "overall_result": code_eval.get("overall_result", "Unknown")})
+                        "overall_result":  code_eval.get("overall_result", "Unknown"),
+                    })
                 else:
                     is_correct = self._check_answer_correct(user_answer, correct_letter, correct_text, options)
                     qa["is_correct"] = is_correct
@@ -930,9 +935,10 @@ Explain what went wrong based on the actual test case failure:"""
                     if is_correct: section_correct += 1
                     section_results.append({
                         "question_number": idx + 1, "question": question_text[:200],
-                        "user_answer": user_answer or "No answer",
-                        "correct_answer": correct_text or correct_letter,
-                        "is_correct": is_correct, "options": options, "explanation": ""})
+                        "user_answer":     user_answer or "No answer",
+                        "correct_answer":  correct_text or correct_letter,
+                        "is_correct":      is_correct, "options": options, "explanation": "",
+                    })
 
             if section_name != "coding":
                 explanations = self.generate_batch_explanations(qa_pairs, section_name)
@@ -945,18 +951,19 @@ Explain what went wrong based on the actual test case failure:"""
                     all_feedbacks.append(r.get("explanation", ""))
 
             pct = round((section_correct / section_total) * 100, 1) if section_total else 0
-            section_scores[section_name] = {"correct": section_correct, "total": section_total, "percentage": pct}
+            section_scores[section_name]  = {"correct": section_correct, "total": section_total, "percentage": pct}
             section_details[section_name] = {"score": section_scores[section_name], "questions": section_results}
 
-        total_correct = sum(all_scores)
+        total_correct   = sum(all_scores)
         total_questions = len(all_scores)
-        overall_pct = round((total_correct / total_questions) * 100, 1) if total_questions else 0
+        overall_pct     = round((total_correct / total_questions) * 100, 1) if total_questions else 0
 
-        return {"scores": all_scores, "feedbacks": all_feedbacks,
-                "total_correct": total_correct, "total_questions": total_questions,
-                "overall_percentage": overall_pct, "section_scores": section_scores,
-                "section_details": section_details}
-
+        return {
+            "scores": all_scores, "feedbacks": all_feedbacks,
+            "total_correct": total_correct, "total_questions": total_questions,
+            "overall_percentage": overall_pct, "section_scores": section_scores,
+            "section_details": section_details,
+        }
 
     # ══════════════════════════════════════════════════════════
     #  HELPERS
