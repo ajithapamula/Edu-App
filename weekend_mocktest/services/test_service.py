@@ -597,6 +597,12 @@ class TestService:
                     stored_answer = q.get("user_code", "")
                     if stored_answer:
                         logger.info(f"♻️  Recovered code from user_code for Q{i+1}")
+                    # Also try recovering from stored coding test results
+                    if not stored_answer:
+                        db_result = self.db_manager.get_coding_result(test_id, q.get("question_number", i+1))
+                        if db_result and db_result.get("total_passed", 0) > 0:
+                            stored_answer = f"[Code run — {db_result.get('total_passed',0)}/{db_result.get('total_cases',0)} passed]"
+                            logger.info(f"♻️  Recovered result summary for Q{i+1} from DB")
                 sections[q_type].append({
                     "question":            q.get("question", ans_data.get("question", "")),
                     "answer":              stored_answer,

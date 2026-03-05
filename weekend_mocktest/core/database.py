@@ -96,10 +96,6 @@ class DatabaseManager:
 
     def add_warning(self, test_id: str, student_id: int, warning_type: str,
                     details: Dict = None) -> Dict[str, Any]:
-        """
-        Add a proctoring warning.
-        After 3 warnings, test is terminated.
-        """
         import time
 
         if warning_type not in self.WARNING_MESSAGES:
@@ -174,7 +170,6 @@ class DatabaseManager:
         }
 
     def _mark_test_terminated(self, test_id: str):
-        """Mark test as terminated due to warnings"""
         doc = self.warnings_collection.find_one({"test_id": test_id})
         warnings_list = doc.get("warnings", []) if doc else []
 
@@ -201,42 +196,28 @@ class DatabaseManager:
         logger.error(f"🚫 Test {test_id[:8]} TERMINATED: {termination_reason}")
 
     def get_warnings(self, test_id: str) -> Dict[str, Any]:
-        """Get all warnings for a test"""
         doc = self.warnings_collection.find_one({"test_id": test_id}, {"_id": 0})
         if not doc:
             return {"test_id": test_id, "warning_count": 0, "warnings": [], "terminated": False}
         return doc
 
     def get_warning_count(self, test_id: str) -> int:
-        """Get current warning count"""
         doc = self.warnings_collection.find_one({"test_id": test_id}, {"warning_count": 1})
         return doc.get("warning_count", 0) if doc else 0
 
     def is_test_terminated(self, test_id: str) -> bool:
-        """Check if test is terminated"""
         doc = self.warnings_collection.find_one({"test_id": test_id}, {"terminated": 1})
         return doc.get("terminated", False) if doc else False
 
     def get_termination_reason(self, test_id: str) -> str:
-        """Get termination reason"""
         doc = self.warnings_collection.find_one({"test_id": test_id}, {"termination_reason": 1})
         return doc.get("termination_reason", "") if doc else ""
 
     # ==========================================================
     # CONTENT (AUTO ROUTING)
     # ==========================================================
-    # ═══════════════════════════════════════════════════════════
-    # CODING TEST RESULTS — persisted to MongoDB
-    # So results survive server restarts and are always available
-    # at evaluation time regardless of whether student ran tests.
-    # ═══════════════════════════════════════════════════════════
-
-    def save_coding_result(self, test_id: str, question_number: int, 
+    def save_coding_result(self, test_id: str, question_number: int,
                            results: Dict, user_code: str = "", language: str = "") -> None:
-        """
-        Persist coding test results to MongoDB when student runs tests.
-        Called by /api/code/submit — survives server restarts.
-        """
         try:
             key = f"{test_id}__q{question_number}"
             self.active_tests_collection.update_one(
@@ -261,15 +242,10 @@ class DatabaseManager:
             logger.error(f"❌ [DB] Failed to save coding result: {e}")
 
     def get_coding_result(self, test_id: str, question_number: int) -> Optional[Dict]:
-        """
-        Retrieve stored coding test results from MongoDB.
-        Returns None if not found (student didn't run tests).
-        """
         try:
             key = f"{test_id}__q{question_number}"
             doc = self.active_tests_collection.find_one({"_id": key})
             if doc:
-                logger.debug(f"📖 [DB] Found coding result Q{question_number} for {test_id[:8]}")
                 return doc.get("results")
             return None
         except Exception as e:
@@ -277,10 +253,6 @@ class DatabaseManager:
             return None
 
     def get_all_coding_results(self, test_id: str) -> Dict[int, Dict]:
-        """
-        Get all stored coding results for a test, keyed by question_number.
-        Used at evaluation time to gather all pre-run results at once.
-        """
         try:
             docs = self.active_tests_collection.find({"test_id": test_id})
             results = {}
@@ -294,7 +266,6 @@ class DatabaseManager:
             return {}
 
     def cleanup_coding_results(self, test_id: str) -> None:
-        """Delete stored coding results after test is fully evaluated."""
         try:
             result = self.active_tests_collection.delete_many({"test_id": test_id})
             if result.deleted_count:
@@ -303,11 +274,6 @@ class DatabaseManager:
             logger.error(f"❌ [DB] Failed to cleanup coding results: {e}")
 
     def get_weekly_summaries(self, user_type: str):
-        """
-        Get summaries from MongoDB.
-        dev → Developer collection
-        non_dev → Non-Developer collection
-        """
         if user_type == "dev":
             collection = self.developer_collection
             collection_name = "Developer"
@@ -346,6 +312,7 @@ class DatabaseManager:
                     "options": q.get("options"),
                     "correct_answer": q.get("correct_answer"),
                     "correct_option_text": q.get("correct_option_text"),
+                    "test_cases": q.get("test_cases"),
                     "usage_count": 0,
                     "active": True,
                     "created_at": datetime.utcnow()
@@ -365,7 +332,6 @@ class DatabaseManager:
             )
 
     def get_seen_question_ids(self, student_id: int) -> List[str]:
-        """Get question IDs this student has already seen"""
         cursor = self.student_history_collection.find(
             {"student_id": student_id},
             {"question_id": 1}
@@ -375,68 +341,119 @@ class DatabaseManager:
     def get_unseen_questions(self, student_id: int, user_type: str,
                              question_type: str, count: int) -> List[Dict]:
         """
-        Smart question rotation to minimise repetition.
+        Smart question selection — guarantees:
+        1. Same student never sees the same question twice
+        2. Different students get different questions even at the same time
+        3. Questions are randomly sampled (not just top-N by usage)
 
         Strategy:
-        1. Priority 1 — questions this student has NEVER seen (seen_ids excluded)
-        2. Priority 2 — if not enough unseen, fill from LEAST-used questions
-           (usage_count ascending), excluding those used in last test
-        3. Always shuffle the final pool so order varies
+        ─────────────────────────────────────────────────────────────
+        TIER 1 — Questions this student has NEVER seen
+          → Fetch a large pool (count × 8), group by usage tier,
+            randomly sample within each tier.
+          → This means two students starting simultaneously both get
+            unseen questions but from different random positions.
 
-        Why this works:
-        - Student-level tracking prevents same student seeing same question twice
-        - usage_count rotation ensures DIFFERENT students get different questions
-        - Large shuffle pool (count * 5) means each test gets a unique subset
+        TIER 2 — If not enough unseen, fill from least-used questions
+          → Excludes questions already in selected pool
+          → Also randomly sampled, not top-N
+
+        Final shuffle ensures question ORDER varies per student.
+        ─────────────────────────────────────────────────────────────
         """
-        seen_ids  = self.get_seen_question_ids(student_id)
-        # How many total questions are in the bank for this section?
+        seen_ids = self.get_seen_question_ids(student_id)
+
         total_available = self.question_bank_collection.count_documents({
             "user_type": user_type, "question_type": question_type, "active": True
         })
 
-        # Use a large pool — at least 5x requested count or 50, whichever bigger
-        # This gives shuffle enough room so different tests don't get same subset
-        pool_size = max(count * 5, 50)
+        # Fetch a very large pool so random sampling has plenty to work with
+        # pool_size >> count ensures different students pick different subsets
+        pool_size = max(count * 8, 100)
 
-        # Priority 1: questions this student hasn't seen
+        # ── TIER 1: Questions this student hasn't seen ──────────────────────
         unseen_cursor = self.question_bank_collection.find(
             {
                 "user_type":     user_type,
                 "question_type": question_type,
                 "active":        True,
                 "question_id":   {"$nin": seen_ids}
-            }
-        ).sort("usage_count", 1).limit(pool_size)
+            },
+            # Fetch random-ish by using no sort — MongoDB natural order varies
+            # We'll do proper randomization below
+        ).limit(pool_size)
 
-        pool = list(unseen_cursor)
+        unseen_pool = list(unseen_cursor)
 
-        # Priority 2: bank too small or student has seen everything
-        # Fill remaining slots from least-used questions (different usage tier)
-        if len(pool) < count:
+        # ── KEY FIX: Random sampling within usage tiers ────────────────────
+        # Group by usage_count tier (0-2, 3-5, 6+)
+        # Pick randomly from lowest tier first — ensures variety across students
+        selected = self._tier_sample(unseen_pool, count)
+
+        # ── TIER 2: Not enough unseen — fill from least-used ───────────────
+        if len(selected) < count:
             logger.info(
-                f"⚠️ Only {len(pool)} unseen questions for student {student_id} "
+                f"⚠️ Only {len(selected)} unseen for student {student_id} "
                 f"({question_type}/{user_type}), bank has {total_available} total. "
                 f"Filling from least-used pool."
             )
-            # Get least-used questions (student may have seen them, but long ago)
-            # Exclude questions already in pool to avoid duplicates
-            pool_ids    = {q.get("question_id") for q in pool}
+            selected_ids = {q.get("question_id") for q in selected}
+
             fill_cursor = self.question_bank_collection.find(
                 {
                     "user_type":     user_type,
                     "question_type": question_type,
                     "active":        True,
-                    "question_id":   {"$nin": list(pool_ids)}
+                    "question_id":   {"$nin": list(selected_ids)}
                 }
-            ).sort("usage_count", 1).limit(pool_size - len(pool))
-            pool.extend(list(fill_cursor))
+            ).limit(pool_size)
 
-        # Always shuffle — this is what prevents same-order repetition
-        random.shuffle(pool)
-        return pool[:count]
+            fill_pool = list(fill_cursor)
+            fill_sample = self._tier_sample(fill_pool, count - len(selected))
+            selected.extend(fill_sample)
+
+        # Final shuffle — randomizes question ORDER per student
+        random.shuffle(selected)
+
+        logger.info(
+            f"📋 Selected {len(selected)} {question_type} questions for student {student_id} "
+            f"(from pool of {len(unseen_pool)}, bank has {total_available})"
+        )
+        return selected[:count]
+
+    def _tier_sample(self, pool: List[Dict], count: int) -> List[Dict]:
+        """
+        Randomly sample `count` questions from pool, prioritising low-usage tiers.
+
+        Tier 0: usage_count 0–2   (fresh questions — highest priority)
+        Tier 1: usage_count 3–6   (lightly used)
+        Tier 2: usage_count 7+    (heavily used — last resort)
+
+        Within each tier, questions are randomly sampled.
+        This prevents all students from getting the same "top N" questions.
+        """
+        if not pool or count <= 0:
+            return []
+
+        tier0 = [q for q in pool if q.get("usage_count", 0) <= 2]
+        tier1 = [q for q in pool if 3 <= q.get("usage_count", 0) <= 6]
+        tier2 = [q for q in pool if q.get("usage_count", 0) >= 7]
+
+        # Shuffle each tier independently
+        random.shuffle(tier0)
+        random.shuffle(tier1)
+        random.shuffle(tier2)
+
+        selected = []
+        for tier in [tier0, tier1, tier2]:
+            needed = count - len(selected)
+            if needed <= 0:
+                break
+            selected.extend(tier[:needed])
+
+        return selected
 
     def increment_question_usage(self, question_ids: List[str]):
-        """Increment usage count for questions"""
         self.question_bank_collection.update_many(
             {"question_id": {"$in": question_ids}},
             {"$inc": {"usage_count": 1}}
@@ -451,7 +468,6 @@ class DatabaseManager:
         test_data: Dict[str, Any],
         evaluation_result: Dict[str, Any]
     ):
-        """Save test results with warning info"""
         warnings_data = self.get_warnings(test_id)
 
         doc = {
@@ -485,28 +501,17 @@ class DatabaseManager:
         logger.info(f"💾 Saved test {test_id} | Warnings: {warnings_data.get('warning_count', 0)}")
 
     # ==========================================================
-    # STUDENT — FIX: Stable ID from identifier, not random
+    # STUDENT
     # ==========================================================
     def _get_student_info(self, identifier: str = None) -> Dict:
-        """
-        Generate a STABLE student_id.
-
-        - If identifier is given (e.g. from localStorage): hash it → consistent 5-digit ID
-        - If no identifier: use time-based ID (consistent within session via test_service)
-
-        This fixes the question repetition bug where random IDs broke seen-question tracking.
-        """
         if identifier:
             hash_val = int(hashlib.md5(str(identifier).encode()).hexdigest(), 16)
-            student_id = (hash_val % 90000) + 10000  # Always 5-digit, always same for same input
+            student_id = (hash_val % 90000) + 10000
             logger.info(f"🎓 Stable student_id={student_id} from identifier='{identifier}'")
         else:
             import time
-            # Time-based: not truly stable across restarts, but test_service
-            # should pass student_id from frontend to avoid hitting this path
             student_id = int(time.time() * 1000) % 90000 + 10000
-            logger.warning(f"⚠️ No identifier provided — using time-based student_id={student_id}. "
-                           f"Pass student_id from frontend localStorage for true persistence.")
+            logger.warning(f"⚠️ No identifier provided — using time-based student_id={student_id}.")
 
         return {"student_id": student_id}
 

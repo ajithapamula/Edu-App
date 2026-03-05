@@ -1,9 +1,12 @@
 # weekend_mocktest/core/ai_services.py
 # ═══════════════════════════════════════════════════════════════════
 # FIXES IN THIS VERSION:
-#   1. _parse_questions Strategy 1: skip parts[0] (always preamble)
-#   2. _extract_question_from_part: expanded preamble_signals list
+#   1. _parse_questions: skip preamble, reject markers as questions
+#   2. _extract_question_from_part: reject SAP codes, expanded signals
 #   3. generate_questions_for_bank: stronger system prompt
+#   4. _check_answer_correct: guard against ord() crash on bad data
+#   5. evaluate_code_with_test_results: fractional partial scoring
+#   6. evaluate_by_section: uses partial_score not binary 0/1
 # ═══════════════════════════════════════════════════════════════════
 
 import json
@@ -341,7 +344,7 @@ class AIService:
             return False
 
         # Expected output should not contain prompt artifacts
-        bad_phrases = ["expected", "output:", "result:", "answer:", "->", "=>", "test case"]
+        bad_phrases = ["expected output:", "result:", "answer:", "test case:"]
         exp_lower = expected_output.lower()
         if any(p in exp_lower for p in bad_phrases):
             logger.warning(f"⚠️ Test case expected_output contains artifact: '{expected_output.strip()}'")
@@ -476,9 +479,9 @@ class AIService:
             if not prompt:
                 return []
 
-            if question_type == "coding":   max_tok = 6000
+            if question_type == "coding":   max_tok = 8000
             elif question_type == "mcq":    max_tok = 8000
-            else:                           max_tok = 4000
+            else:                           max_tok = 8000
 
             if question_type == "aptitude": temp = 0.4
             elif question_type == "coding": temp = 0.6
@@ -622,7 +625,7 @@ class AIService:
             q['difficulty'] = m.group(1).strip()
 
         m = re.search(
-            r'(?:##\s*)?Question:\s*\n(.+?)(?=(?:##\s*)?Options:|(?:##\s*)?TestCases:|(?:##\s*)?Correct:|$)',
+            r'(?:##\s*)?Question:\s*\n?\s*(.+?)(?=\n(?:##\s*)?(?:Options:|TestCases:|Correct:)|$)',
             part, re.DOTALL | re.IGNORECASE
         )
         if m:
@@ -669,8 +672,34 @@ class AIService:
             if tcs:
                 q['test_cases'] = tcs
 
+        # ── Validate correct_answer is a single A-D letter ──────────────
+        # If it's a full word (e.g. "SCCL", "None", "True") reject the question
+        # This prevents ord() crash during evaluation
+        if q.get('correct_answer'):
+            ca = str(q['correct_answer']).strip().upper()
+            if len(ca) != 1 or ca not in 'ABCD':
+                logger.warning(f"  ⚠️ Rejected question with invalid correct_answer: {ca!r}")
+                return None
+
         if q.get('question') and len(q['question']) > 10:
             q_lower = q['question'].lower()
+
+            # ── Reject marker patterns stored as question text ─────────────
+            # e.g. "=== QUESTION 49 ===" getting stored as the question
+            if re.match(r'^===\s*QUESTION\s*\d+\s*===', q['question'].strip(), re.IGNORECASE):
+                logger.warning(f"  ⚠️ Rejected marker as question: {q['question'][:80]!r}")
+                return None
+            if re.match(r'^\*\*\s*Question\s*\d+\s*\*\*', q['question'].strip(), re.IGNORECASE):
+                logger.warning(f"  ⚠️ Rejected marker as question: {q['question'][:80]!r}")
+                return None
+
+            # ── Reject SAP/client-code options in dev bank ─────────────────
+            # SCC1, SCC4, SCCL, SCC3 are SAP client copy codes — wrong for dev
+            opts = q.get('options', [])
+            sap_code_pattern = re.compile(r'^SCC[0-9A-Z]$', re.IGNORECASE)
+            if sum(1 for o in opts if sap_code_pattern.match(o.strip())) >= 2:
+                logger.warning(f"  ⚠️ Rejected SAP client-code question in dev bank: {opts}")
+                return None
 
             # ── FIX 2: Expanded preamble_signals ──────────────────────────
             preamble_signals = [
@@ -699,7 +728,23 @@ class AIService:
                 logger.debug(f"  ⚠️ Rejected preamble block: {q['question'][:80]!r}")
                 return None
 
-            if question_type == "mcq" and not q.get('options'):
+            if question_type == "mcq":
+                opts = q.get('options', [])
+                if not opts:
+                    return None
+                # Reject questions with placeholder options like "Option A", "Option B"
+                placeholder_opts = [o for o in opts if re.match(r'^Option\s+[A-D]$', o.strip(), re.IGNORECASE)]
+                if len(placeholder_opts) >= 2:
+                    logger.warning(f"  ⚠️ Rejected question with placeholder options: {opts}")
+                    return None
+                # Reject questions with very short/empty options
+                valid_opts = [o for o in opts if len(o.strip()) > 2]
+                if len(valid_opts) < 4:
+                    logger.warning(f"  ⚠️ Rejected question with insufficient valid options: {opts}")
+                    return None
+            # Reject questions with very short question text (truncated)
+            if len(q.get('question', '').strip()) < 20:
+                logger.warning(f"  ⚠️ Rejected truncated question: {q.get('question', '')!r}")
                 return None
             return q
         return None
@@ -734,15 +779,44 @@ class AIService:
 
     def evaluate_code_with_test_results(self, question: str, user_code: str,
                                         test_results: Dict) -> Dict:
-        all_passed       = test_results.get("all_passed", False)
-        # Pass user_code so correct solution is generated in the same language
+        total_passed  = test_results.get("total_passed", 0)
+        total_cases   = test_results.get("total_cases", 1)
+        score_pct     = test_results.get("score_percentage", 0.0)
+        all_passed    = test_results.get("all_passed", False)
+
+        # ── Partial scoring ───────────────────────────────────────────
+        # 0 passed  → score = 0.0  (no credit)
+        # 1+ passed but not all → score = 0.5 (half credit)
+        # All passed → score = 1.0 (full credit)
+        if all_passed:
+            partial_score  = 1.0
+            is_correct     = True
+            display_result = "Accepted"
+        elif total_passed > 0:
+            # Fractional: 1/2 = 0.5, 1/5 = 0.2, etc.
+            partial_score  = round(total_passed / total_cases, 2)
+            is_correct     = False
+            display_result = f"Partial ({total_passed}/{total_cases} passed)"
+        else:
+            partial_score  = 0.0
+            is_correct     = False
+            display_result = test_results.get("overall_result", "Wrong Answer")
+
+        logger.info(
+            f"  📊 Code eval: {total_passed}/{total_cases} passed ({score_pct}%) "
+            f"→ partial_score={partial_score} is_correct={is_correct}"
+        )
+
         correct_solution = self.generate_correct_code(question, user_code)
         explanation      = self.generate_coding_explanation(
-            question, user_code, correct_solution["code"], all_passed, test_results)
+            question, user_code, correct_solution["code"], is_correct, test_results)
         return {
-            "is_correct": all_passed, "correct_code": correct_solution["code"],
-            "explanation": explanation, "test_case_results": test_results,
-            "overall_result": test_results.get("overall_result", "Unknown"),
+            "is_correct":    is_correct,
+            "partial_score": partial_score,         # 0.0 / 0.5 / 1.0
+            "correct_code":  correct_solution["code"],
+            "explanation":   explanation,
+            "test_case_results": test_results,
+            "overall_result":    display_result,
         }
 
     def evaluate_code_answer(self, question: str, user_code: str) -> Dict:
@@ -965,6 +1039,7 @@ Explain what went wrong based on the actual test case failure:"""
             section_results = []
 
             for idx, qa in enumerate(qa_pairs):
+              try:
                 raw_answer  = str(qa.get("answer", "")).strip()
                 # Treat frontend sentinel values as empty (no answer)
                 user_answer = "" if raw_answer.lower() in SENTINELS else raw_answer
@@ -980,22 +1055,39 @@ Explain what went wrong based on the actual test case failure:"""
                         code_eval = self.evaluate_code_with_test_results(question_text, user_answer, tc_results)
                     else:
                         code_eval = self.evaluate_code_answer(question_text, user_answer)
-                    is_correct = code_eval["is_correct"]
+                    is_correct    = code_eval["is_correct"]
+                    partial_score = code_eval.get("partial_score", 1.0 if is_correct else 0.0)
                     qa["generated_correct_code"] = code_eval["correct_code"]
                     qa["is_correct"]             = is_correct
+                    qa["partial_score"]          = partial_score
                     qa["test_case_results"]      = code_eval.get("test_case_results")
-                    all_scores.append(1 if is_correct else 0)
-                    if is_correct: section_correct += 1
+                    all_scores.append(partial_score)          # 0.0 / 0.5 / 1.0
+                    section_correct += partial_score          # accumulate partial marks
+
+                    # For display: if user_answer is empty but test cases ran,
+                    # show partial code or result summary instead of "No answer (Skipped)"
+                    display_answer = user_answer
+                    if not display_answer:
+                        tc = code_eval.get("test_case_results")
+                        if tc and tc.get("total_passed", 0) > 0:
+                            display_answer = f"[Code submitted — {tc.get('total_passed',0)}/{tc.get('total_cases',0)} test cases passed]"
+                        else:
+                            display_answer = "No answer (Skipped)"
+
                     section_results.append({
                         "question_number": idx + 1, "question": question_text[:200],
-                        "user_answer":     user_answer if user_answer else "No answer (Skipped)",
+                        "user_answer":     display_answer,
                         "correct_answer":  code_eval["correct_code"], "is_correct": is_correct,
                         "explanation":     code_eval["explanation"],
                         "test_case_results": code_eval.get("test_case_results"),
                         "overall_result":  code_eval.get("overall_result", "Unknown"),
                     })
                 else:
-                    is_correct = self._check_answer_correct(user_answer, correct_letter, correct_text, options)
+                    try:
+                        is_correct = self._check_answer_correct(user_answer, correct_letter, correct_text, options)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Answer check failed for Q{q_number} (correct_answer={correct_letter!r}): {e} — marking wrong")
+                        is_correct = False
                     qa["is_correct"] = is_correct
                     all_scores.append(1 if is_correct else 0)
                     if is_correct: section_correct += 1
@@ -1005,6 +1097,16 @@ Explain what went wrong based on the actual test case failure:"""
                         "correct_answer":  correct_text or correct_letter,
                         "is_correct":      is_correct, "options": options, "explanation": "",
                     })
+              except Exception as e:
+                logger.error(f"❌ Skipping Q{idx+1} due to error: {e} — marking wrong and continuing")
+                all_scores.append(0)
+                section_results.append({
+                    "question_number": idx + 1,
+                    "question": qa.get("question", "")[:200],
+                    "user_answer": "Error during evaluation",
+                    "correct_answer": "N/A",
+                    "is_correct": False, "options": [], "explanation": "Question could not be evaluated.",
+                })
 
             if section_name != "coding":
                 explanations = self.generate_batch_explanations(qa_pairs, section_name)
@@ -1017,7 +1119,7 @@ Explain what went wrong based on the actual test case failure:"""
                     all_feedbacks.append(r.get("explanation", ""))
 
             pct = round((section_correct / section_total) * 100, 1) if section_total else 0
-            section_scores[section_name]  = {"correct": section_correct, "total": section_total, "percentage": pct}
+            section_scores[section_name]  = {"correct": round(section_correct, 1), "total": section_total, "percentage": pct}
             section_details[section_name] = {"score": section_scores[section_name], "questions": section_results}
 
         total_correct   = sum(all_scores)
@@ -1039,29 +1141,46 @@ Explain what went wrong based on the actual test case failure:"""
                               correct_text: str, options: List) -> bool:
         if not user_answer:
             return False
+
+        # Guard: correct_letter must be a single letter A-D
+        # If it's a full word (bad data from MongoDB), fall back to text comparison only
+        correct_letter = str(correct_letter).strip().upper()
+        is_valid_letter = len(correct_letter) == 1 and correct_letter in "ABCD"
+
         user_lower = user_answer.lower().strip()
-        if user_lower == correct_letter.lower():
+
+        # Direct letter match
+        if is_valid_letter and user_lower == correct_letter.lower():
             return True
+
+        # Direct text match
         if correct_text and user_lower == correct_text.lower().strip():
             return True
+
+        # Partial text match (substring)
         if correct_text and len(correct_text) > 3:
             if user_lower in correct_text.lower() or correct_text.lower() in user_lower:
                 return True
-        if user_answer.isdigit() and options:
+
+        # Numeric index match (frontend sends "0","1","2","3")
+        if user_answer.isdigit() and options and is_valid_letter:
             idx = int(user_answer)
             if 0 <= idx < len(options):
                 selected = str(options[idx]).lower().strip()
                 if correct_text and selected == correct_text.lower().strip():
                     return True
-                expected_idx = ord(correct_letter.upper()) - ord('A')
+                expected_idx = ord(correct_letter) - ord('A')
                 if idx == expected_idx:
                     return True
-        if options:
+
+        # Match by option text → check if it's the correct option
+        if options and is_valid_letter:
             for i, opt in enumerate(options):
                 if user_lower == str(opt).lower().strip():
-                    expected_idx = ord(correct_letter.upper()) - ord('A')
+                    expected_idx = ord(correct_letter) - ord('A')
                     if i == expected_idx:
                         return True
+
         return False
 
     def health_check(self) -> Dict:
