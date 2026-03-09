@@ -509,19 +509,24 @@ class TestService:
             return "python"
         ctx = context.lower()
         scores = {
-            "java":       sum(ctx.count(s) for s in [
-                              "scanner", "system.out", "public class", "arraylist",
-                              "hashmap", "import java", "void main", "string[]",
-                              "integer", "bufferedreader", "throws", ".java"]),
-            "python":     sum(ctx.count(s) for s in [
-                              "def ", "print(", "input(", "import numpy", "import pandas",
-                              "elif ", "list(", "dict(", "tuple(", ".py", "python"]),
-            "javascript": sum(ctx.count(s) for s in [
-                              "console.log", "const ", "let ", "var ", "require(",
-                              "node.js", "javascript", "async/await", "=>"]),
-            "cpp":        sum(ctx.count(s) for s in [
-                              "cout", "cin", "#include", "std::", "iostream", ".cpp"]),
-        }
+    "java":       sum(ctx.count(s) for s in [
+                      "scanner", "system.out", "public class", "arraylist",
+                      "hashmap", "import java", "void main", "string[]",
+                      "integer", "bufferedreader", "throws", ".java"]),
+    "python":     sum(ctx.count(s) for s in [
+                      "def ", "print(", "input(", "import numpy", "import pandas",
+                      "elif ", "list(", "dict(", "tuple(", ".py", "python"]),
+    "javascript": sum(ctx.count(s) for s in [
+                      "console.log", "const ", "let ", "var ", "require(",
+                      "node.js", "javascript", "async/await", "=>"]),
+    "cpp":        sum(ctx.count(s) for s in [
+                      "cout", "cin", "#include", "std::", "iostream", ".cpp"]),
+    "go":         sum(ctx.count(s) for s in [
+                      "golang", "go lang", "package main", "fmt.println",
+                      "fmt.scan", "func main", "goroutine", "defer ",
+                      "interface{}", "import \"fmt\"", ":= ",
+                      "go programming", "the go language", "written in go"]),
+}
         dominant = max(scores, key=scores.get)
         # Only return a language if it has a clear signal, else default python
         if scores[dominant] == 0:

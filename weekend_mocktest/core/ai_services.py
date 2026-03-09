@@ -5,8 +5,15 @@
 #   2. _extract_question_from_part: reject SAP codes, expanded signals
 #   3. generate_questions_for_bank: stronger system prompt
 #   4. _check_answer_correct: guard against ord() crash on bad data
-#   5. evaluate_code_with_test_results: fractional partial scoring
+#   5. evaluate_code_with_test_results: fractional + effort scoring
 #   6. evaluate_by_section: uses partial_score not binary 0/1
+#   7. _evaluate_code_effort: AI judges code relevance when 0 pass
+#   8. generate_coding_explanation: encouraging + specific feedback
+#   9. _is_template_code: detect placeholder/template code → score 0
+#  10. _is_skipped: skip button → "Skipped" only, score 0, no feedback
+#  11. generate_correct_code: question language takes priority over code
+#  12. Score shown in feedback: 📊 Score: X / 1
+#  13. Effort scores: 0.0 / 0.25 / 0.3 / 0.5 / 1.0
 # ═══════════════════════════════════════════════════════════════════
 
 import json
@@ -36,6 +43,7 @@ SUPPORTED_LANGUAGES = {
     "cpp":        {"ext": ".cpp",  "label": "C++",        "timeout": 10},
     "c":          {"ext": ".c",    "label": "C",          "timeout": 10},
     "typescript": {"ext": ".ts",   "label": "TypeScript", "timeout": 10},
+    "go":         {"ext": ".go",   "label": "Go",         "timeout": 15},
 }
 
 
@@ -70,6 +78,27 @@ class AIService:
         'master data', 'transaction', 'document',
     ]
 
+    # ── Template/placeholder signals ────────────────────────────────
+    TEMPLATE_SIGNALS = [
+        '# write your solution here',
+        '# your code here',
+        '# write code here',
+        '# your solution here',
+        '# add your code here',
+        '# type your code here',
+        '// write your solution here',
+        '// your code here',
+        '// write code here',
+        '// your solution here',
+        '/* write your solution here */',
+    ]
+
+    # ── Frontend sentinel values when student clicks Skip ───────────
+    SKIP_SENTINELS = {
+        "__skipped__", "__final_submit__", "__skip__", "__timeout__",
+        "skipped", "skip"
+    }
+
     def __init__(self):
         self.client = Groq(api_key=config.GROQ_API_KEY)
         self.model = config.GROQ_MODEL
@@ -83,6 +112,7 @@ class AIService:
             "g++":    ["g++", "--version"],
             "gcc":    ["gcc", "--version"],
             "java":   ["java", "-version"],
+            "go":     ["go", "version"],
         }
         for name, cmd in checks.items():
             try:
@@ -134,6 +164,8 @@ class AIService:
                 run_cmd = ["python3", src_file]
             elif language == "javascript":
                 run_cmd = ["node", src_file]
+            elif language == "go":
+                run_cmd = ["go", "run", src_file]
             elif language == "typescript":
                 js_file = os.path.join(tmp_dir, "main.js")
                 compile_cmd = ["npx", "tsc", "--outDir", tmp_dir, "--target", "ES2020",
@@ -151,6 +183,7 @@ class AIService:
             elif language == "java":
                 compile_cmd = ["javac", src_file]
                 run_cmd = ["java", "-cp", tmp_dir, class_name]
+            
 
             if compile_cmd:
                 try:
@@ -216,7 +249,6 @@ class AIService:
                     pass
 
     def _flexible_output_match(self, actual: str, expected: str) -> bool:
-        # Normalize: strip trailing whitespace from both sides before all comparisons
         actual   = actual.rstrip()
         expected = expected.rstrip()
         if actual == expected:
@@ -328,28 +360,16 @@ class AIService:
     # ══════════════════════════════════════════════════════════
 
     def _validate_test_case(self, input_str: str, expected_output: str) -> bool:
-        """
-        Sanity-check a test case before storing it.
-        Rejects test cases where expected_output is clearly wrong or nonsensical.
-        Returns True if valid, False if should be discarded.
-        """
-        # Must have non-empty expected output
         if not expected_output or not expected_output.strip():
             return False
-
-        # Input and expected output should not be identical for non-trivial inputs
-        # (e.g. "ruoy" → "ruoy" for a cipher is suspicious)
         if input_str.strip() == expected_output.strip() and len(input_str.strip()) > 2:
             logger.warning(f"⚠️ Suspicious test case: input == expected_output: '{input_str.strip()}'")
             return False
-
-        # Expected output should not contain prompt artifacts
         bad_phrases = ["expected output:", "result:", "answer:", "test case:"]
         exp_lower = expected_output.lower()
         if any(p in exp_lower for p in bad_phrases):
             logger.warning(f"⚠️ Test case expected_output contains artifact: '{expected_output.strip()}'")
             return False
-
         return True
 
     def _parse_test_cases_from_section(self, part: str) -> List[Dict]:
@@ -487,7 +507,6 @@ class AIService:
             elif question_type == "coding": temp = 0.6
             else:                           temp = 0.7
 
-            # ── FIX 3: Stronger system prompt ─────────────────────────────
             system_prompt = (
                 "You are an expert question generator. "
                 "The VERY FIRST characters of your entire response MUST be '=== QUESTION 1 ==='. "
@@ -495,7 +514,6 @@ class AIService:
                 "Output ONLY the === QUESTION N === blocks, nothing else before or after. "
                 "Follow the format in the user prompt exactly."
             )
-            # ──────────────────────────────────────────────────────────────
 
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -530,18 +548,14 @@ class AIService:
     # ══════════════════════════════════════════════════════════
 
     def _parse_questions(self, content: str, question_type: str = "mcq") -> List[Dict]:
-        """Parse AI-generated questions with multiple fallback strategies."""
         if not content or not content.strip():
             logger.warning("Empty content received from AI")
             return []
 
         questions = []
 
-        # ── FIX 1: Strategy 1 — skip parts[0] (always pre-marker preamble) ──
         try:
             parts = re.split(r'===\s*QUESTION\s*\d+\s*===', content, flags=re.IGNORECASE)
-            # parts[0] is everything BEFORE the first === QUESTION 1 === marker
-            # It is ALWAYS preamble/intro text — skip it unconditionally
             for part in parts[1:]:
                 if not part.strip():
                     continue
@@ -554,7 +568,6 @@ class AIService:
         except Exception as e:
             logger.warning(f"Strategy 1 error: {e}")
 
-        # Strategy 2: **Question N** or ## Question N
         try:
             parts = re.split(r'(?:\*\*|##)\s*Question\s*\d+\s*\*?\*?', content, flags=re.IGNORECASE)
             for part in parts[1:]:
@@ -569,7 +582,6 @@ class AIService:
         except Exception as e:
             logger.warning(f"Strategy 2 error: {e}")
 
-        # Strategy 3: Numbered Q1. or Q1) or 1. patterns
         try:
             parts = re.split(r'\n\s*(?:Q?\d+[\.\):]|Question\s+\d+\s*[:\.])', content, flags=re.IGNORECASE)
             for part in parts[1:]:
@@ -584,7 +596,6 @@ class AIService:
         except Exception as e:
             logger.warning(f"Strategy 3 error: {e}")
 
-        # Strategy 4: JSON
         try:
             parsed = json.loads(content)
             if isinstance(parsed, list):
@@ -600,7 +611,6 @@ class AIService:
         except:
             pass
 
-        # Strategy 5: Find blocks with A) B) C) D) options
         try:
             questions = self._parse_by_options_blocks(content, question_type)
             if questions:
@@ -613,7 +623,6 @@ class AIService:
         return []
 
     def _extract_question_from_part(self, part: str, question_type: str) -> Optional[Dict]:
-        """Extract a single question from a text block."""
         q = {}
 
         m = re.search(r'(?:##\s*)?Title:\s*(.+)', part, re.IGNORECASE)
@@ -672,9 +681,6 @@ class AIService:
             if tcs:
                 q['test_cases'] = tcs
 
-        # ── Validate correct_answer is a single A-D letter ──────────────
-        # If it's a full word (e.g. "SCCL", "None", "True") reject the question
-        # This prevents ord() crash during evaluation
         if q.get('correct_answer'):
             ca = str(q['correct_answer']).strip().upper()
             if len(ca) != 1 or ca not in 'ABCD':
@@ -684,8 +690,6 @@ class AIService:
         if q.get('question') and len(q['question']) > 10:
             q_lower = q['question'].lower()
 
-            # ── Reject marker patterns stored as question text ─────────────
-            # e.g. "=== QUESTION 49 ===" getting stored as the question
             if re.match(r'^===\s*QUESTION\s*\d+\s*===', q['question'].strip(), re.IGNORECASE):
                 logger.warning(f"  ⚠️ Rejected marker as question: {q['question'][:80]!r}")
                 return None
@@ -693,23 +697,18 @@ class AIService:
                 logger.warning(f"  ⚠️ Rejected marker as question: {q['question'][:80]!r}")
                 return None
 
-            # ── Reject SAP/client-code options in dev bank ─────────────────
-            # SCC1, SCC4, SCCL, SCC3 are SAP client copy codes — wrong for dev
             opts = q.get('options', [])
             sap_code_pattern = re.compile(r'^SCC[0-9A-Z]$', re.IGNORECASE)
             if sum(1 for o in opts if sap_code_pattern.match(o.strip())) >= 2:
                 logger.warning(f"  ⚠️ Rejected SAP client-code question in dev bank: {opts}")
                 return None
 
-            # ── FIX 2: Expanded preamble_signals ──────────────────────────
             preamble_signals = [
-                # Original signals
                 'here are', 'here is', 'below are', 'following are',
                 'i will generate', 'i have generated', "i'll create",
                 'programming language detected', 'language detected',
                 'based on the content', 'based on the course',
                 'let me generate', 'let me create',
-                # New signals that caught the Q24 bug
                 'the programming language',
                 'coding problems in java', 'coding problems in python',
                 'coding problems in javascript', 'coding problems in',
@@ -722,7 +721,6 @@ class AIService:
                 'noted, here', 'sure, here', 'certainly, here',
                 'of course, here',
             ]
-            # ──────────────────────────────────────────────────────────────
 
             if any(signal in q_lower for signal in preamble_signals):
                 logger.debug(f"  ⚠️ Rejected preamble block: {q['question'][:80]!r}")
@@ -732,17 +730,14 @@ class AIService:
                 opts = q.get('options', [])
                 if not opts:
                     return None
-                # Reject questions with placeholder options like "Option A", "Option B"
                 placeholder_opts = [o for o in opts if re.match(r'^Option\s+[A-D]$', o.strip(), re.IGNORECASE)]
                 if len(placeholder_opts) >= 2:
                     logger.warning(f"  ⚠️ Rejected question with placeholder options: {opts}")
                     return None
-                # Reject questions with very short/empty options
                 valid_opts = [o for o in opts if len(o.strip()) > 2]
                 if len(valid_opts) < 4:
                     logger.warning(f"  ⚠️ Rejected question with insufficient valid options: {opts}")
                     return None
-            # Reject questions with very short question text (truncated)
             if len(q.get('question', '').strip()) < 20:
                 logger.warning(f"  ⚠️ Rejected truncated question: {q.get('question', '')!r}")
                 return None
@@ -774,8 +769,105 @@ class AIService:
         return questions
 
     # ══════════════════════════════════════════════════════════
+    #  TEMPLATE / SKIP DETECTION
+    # ══════════════════════════════════════════════════════════
+
+    def _is_skipped(self, code: str) -> bool:
+        """
+        Returns True if student clicked the Skip button.
+        Score = 0.0, display = 'Skipped', no feedback.
+        """
+        if not code:
+            return False
+        return code.strip().lower() in self.SKIP_SENTINELS
+
+    def _is_template_code(self, code: str) -> bool:
+        """
+        Returns True if student submitted only default placeholder/template.
+        Score = 0.0, display = 'Not Attempted', no feedback.
+        """
+        if not code or not code.strip():
+            return True
+
+        code_lower = code.lower().strip()
+        has_signal = any(s in code_lower for s in self.TEMPLATE_SIGNALS)
+        if not has_signal:
+            return False
+
+        real_lines = []
+        for line in code.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith('#') or stripped.startswith('//') or stripped.startswith('/*'):
+                continue
+            real_lines.append(stripped.lower())
+
+        boilerplate = {
+            'pass', 'solution()', 'def solution():',
+            'if __name__ == "__main__":', "if __name__ == '__main__':",
+            'public static void main(string[] args) {',
+            'public class solution {', 'public class main {', '}', '{',
+        }
+        meaningful = [l for l in real_lines if l not in boilerplate]
+        if not meaningful:
+            logger.info(f"  🚫 Detected template/placeholder code — treating as Not Attempted")
+            return True
+        return False
+
+    # ══════════════════════════════════════════════════════════
     #  CODE EVALUATION
     # ══════════════════════════════════════════════════════════
+
+    def _evaluate_code_effort(self, question: str, user_code: str) -> float:
+        """
+        When 0 test cases pass and code is NOT template/skipped,
+        ask AI to judge how related the code is to the question.
+
+        Returns:
+          0.3  → Code clearly attempts to solve this, logic is close but has bugs
+          0.25 → Code is related but approach is mostly wrong
+          0.0  → Totally unrelated or just print statements
+        """
+        if not user_code or not user_code.strip():
+            return 0.0
+
+        try:
+            prompt = f"""A student wrote code for this question but failed all test cases.
+Judge if their code is related to the question and give an effort score.
+
+QUESTION:
+{question}
+
+STUDENT CODE:
+{user_code}
+
+SCORING RULES:
+- 0.3  → Code is clearly attempting to solve this question, logic is close but has small bugs
+- 0.25 → Code is related to the question but approach is mostly wrong
+- 0.0  → Code is totally unrelated, or just print statements with no real logic
+
+Respond with ONLY one of these three values: 0.0 or 0.25 or 0.3
+Nothing else. No explanation. No extra words."""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a strict code evaluator. Respond with ONLY 0.0 or 0.25 or 0.3"},
+                    {"role": "user",   "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=5,
+            )
+            content = response.choices[0].message.content.strip()
+            score   = float(content)
+            if score in [0.0, 0.25, 0.3]:
+                logger.info(f"  💡 Effort score for 0-pass code: {score}")
+                return score
+            return 0.0
+        except Exception as e:
+            logger.error(f"Effort score evaluation failed: {e}")
+            return 0.0
 
     def evaluate_code_with_test_results(self, question: str, user_code: str,
                                         test_results: Dict) -> Dict:
@@ -784,37 +876,92 @@ class AIService:
         score_pct     = test_results.get("score_percentage", 0.0)
         all_passed    = test_results.get("all_passed", False)
 
-        # ── Partial scoring ───────────────────────────────────────────
-        # 0 passed  → score = 0.0  (no credit)
-        # 1+ passed but not all → score = 0.5 (half credit)
-        # All passed → score = 1.0 (full credit)
-        if all_passed:
+        effort_score  = None
+        is_skipped    = False
+        is_template   = False
+
+        # ══════════════════════════════════════════════════════
+        #  SCORING RULES
+        # ══════════════════════════════════════════════════════
+        #
+        #  CASE 1 — Skip button clicked
+        #           score = 0.0 | display = "Skipped" | NO feedback
+        #
+        #  CASE 2 — Template/placeholder code only
+        #           score = 0.0 | display = "Not Attempted" | NO feedback
+        #
+        #  CASE 3 — All test cases passed (2/2)
+        #           score = 1.0 | display = "Accepted" | positive feedback
+        #
+        #  CASE 4 — Some test cases passed (1/2)
+        #           score = 0.5 | display = "Partial" | encouraging feedback
+        #
+        #  CASE 5 — 0 passed, real code, logic close
+        #           score = 0.3 | encouraging + specific feedback
+        #
+        #  CASE 6 — 0 passed, real code, wrong approach
+        #           score = 0.25 | encouraging + specific feedback
+        #
+        #  CASE 7 — 0 passed, unrelated code
+        #           score = 0.0 | gentle feedback
+        #
+        # ══════════════════════════════════════════════════════
+
+        if self._is_skipped(user_code):
+            is_skipped     = True
+            partial_score  = 0.0
+            is_correct     = False
+            display_result = "Skipped"
+            logger.info(f"  ⏭️  Question skipped — score 0.0")
+
+        elif self._is_template_code(user_code):
+            is_template    = True
+            partial_score  = 0.0
+            is_correct     = False
+            display_result = "Not Attempted"
+            logger.info(f"  🚫 Template code — Not Attempted, score 0.0")
+
+        elif all_passed:
             partial_score  = 1.0
             is_correct     = True
             display_result = "Accepted"
+
         elif total_passed > 0:
-            # Fractional: 1/2 = 0.5, 1/5 = 0.2, etc.
-            partial_score  = round(total_passed / total_cases, 2)
+            partial_score  = round(total_passed / total_cases, 2)  # 1/2 = 0.5
             is_correct     = False
-            display_result = f"Partial ({total_passed}/{total_cases} passed)"
+            display_result = f"Partial — {total_passed}/{total_cases} test cases passed"
+
         else:
-            partial_score  = 0.0
+            # 0 test cases passed — AI judges effort
+            effort_score   = self._evaluate_code_effort(question, user_code)
+            partial_score  = effort_score  # 0.0, 0.25, or 0.3
             is_correct     = False
-            display_result = test_results.get("overall_result", "Wrong Answer")
+            display_result = (
+                f"Wrong Answer — good effort! ({total_passed}/{total_cases} passed)"
+                if effort_score > 0
+                else test_results.get("overall_result", "Wrong Answer")
+            )
 
         logger.info(
             f"  📊 Code eval: {total_passed}/{total_cases} passed ({score_pct}%) "
-            f"→ partial_score={partial_score} is_correct={is_correct}"
+            f"→ partial_score={partial_score} is_correct={is_correct} "
+            f"skipped={is_skipped} template={is_template}"
         )
 
         correct_solution = self.generate_correct_code(question, user_code)
         explanation      = self.generate_coding_explanation(
-            question, user_code, correct_solution["code"], is_correct, test_results)
+            question, user_code, correct_solution["code"],
+            is_correct, test_results,
+            partial_score=partial_score,
+            effort_score=effort_score,
+            is_skipped=is_skipped,
+            is_template=is_template,
+        )
         return {
-            "is_correct":    is_correct,
-            "partial_score": partial_score,         # 0.0 / 0.5 / 1.0
-            "correct_code":  correct_solution["code"],
-            "explanation":   explanation,
+            "is_correct":        is_correct,
+            "partial_score":     partial_score,
+            "correct_code":      correct_solution["code"],
+            "explanation":       explanation,
             "test_case_results": test_results,
             "overall_result":    display_result,
         }
@@ -866,6 +1013,7 @@ ISSUES: List issues or "None" """
             "cpp":        ["c++ program", "in c++", "using c++", "cout", "cin", "#include", "iostream"],
             "c":          ["c program", "in c language", "using c language", "printf", "scanf", "#include <stdio"],
             "typescript": ["typescript", "in ts"],
+            "go":         ["go program", "in go", "using go", "golang", "fmt.println", "fmt.scan", "package main", "write a go"],
             "python":     ["python program", "in python", "using python", "print(", "input(", "def "],
         }
         for lang, signals in lang_signals.items():
@@ -875,33 +1023,31 @@ ISSUES: List issues or "None" """
         return "python"
 
     def _detect_language_from_code(self, code: str) -> Optional[str]:
-        """Detect language from the user's actual submitted code — more reliable than question text."""
         if not code:
             return None
-        code_lower = code.lower()
-        # Java: strong signals
         if any(s in code for s in ["public class ", "public static void main", "System.out.", "Scanner ", "import java."]):
             return "java"
-        # Python: strong signals
         if any(s in code for s in ["def ", "print(", "input(", "import numpy", "import pandas", "elif "]):
             return "python"
-        # JavaScript
         if any(s in code for s in ["console.log(", "const ", "let ", "var ", "require(", "=>"]):
             return "javascript"
-        # C++
         if any(s in code for s in ["#include", "cout <<", "cin >>", "std::"]):
             return "cpp"
-        # C
         if any(s in code for s in ["printf(", "scanf(", "#include <stdio"]):
             return "c"
+        if any(s in code for s in ["package main", "fmt.Println", "fmt.Scan", "func main()"]):
+            return "go"
         return None
 
     def generate_correct_code(self, question: str, user_code: str = "") -> Dict[str, str]:
         try:
-            # Detect from user's actual code first (most reliable signal)
-            lang = self._detect_language_from_code(user_code) if user_code else None
+            # Always detect language from QUESTION first — most reliable
+            lang = self._detect_language_from_question(question)
             if not lang:
-                lang = self._detect_language_from_question(question)
+                lang = self._detect_language_from_code(user_code) if user_code else None
+            if not lang:
+                lang = "python"
+
             lang_instructions = {
                 "python":     "Use input() for stdin, print() for stdout.",
                 "java":       "Use Scanner for stdin with nextInt()/nextDouble()/next()/nextLine(). NEVER use Integer.parseInt(scanner.nextLine()). Use System.out.println for stdout. Include a Main class. Call scanner.close() at the end.",
@@ -909,6 +1055,7 @@ ISSUES: List issues or "None" """
                 "cpp":        "Use cin for stdin, cout for stdout. Include necessary headers.",
                 "c":          "Use scanf for stdin, printf for stdout. Include necessary headers.",
                 "typescript": "Use readline for input, console.log for output.",
+                "go":         "Use fmt.Scan or bufio.NewReader for stdin, fmt.Println for stdout. Always include package main and import necessary packages.",
             }
             instructions = lang_instructions.get(lang, "Read from stdin, write to stdout.")
             prompt = f"""Write correct {lang} code for:
@@ -921,7 +1068,7 @@ Return ONLY code inside a ``` code block."""
                           {"role": "user",   "content": prompt}],
                 temperature=0.3, max_tokens=800)
             content    = response.choices[0].message.content.strip()
-            code_match = re.search(r'```(?:python|java|javascript|cpp|c|typescript)?\s*(.*?)\s*```', content, re.DOTALL)
+            code_match = re.search(r'```(?:python|java|javascript|cpp|c|typescript|go)?\s*(.*?)\s*```', content, re.DOTALL)
             code       = code_match.group(1).strip() if code_match else content
             return {"code": code, "explanation": ""}
         except Exception as e:
@@ -954,47 +1101,157 @@ Do NOT contradict yourself — if your calculation gives a different number than
 
     def generate_coding_explanation(self, question: str, user_code: str,
                                     correct_code: str, is_correct: bool,
-                                    test_results: Dict = None) -> str:
+                                    test_results: Dict = None,
+                                    partial_score: float = None,
+                                    effort_score: float = None,
+                                    is_skipped: bool = False,
+                                    is_template: bool = False) -> str:
         try:
+            total_passed = test_results.get("total_passed", 0) if test_results else 0
+            total_cases  = test_results.get("total_cases", 0)  if test_results else 0
+
+            # ── CASE 1: Skip button clicked ───────────────────────────
+            if is_skipped:
+                return "Skipped"
+
+            # ── CASE 2: Template/placeholder code ─────────────────────
+            if is_template:
+                return "Not Attempted"
+
+            # ── Build test case context ───────────────────────────────
             tc_context = ""
+            stderr_info = ""
             if test_results:
-                p  = test_results.get("total_passed", 0)
-                t  = test_results.get("total_cases", 0)
-                tc_context = f"\nTest Results: {p}/{t} passed. Overall: {test_results.get('overall_result', 'N/A')}"
+                p = test_results.get("total_passed", 0)
+                t = test_results.get("total_cases", 0)
+                tc_context = f"\nTest Results: {p}/{t} passed."
                 failed = [r for r in test_results.get("results", []) if not r["passed"] and not r.get("is_hidden")]
                 if failed:
                     f = failed[0]
-                    tc_context += f"\nFirst failing test case:"
-                    tc_context += f"\n  Input: '{f.get('input', '')}'"
-                    tc_context += f"\n  Expected output: '{f.get('expected_output', '')}'"
-                    tc_context += f"\n  Actual output: '{f.get('actual_output', '')}'"
+                    tc_context += f"\nFailing test case:"
+                    tc_context += f"\n  Input:    '{f.get('input', '')}'"
+                    tc_context += f"\n  Expected: '{f.get('expected_output', '')}'"
+                    tc_context += f"\n  Got:      '{f.get('actual_output', '')}'"
                     if f.get('stderr'):
-                        tc_context += f"\n  Error: {f.get('stderr', '')[:200]}"
+                        stderr_info = f.get('stderr', '')[:300]
+                        tc_context += f"\n  Error:    {stderr_info}"
+
+            # ── Score label for feedback ───────────────────────────────
+            score_label = f"\n\n📊 Score: {partial_score} / 1"
+
             if is_correct:
-                prompt = f"Student's code passed all tests.{tc_context}\nBrief positive feedback (1-2 sentences)."
-            else:
-                prompt = f"""Student's code failed some test cases.{tc_context}
+                # ── CASE 3: All passed ─────────────────────────────────
+                prompt = f"""Student's code passed all {total_cases} test cases perfectly.
+Give 1-2 sentences of enthusiastic positive feedback. Congratulate them genuinely!
+Do NOT add any score numbers in your response."""
+
+            elif total_passed > 0:
+                # ── CASE 4: 1/2 passed ────────────────────────────────
+                prompt = f"""Student passed {total_passed} out of {total_cases} test cases.
+{tc_context}
 
 Question: {question[:300]}
-Student Code (first 500 chars): {user_code[:500] if user_code else '(No answer submitted)'}
+Student Code:
+{user_code[:600] if user_code else '(No answer submitted)'}
 
-RULES FOR YOUR FEEDBACK:
-1. Base your feedback ONLY on the test case results shown above
-2. If there are failing test cases, explain WHY the output differs from expected
-3. Do NOT claim there are syntax errors unless the error message explicitly says so
-4. Do NOT claim code is incomplete unless the student submitted no code
-5. Do NOT hallucinate or invent issues that aren't shown in the test results
-6. Keep it brief: 2-3 sentences maximum
+Write 2-3 sentences of feedback following ALL these rules:
+1. Start positively — "Great effort!" or "You're almost there!"
+2. Say they passed {total_passed}/{total_cases} test cases — acknowledge the progress
+3. Look at the failing test case above — identify the EXACT issue:
+   - What input caused it to fail?
+   - What did their code output vs what was expected?
+   - Which specific part of their logic caused this?
+4. Give one concrete hint to fix it
+5. End encouragingly — "You are very close to full marks!"
+6. NEVER say "your code is wrong" — always be constructive
+7. Do NOT add any score numbers in your response"""
 
-Explain what went wrong based on the actual test case failure:"""
+            elif effort_score is not None and effort_score >= 0.3:
+                # ── CASE 5: 0 passed, logic is close ──────────────────
+                prompt = f"""Student's code failed all test cases but their logic is close to correct.
+{tc_context}
+
+Question: {question[:300]}
+Student Code:
+{user_code[:600] if user_code else '(No answer submitted)'}
+
+Write 2-3 sentences of feedback following ALL these rules:
+1. Start with "You're on the right track!"
+2. Acknowledge their approach — what did they get right?
+3. Look at the failing test case — identify the EXACT bug:
+   - What specific line or logic is causing the wrong output?
+   - What is the difference between their output and expected?
+   - Is it an off-by-one error? Wrong loop condition? Input parsing issue?
+4. Give a targeted hint to fix that specific bug
+5. End with "Don't give up, you are closer than you think!"
+6. Be specific — mention actual variable names or logic from their code if relevant
+7. Do NOT add any score numbers in your response"""
+
+            elif effort_score is not None and effort_score > 0:
+                # ── CASE 6: 0 passed, wrong approach ──────────────────
+                prompt = f"""Student's code failed all test cases. Their approach needs rework but they made a genuine attempt.
+{tc_context}
+
+Question: {question[:300]}
+Student Code:
+{user_code[:600] if user_code else '(No answer submitted)'}
+
+Write 2-3 sentences of feedback following ALL these rules:
+1. Start with "Good attempt!"
+2. Point out what they tried to do — acknowledge the effort
+3. Explain what is fundamentally wrong with their approach based on the test case failure
+4. Give a helpful hint about the correct approach without giving away the full solution
+5. End with "Keep trying, you will get there!"
+6. Do NOT add any score numbers in your response"""
+
+            else:
+                # ── CASE 7: 0 passed, unrelated code ──────────────────
+                prompt = f"""Student submitted code that did not pass any test cases.
+{tc_context}
+
+Question: {question[:300]}
+Student Code: {user_code[:300] if user_code else '(No code submitted)'}
+
+Write 2 sentences of gentle encouraging feedback:
+1. Be kind — never harsh or discouraging
+2. Give one helpful starting hint based on what the question is asking
+3. End with "Keep practicing, you will get there!"
+4. Do NOT add any score numbers in your response"""
+
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "system", "content": "You are a programming tutor. Give brief, ACCURATE feedback based ONLY on the test case results provided. Never invent or hallucinate code issues."},
-                          {"role": "user",   "content": prompt}],
-                temperature=0.3, max_tokens=200)
-            return response.choices[0].message.content.strip()
+                messages=[
+                    {"role": "system", "content": (
+                        "You are a warm, encouraging programming tutor. "
+                        "Give specific, accurate feedback based on the actual test case results. "
+                        "Always identify the exact error from the test case output shown. "
+                        "Be encouraging but precise — tell the student exactly what went wrong and how to fix it. "
+                        "Never mention score numbers in your response."
+                    )},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.4,
+                max_tokens=250
+            )
+            feedback = response.choices[0].message.content.strip()
+
+            # ── Append score at the end of feedback ───────────────────
+            return f"{feedback}{score_label}"
+
         except:
-            return "Correct! All test cases passed." if is_correct else "Some test cases failed. Review the expected output format."
+            score_label = f"\n\n📊 Score: {partial_score} / 1" if partial_score is not None else ""
+            if is_skipped:
+                return "Skipped"
+            if is_template:
+                return "Not Attempted"
+            if is_correct:
+                return f"Excellent! All test cases passed. Great work!{score_label}"
+            elif total_passed > 0:
+                return f"You're almost there! {total_passed}/{total_cases} test cases passed. A small fix is all you need — keep going!{score_label}"
+            elif effort_score and effort_score > 0:
+                return f"Good effort! Your code is on the right track. Review the logic carefully and try again — you are closer than you think!{score_label}"
+            else:
+                return f"Give it another try! Read the question carefully and think about the input and output format. You can do it!{score_label}"
 
     def generate_batch_explanations(self, qa_pairs: List[Dict], question_type: str) -> List[str]:
         explanations = []
@@ -1028,7 +1285,6 @@ Explain what went wrong based on the actual test case failure:"""
         section_details  = {}
         coding_test_results = coding_test_results or {}
 
-        # Sentinel values that mean "no answer given"
         SENTINELS = {"__skipped__", "__final_submit__", "__skip__", "__timeout__"}
 
         for section_name, qa_pairs in sections.items():
@@ -1041,7 +1297,6 @@ Explain what went wrong based on the actual test case failure:"""
             for idx, qa in enumerate(qa_pairs):
               try:
                 raw_answer  = str(qa.get("answer", "")).strip()
-                # Treat frontend sentinel values as empty (no answer)
                 user_answer = "" if raw_answer.lower() in SENTINELS else raw_answer
                 correct_letter = str(qa.get("correct_answer", "")).strip().upper()
                 correct_text   = str(qa.get("correct_option_text", "")).strip()
@@ -1054,18 +1309,23 @@ Explain what went wrong based on the actual test case failure:"""
                     if tc_results:
                         code_eval = self.evaluate_code_with_test_results(question_text, user_answer, tc_results)
                     else:
-                        code_eval = self.evaluate_code_answer(question_text, user_answer)
+                        # No test results — student submitted without running tests
+                        # Use effort scoring instead of binary AI eval
+                        empty_results = {
+                            "total_passed": 0, "total_cases": 0,
+                            "all_passed": False, "score_percentage": 0.0,
+                            "overall_result": "Not Tested", "results": []
+                        }
+                        code_eval = self.evaluate_code_with_test_results(question_text, user_answer, empty_results)
                     is_correct    = code_eval["is_correct"]
                     partial_score = code_eval.get("partial_score", 1.0 if is_correct else 0.0)
                     qa["generated_correct_code"] = code_eval["correct_code"]
                     qa["is_correct"]             = is_correct
                     qa["partial_score"]          = partial_score
                     qa["test_case_results"]      = code_eval.get("test_case_results")
-                    all_scores.append(partial_score)          # 0.0 / 0.5 / 1.0
-                    section_correct += partial_score          # accumulate partial marks
+                    all_scores.append(partial_score)
+                    section_correct += partial_score
 
-                    # For display: if user_answer is empty but test cases ran,
-                    # show partial code or result summary instead of "No answer (Skipped)"
                     display_answer = user_answer
                     if not display_answer:
                         tc = code_eval.get("test_case_results")
@@ -1075,12 +1335,14 @@ Explain what went wrong based on the actual test case failure:"""
                             display_answer = "No answer (Skipped)"
 
                     section_results.append({
-                        "question_number": idx + 1, "question": question_text[:200],
-                        "user_answer":     display_answer,
-                        "correct_answer":  code_eval["correct_code"], "is_correct": is_correct,
-                        "explanation":     code_eval["explanation"],
+                        "question_number":   idx + 1,
+                        "question":          question_text[:200],
+                        "user_answer":       display_answer,
+                        "correct_answer":    code_eval["correct_code"],
+                        "is_correct":        is_correct,
+                        "explanation":       code_eval["explanation"],
                         "test_case_results": code_eval.get("test_case_results"),
-                        "overall_result":  code_eval.get("overall_result", "Unknown"),
+                        "overall_result":    code_eval.get("overall_result", "Unknown"),
                     })
                 else:
                     try:
@@ -1092,20 +1354,25 @@ Explain what went wrong based on the actual test case failure:"""
                     all_scores.append(1 if is_correct else 0)
                     if is_correct: section_correct += 1
                     section_results.append({
-                        "question_number": idx + 1, "question": question_text[:200],
+                        "question_number": idx + 1,
+                        "question":        question_text[:200],
                         "user_answer":     user_answer if user_answer else "No answer (Skipped)",
                         "correct_answer":  correct_text or correct_letter,
-                        "is_correct":      is_correct, "options": options, "explanation": "",
+                        "is_correct":      is_correct,
+                        "options":         options,
+                        "explanation":     "",
                     })
               except Exception as e:
                 logger.error(f"❌ Skipping Q{idx+1} due to error: {e} — marking wrong and continuing")
                 all_scores.append(0)
                 section_results.append({
                     "question_number": idx + 1,
-                    "question": qa.get("question", "")[:200],
-                    "user_answer": "Error during evaluation",
-                    "correct_answer": "N/A",
-                    "is_correct": False, "options": [], "explanation": "Question could not be evaluated.",
+                    "question":        qa.get("question", "")[:200],
+                    "user_answer":     "Error during evaluation",
+                    "correct_answer":  "N/A",
+                    "is_correct":      False,
+                    "options":         [],
+                    "explanation":     "Question could not be evaluated.",
                 })
 
             if section_name != "coding":
@@ -1142,27 +1409,18 @@ Explain what went wrong based on the actual test case failure:"""
         if not user_answer:
             return False
 
-        # Guard: correct_letter must be a single letter A-D
-        # If it's a full word (bad data from MongoDB), fall back to text comparison only
         correct_letter = str(correct_letter).strip().upper()
         is_valid_letter = len(correct_letter) == 1 and correct_letter in "ABCD"
 
         user_lower = user_answer.lower().strip()
 
-        # Direct letter match
         if is_valid_letter and user_lower == correct_letter.lower():
             return True
-
-        # Direct text match
         if correct_text and user_lower == correct_text.lower().strip():
             return True
-
-        # Partial text match (substring)
         if correct_text and len(correct_text) > 3:
             if user_lower in correct_text.lower() or correct_text.lower() in user_lower:
                 return True
-
-        # Numeric index match (frontend sends "0","1","2","3")
         if user_answer.isdigit() and options and is_valid_letter:
             idx = int(user_answer)
             if 0 <= idx < len(options):
@@ -1172,15 +1430,12 @@ Explain what went wrong based on the actual test case failure:"""
                 expected_idx = ord(correct_letter) - ord('A')
                 if idx == expected_idx:
                     return True
-
-        # Match by option text → check if it's the correct option
         if options and is_valid_letter:
             for i, opt in enumerate(options):
                 if user_lower == str(opt).lower().strip():
                     expected_idx = ord(correct_letter) - ord('A')
                     if i == expected_idx:
                         return True
-
         return False
 
     def health_check(self) -> Dict:

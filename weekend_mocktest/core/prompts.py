@@ -471,34 +471,52 @@ CRITICAL: Start IMMEDIATELY with === QUESTION 1 ===."""
 
     @staticmethod
     def create_test_cases_prompt(question: str, num_cases: int = 5) -> str:
-        return f"""Generate exactly {num_cases} test cases for this coding problem.
+      return f"""Generate exactly {num_cases} test cases for this coding problem.
 
-CODING QUESTION:
-{question}
+  CODING QUESTION:
+  {question}
 
-══════════════════════════════════════════════════════════════════
-STRICT RULES:
-══════════════════════════════════════════════════════════════════
-1. All input read from stdin, all output to stdout
-2. Deterministic — same input = same output every time
-3. TC1 and TC2 MUST be VISIBLE — no exceptions
-4. TC3 and beyond MUST be HIDDEN
-5. Expected output = ONLY the exact stdout output, nothing else
-6. For numbers: just the number (e.g., "42" not "Answer: 42")
-7. HIDDEN cases must test edge cases (zero, empty, large, negative, boundary)
-8. Do NOT use "->" or "=>" in expected output
-9. Input and expected output must NOT be identical
+  ══════════════════════════════════════════════════════════════════
+  STRICT RULES:
+  ══════════════════════════════════════════════════════════════════
+  1. All input read from stdin, all output to stdout
+  2. Deterministic — same input = same output every time
+  3. TC1 and TC2 MUST be VISIBLE — no exceptions
+  4. TC3 and beyond MUST be HIDDEN
+  5. Expected output = ONLY the exact stdout output, nothing else
+  6. For numbers: just the number (e.g., "42" not "Answer: 42")
+  7. HIDDEN cases must test boundary values (zero, large number, single element)
+  8. Do NOT use "->" or "=>" in expected output
+  9. Input and expected output must NOT be identical
 
-MANDATORY FORMAT — output ONLY these exact lines:
-TC1|VISIBLE|<input>|<expected_output>
-TC2|VISIBLE|<input>|<expected_output>
-TC3|HIDDEN|<input>|<expected_output>
-TC4|HIDDEN|<input>|<expected_output>
-TC5|HIDDEN|<input>|<expected_output>
+  ══════════════════════════════════════════════════════════════════
+  CRITICAL — VALID INPUT RULES:
+  ══════════════════════════════════════════════════════════════════
+  ❌ NEVER use empty input as a test case
+  ❌ NEVER use invalid input (letters when number expected) as a test case
+  ❌ NEVER generate test cases where expected output is an error message like "Invalid input"
+  ❌ NEVER test error handling — only test the CORE LOGIC of the problem
+  ✅ TC1 and TC2 MUST use normal, valid, typical inputs that test the main logic
+  ✅ TC3-TC5 HIDDEN cases test boundary values (single element, zero, large number)
+  ✅ Expected output must be the CORRECT ANSWER for a valid input — never an error message
+  ✅ All test cases must pass when the correct solution is implemented
 
-Use \\n for multi-line input (e.g., "5\\n1 2 3 4 5" means line1="5", line2="1 2 3 4 5").
-Output ONLY the TC lines. No explanations, no code, no extra text, no blank lines."""
+  EXAMPLE — if question asks to reverse a string:
+  ✅ GOOD: TC1|VISIBLE|hello|olleh
+  ❌ BAD:  TC1|VISIBLE||Invalid input
+  ❌ BAD:  TC2|VISIBLE|   |Invalid input
 
+  ══════════════════════════════════════════════════════════════════
+  MANDATORY FORMAT — output ONLY these exact lines:
+  ══════════════════════════════════════════════════════════════════
+  TC1|VISIBLE|<valid_input>|<correct_output>
+  TC2|VISIBLE|<valid_input>|<correct_output>
+  TC3|HIDDEN|<valid_input>|<correct_output>
+  TC4|HIDDEN|<valid_input>|<correct_output>
+  TC5|HIDDEN|<valid_input>|<correct_output>
+
+  Use \\n for multi-line input (e.g., "5\\n1 2 3 4 5" means line1="5", line2="1 2 3 4 5").
+  Output ONLY the TC lines. No explanations, no code, no extra text, no blank lines."""
     # ════════════════════════════════════════════════════════════
     # NON-DEVELOPER APTITUDE
     # ════════════════════════════════════════════════════════════
