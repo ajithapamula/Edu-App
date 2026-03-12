@@ -11,6 +11,7 @@ Features:
 - Professional formatting
 - ☁️ AWS S3 Upload with URL stored in MongoDB
 - Student name, course, batch shown in PDF header
+- 🔁 Serves cached PDF if already generated (no duplicate S3 uploads)
 """
 
 import io
@@ -57,9 +58,7 @@ class PDFService:
     def _upload_to_s3(self, pdf_bytes: bytes, test_id: str, student_id: str = "unknown") -> Optional[str]:
         """Upload PDF to AWS S3 and return the public URL."""
         try:
-            # S3 key: pdf-reports/student_123/test_results_abc123.pdf
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            # Ensure student_id is never "N/A" or empty in the path
             safe_student_id = str(student_id) if student_id and str(student_id) not in ("N/A", "None", "", "0") else "unknown"
             s3_key = f"{self.s3_folder}/student_{safe_student_id}/test_results_{test_id}_{timestamp}.pdf"
             
@@ -133,14 +132,12 @@ class PDFService:
         Extract student info from MongoDB doc reliably.
         Tries multiple field locations since older docs may not have all fields.
         """
-        # Direct fields (new format — stored by _save_results)
         student_id   = doc.get("student_id")
         student_name = doc.get("student_name", "")
         course       = doc.get("course", "")
         batch        = doc.get("batch", "")
         role_type    = doc.get("role_type", "")
 
-        # Fallback: nested student_profile (also stored in test_data)
         profile = doc.get("student_profile", {})
         if profile:
             student_id   = student_id   or profile.get("student_id")
@@ -149,7 +146,6 @@ class PDFService:
             batch        = batch        or profile.get("batch", "")
             role_type    = role_type    or profile.get("role_type", "")
 
-        # Normalize
         student_id_str = str(student_id) if student_id and str(student_id) not in ("None", "0", "") else "N/A"
         student_name   = student_name.strip() if student_name else "N/A"
         course         = course.strip()    if course    else "N/A"
@@ -161,11 +157,15 @@ class PDFService:
             "course":       course,
             "batch":        batch,
             "role_type":    role_type,
-            "raw_id":       student_id,   # original value for S3 path
+            "raw_id":       student_id,
         }
 
     async def generate_test_results_pdf(self, test_id: str) -> bytes:
-        """Generate comprehensive PDF report with AI explanations and proper code formatting"""
+        """
+        Generate comprehensive PDF report with AI explanations and proper code formatting.
+        If PDF was already generated and the local file still exists, serves it from cache
+        without regenerating or re-uploading to S3.
+        """
         try:
             from reportlab.lib.pagesizes import A4
             from reportlab.lib import colors
@@ -179,7 +179,37 @@ class PDFService:
         except ImportError:
             logger.error("ReportLab not installed")
             raise Exception("PDF generation requires reportlab: pip install reportlab --break-system-packages")
-        
+
+        # ════════════════════════════════════════════════════════════
+        # CACHE CHECK — serve existing PDF if already generated
+        # ════════════════════════════════════════════════════════════
+        doc_check = self.db_manager.test_results_collection.find_one(
+            {"test_id": test_id}, {"pdf_path": 1, "pdf_url": 1}
+        )
+        if doc_check and doc_check.get("pdf_path"):
+            cached_path = doc_check["pdf_path"]
+            if os.path.exists(cached_path):
+                logger.info(f"📄 Serving cached PDF for {test_id[:8]} (already generated)")
+                with open(cached_path, 'rb') as f:
+                    return f.read()
+            else:
+                logger.info(f"🔄 Cached PDF path exists in MongoDB but file missing on disk — regenerating for {test_id[:8]}")
+        # ─────────────────────────────────────────────────────────
+
+        # ── Cache check — serve existing PDF if already generated ──
+        doc_check = self.db_manager.test_results_collection.find_one(
+            {"test_id": test_id}, {"pdf_path": 1, "pdf_url": 1}
+        )
+        if doc_check and doc_check.get("pdf_path"):
+            cached_path = doc_check["pdf_path"]
+            if os.path.exists(cached_path):
+                logger.info(f"📄 Serving cached PDF for {test_id[:8]} (already generated)")
+                with open(cached_path, 'rb') as f:
+                    return f.read()
+            else:
+                logger.info(f"🔄 Cached PDF path exists in MongoDB but file missing on disk — regenerating for {test_id[:8]}")
+        # ────────────────────────────────────────────────────────────
+
         # Get test results from MongoDB
         doc = self.db_manager.test_results_collection.find_one(
             {"test_id": test_id}, {"_id": 0}
@@ -335,14 +365,13 @@ class PDFService:
         
         elements.append(Paragraph(f"📋 {track_name} Mock Test Results", title_style))
 
-        # Student name subtitle (only if we have a real name)
         if student_name and student_name != "N/A":
             elements.append(Paragraph(f"Student: <b>{student_name}</b>", subtitle_style))
 
         elements.append(Spacer(1, 10))
         
         # ════════════════════════════════════════════════════════════
-        # TEST INFO TABLE — now includes Student Name + Course + Batch
+        # TEST INFO TABLE
         # ════════════════════════════════════════════════════════════
         score        = doc.get("score", 0)
         total        = doc.get("total_questions", 0)
@@ -372,11 +401,6 @@ class PDFService:
             performance = "⚠️ Needs Improvement"
             perf_color  = colors.HexColor('#dc2626')
         
-        # Layout: Label | Value | Label | Value
-        # Row 1: Name          | <name>       | Student ID   | <id>
-        # Row 2: Date          | <date>       | Performance  | <perf>
-        # Row 3: Overall Score | <score>      | Test ID      | <test_id>
-        # Row 4: Warnings      | <warnings>   | Status       | <status>
         info_data = [
             ["Name:",          student_name,
              "Student ID:",    student_id],
@@ -392,14 +416,13 @@ class PDFService:
         info_table.setStyle(TableStyle([
             ('FONTNAME',      (0, 0), (-1, -1), 'Helvetica'),
             ('FONTSIZE',      (0, 0), (-1, -1), 9),
-            ('FONTNAME',      (0, 0), (0, -1), 'Helvetica-Bold'),   # left labels bold
-            ('FONTNAME',      (2, 0), (2, -1), 'Helvetica-Bold'),   # right labels bold
+            ('FONTNAME',      (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME',      (2, 0), (2, -1), 'Helvetica-Bold'),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
             ('TOPPADDING',    (0, 0), (-1, -1), 8),
             ('BACKGROUND',    (0, 0), (-1, -1), colors.HexColor('#f8fafc')),
             ('BOX',           (0, 0), (-1, -1), 1, colors.HexColor('#e2e8f0')),
             ('LINEBELOW',     (0, 0), (-1, -2), 0.5, colors.HexColor('#e2e8f0')),
-            # Highlight label columns with slightly darker bg
             ('BACKGROUND',    (0, 0), (0, -1), colors.HexColor('#eef2f7')),
             ('BACKGROUND',    (2, 0), (2, -1), colors.HexColor('#eef2f7')),
         ]))
@@ -713,7 +736,6 @@ class PDFService:
         with open(pdf_path, 'wb') as f:
             f.write(pdf_bytes)
         
-        # Use raw student_id (int/str) for S3 path
         s3_url = self._upload_to_s3(pdf_bytes, test_id, str(student_info["raw_id"] or "unknown"))
         
         update_fields = {

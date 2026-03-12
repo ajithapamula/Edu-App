@@ -6,8 +6,13 @@ Includes:
 - Warning routes (add, status, history)
 - Section-wise evaluation with AI explanations
 - Code execution routes (HackerRank-style test case runner)
+
+FIXES IN THIS VERSION:
+  1. force_complete_test_by_path: uses Request object instead of dict={} (fixes ERR_EMPTY_RESPONSE)
+  2. _handle_add_warning: wraps force_complete_test in asyncio.wait_for + exception guard (fixes ERR_EMPTY_RESPONSE on /api/warnings)
 """
 
+import asyncio
 import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -34,9 +39,6 @@ def _get_student_profile(student_id: int) -> dict | None:
     Fetch full student profile from MySQL tbl_Student.
     Returns dict with all fields needed for question generation + result storage.
     Returns None if not found or DB error.
-
-    Configure via env vars:
-      MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DATABASE
     """
     try:
         conn = pymysql.connect(
@@ -73,14 +75,13 @@ def _get_student_profile(student_id: int) -> dict | None:
             logger.warning(f"⚠️ Student {student_id} not found in MySQL")
             return None
 
-        # Resolve user_type from Role_Type
         role = (row.get("role_type") or "").strip()
         if role == "Developer":
             row["user_type"] = "dev"
         elif role == "Non-Developer":
             row["user_type"] = "non_dev"
         else:
-            row["user_type"] = None   # caller uses fallback
+            row["user_type"] = None
             logger.warning(f"⚠️ Student {student_id} Role_Type is NULL — will use fallback")
 
         logger.info(
@@ -126,15 +127,10 @@ async def start_test(request_data: dict):
     """Start test - Frontend compatible with ALL fields from test_service"""
     try:
         logger.info(f"📥 RECEIVED FROM FRONTEND: {request_data}")
-        
-        student_id = request_data.get("student_id")
-        user_type  = request_data.get("user_type", "dev")   # fallback if MySQL unavailable
 
-        # ── Fetch full student profile from MySQL ────────────────────────
-        # Frontend only needs to send student_id.
-        # user_type is auto-detected from Role_Type.
-        # Full profile (name, course, batch, role) stored with results
-        # so reports show "Student X | Java | Batch 2025 | Score 80%".
+        student_id = request_data.get("student_id")
+        user_type  = request_data.get("user_type", "dev")
+
         student_profile = None
         if student_id:
             student_profile = _get_student_profile(int(student_id))
@@ -149,9 +145,7 @@ async def start_test(request_data: dict):
                     f"⚠️ Could not detect user_type for student {student_id}. "
                     f"Using frontend-supplied value: '{user_type}'"
                 )
-        # ─────────────────────────────────────────────────────────────────
 
-        # Normalize whatever we have
         original_user_type = user_type
         if user_type in ["developer", "dev", "Developer"]:
             user_type = "dev"
@@ -163,12 +157,12 @@ async def start_test(request_data: dict):
 
         logger.info(f"🎯 Starting test: original_type='{original_user_type}' → normalized='{user_type}', student_id={student_id}")
         test_response = await test_service.start_test(user_type, student_id, student_profile)
-        
+
         section_info      = _serialize_object(getattr(test_response, 'section_info', None))
         current_section   = _serialize_object(getattr(test_response, 'current_section', None))
         section_progress  = _serialize_object(getattr(test_response, 'section_progress', None))
         exam_structure    = _serialize_object(getattr(test_response, 'exam_structure', None))
-        
+
         response = {
             "testId":          test_response.test_id,
             "sessionId":       f"session_{test_response.test_id[:8]}",
@@ -201,10 +195,10 @@ async def start_test(request_data: dict):
             "section_progress": section_progress,
             "exam_structure":  exam_structure,
         }
-        
+
         logger.info(f"✅ Test started: {test_response.test_id}")
         return response
-        
+
     except Exception as e:
         logger.error(f"❌ Test start failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -225,13 +219,8 @@ async def submit_answer(request_data: dict):
 
         logger.info(f"📝 Submitting answer for test {test_id[:8]}, question {question_number}")
 
-        # ── FIX: Read coding test results stored by /api/code/submit ──────
-        # When student submits a coding question, /api/code/submit already ran
-        # all test cases and stored results in test_session["coding_test_results"].
-        # We pass them here so evaluate_by_section uses actual execution results,
-        # not AI code comparison (which incorrectly marks correct code as wrong).
-        test_session    = memory_manager.get_test(test_id)
-        coding_results  = None
+        test_session   = memory_manager.get_test(test_id)
+        coding_results = None
         if test_session:
             stored = test_session.get("coding_test_results", {})
             coding_results = stored.get(str(question_number))
@@ -242,7 +231,6 @@ async def submit_answer(request_data: dict):
                     f"({coding_results.get('total_passed',0)}/{coding_results.get('total_cases',0)} passed)"
                 )
             else:
-                # Check if this is a coding question — warn if no results stored
                 questions = (test_session or {}).get("questions", [])
                 q = next((q for q in questions if q.get("question_number") == question_number), {})
                 if q.get("question_type") == "coding":
@@ -250,10 +238,9 @@ async def submit_answer(request_data: dict):
                         f"⚠️ Coding Q{question_number} submitted but no test results stored. "
                         f"Student may not have run tests — will fall back to AI evaluation."
                     )
-        # ──────────────────────────────────────────────────────────────────
 
         response = await test_service.submit_answer(
-            test_id, question_number, answer, coding_results   # ← pass results
+            test_id, question_number, answer, coding_results
         )
 
         if response.test_completed:
@@ -262,9 +249,9 @@ async def submit_answer(request_data: dict):
             section_details = _serialize_object(getattr(response, 'section_details', {}))
             summary         = _serialize_object(getattr(response, 'summary', {}))
             recommendations = getattr(response, 'recommendations', [])
-            
+
             logger.info(f"✅ Test completed: {response.score}/{response.total_questions}")
-            
+
             return {
                 "testCompleted":        True,
                 "testId":               test_id,
@@ -296,7 +283,7 @@ async def submit_answer(request_data: dict):
             section_info     = _serialize_object(getattr(response, 'section_info', None))
             current_section  = _serialize_object(getattr(response, 'current_section', None))
             section_progress = _serialize_object(getattr(response, 'section_progress', None))
-            
+
             return {
                 "testCompleted": False,
                 "nextQuestion": {
@@ -330,7 +317,7 @@ async def submit_answer(request_data: dict):
                 "current_section":  current_section,
                 "section_progress": section_progress,
             }
-        
+
     except Exception as e:
         logger.error(f"❌ Answer submission failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -343,11 +330,11 @@ async def get_test_results(test_id: str):
         results = await test_service.get_test_results(test_id)
         if not results:
             raise HTTPException(status_code=404, detail="Test results not found")
-        
+
         section_scores  = results.get("section_scores", {})
         section_details = results.get("section_details", {})
         recommendations = results.get("recommendations", [])
-        
+
         return {
             "testId":          test_id,
             "test_id":         test_id,
@@ -362,9 +349,10 @@ async def get_test_results(test_id: str):
             "score_percentage": results.get("score_percentage", 0),
             "sectionScores":   section_scores,
             "section_scores":  section_scores,
-            "sectionDetails":  section_details,
-            "section_details": section_details,
-            "analytics":       results.get("analytics", ""),
+            "sectionDetails":      section_details,
+            "section_details":     section_details,
+            "conversation_pairs":  results.get("conversation_pairs", []),
+            "analytics":           results.get("analytics", ""),
             "evaluationReport": results.get("evaluation_report", ""),
             "evaluation_report": results.get("evaluation_report", ""),
             "recommendations": recommendations,
@@ -419,34 +407,82 @@ async def regenerate_pdf(test_id: str):
 
 @router.post("/api/test/force-complete")
 async def force_complete_test(request_data: dict):
-    """Force complete test (proctoring termination or manual submit)"""
+    """Force complete test — test_id passed in request body"""
     try:
         test_id            = request_data.get("test_id")
         termination_reason = request_data.get("termination_reason", "Proctoring violation")
         warnings           = request_data.get("warnings", 0)
-        
+
         if not test_id:
             raise ValueError("test_id is required")
-        
+
         logger.warning(f"🚨 Force completing test {test_id[:8]}: {termination_reason}")
         result = await test_service.force_complete_test(test_id, termination_reason, warnings)
-        
+
+        success = result.get("status") not in ("error", "not_found")
         return {
-            "success":        result.get("status") != "error",
-            "status":         result.get("status"),
-            "reason":         result.get("reason"),
-            "testId":         test_id,
-            "test_id":        test_id,
-            "score":          result.get("score", 0),
-            "totalQuestions": result.get("total_questions", 0),
-            "total_questions": result.get("total_questions", 0),
-            "sectionScores":  result.get("section_scores", {}),
-            "section_scores": result.get("section_scores", {}),
-            "sectionDetails": result.get("section_details", {}),
-            "section_details": result.get("section_details", {}),
+            "success":          success,
+            "status":           result.get("status"),
+            "reason":           result.get("reason"),
+            "testId":           test_id,
+            "test_id":          test_id,
+            "terminated":       success,
+            "redirectToResults": success,
+            "score":            result.get("score", 0),
+            "totalQuestions":   result.get("total_questions", 0),
+            "total_questions":  result.get("total_questions", 0),
+            "scorePercentage":  result.get("score_percentage", 0),
+            "score_percentage": result.get("score_percentage", 0),
+            "sectionScores":    result.get("section_scores", {}),
+            "section_scores":   result.get("section_scores", {}),
+            "sectionDetails":   result.get("section_details", {}),
+            "section_details":  result.get("section_details", {}),
+            "analytics":        result.get("analytics", ""),
         }
     except Exception as e:
         logger.error(f"❌ Force complete failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ================================================================
+# ✅ FIX 1: Path-parameter route uses Request object (not dict={})
+# ================================================================
+@router.post("/api/test/force-complete/{test_id}")
+async def force_complete_test_by_path(test_id: str, request: Request):
+    """Force complete test — test_id passed as URL path param (frontend style)"""
+    try:
+        try:
+            request_data = await request.json()
+        except Exception:
+            request_data = {}
+
+        reason   = request_data.get("reason", "Proctoring violation")
+        warnings = request_data.get("warnings", 0)
+
+        logger.warning(f"🚨 Force completing (path) test {test_id[:8]}: {reason}")
+        result = await test_service.force_complete_test(test_id, reason, warnings)
+
+        success = result.get("status") not in ("error", "not_found")
+        return {
+            "success":           success,
+            "status":            result.get("status"),
+            "testId":            test_id,
+            "test_id":           test_id,
+            "terminated":        success,
+            "redirectToResults": success,
+            "score":             result.get("score", 0),
+            "totalQuestions":    result.get("total_questions", 0),
+            "total_questions":   result.get("total_questions", 0),
+            "scorePercentage":   result.get("score_percentage", 0),
+            "score_percentage":  result.get("score_percentage", 0),
+            "sectionScores":     result.get("section_scores", {}),
+            "section_scores":    result.get("section_scores", {}),
+            "sectionDetails":    result.get("section_details", {}),
+            "section_details":   result.get("section_details", {}),
+            "analytics":         result.get("analytics", ""),
+        }
+    except Exception as e:
+        logger.error(f"❌ Force complete (path) failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -477,7 +513,6 @@ async def run_test_cases_route(request_data: dict):
         language        = request_data.get("language", "python")
         code            = request_data.get("code", "")
         test_cases      = request_data.get("test_cases", [])
-        # Optional — if frontend sends these, we store results immediately
         test_id         = request_data.get("test_id")
         question_number = request_data.get("question_number")
 
@@ -488,16 +523,12 @@ async def run_test_cases_route(request_data: dict):
 
         result = await ai_service.run_test_cases(language=language, code=code, test_cases=test_cases)
 
-        # ── Store results immediately so submit doesn't need to re-run ────
-        # This means even if student clicks "Run Tests" and then submits
-        # without clicking the final Submit button on code, results are saved.
         if test_id and question_number:
             test_session = memory_manager.get_test(test_id)
             if test_session:
                 if "coding_test_results" not in test_session:
                     test_session["coding_test_results"] = {}
                 test_session["coding_test_results"][str(question_number)] = result
-                # Also store the code and language for later use
                 questions = test_session.get("questions", [])
                 q = next((q for q in questions if q.get("question_number") == question_number), None)
                 if q:
@@ -508,7 +539,6 @@ async def run_test_cases_route(request_data: dict):
                     f"{result['overall_result']} "
                     f"({result['total_passed']}/{result['total_cases']} passed)"
                 )
-        # ─────────────────────────────────────────────────────────────────
 
         return result
     except HTTPException:
@@ -547,8 +577,8 @@ async def get_test_cases_route(test_id: str, question_number: int):
         hidden_count = sum(1 for tc in all_tc if tc.get("is_hidden", False))
 
         return {
-            "testId":          test_id,       "test_id":         test_id,
-            "questionNumber":  question_number, "question_number": question_number,
+            "testId":          test_id,         "test_id":         test_id,
+            "questionNumber":  question_number,  "question_number": question_number,
             "test_cases":      visible,
             "total_visible":   len(visible),
             "total_hidden":    hidden_count,
@@ -593,10 +623,8 @@ async def submit_code_route(request_data: dict):
             all_tc = ai_service.generate_test_cases(question.get("question", ""), num_cases=5)
             question["test_cases"] = all_tc
 
-        # Run ALL test cases (visible + hidden)
         test_results = await ai_service.run_test_cases(language=language, code=code, test_cases=all_tc)
 
-        # ── Store results in session — /api/test/submit reads this ────────
         if "coding_test_results" not in test_session:
             test_session["coding_test_results"] = {}
         test_session["coding_test_results"][str(question_number)] = test_results
@@ -605,19 +633,18 @@ async def submit_code_route(request_data: dict):
             f"{test_results['overall_result']} "
             f"({test_results['total_passed']}/{test_results['total_cases']} passed)"
         )
-        # ──────────────────────────────────────────────────────────────────
 
         question["user_code"]     = code
         question["user_language"] = language
         score = test_results["score_percentage"] / 100.0
 
         return {
-            "questionNumber":  question_number, "question_number":  question_number,
-            "isCorrect":       test_results["all_passed"], "is_correct": test_results["all_passed"],
-            "score":           score,
-            "overallResult":   test_results["overall_result"],
-            "overall_result":  test_results["overall_result"],
-            "testCaseResults": test_results,
+            "questionNumber":    question_number, "question_number":    question_number,
+            "isCorrect":         test_results["all_passed"], "is_correct": test_results["all_passed"],
+            "score":             score,
+            "overallResult":     test_results["overall_result"],
+            "overall_result":    test_results["overall_result"],
+            "testCaseResults":   test_results,
             "test_case_results": test_results,
         }
 
@@ -638,10 +665,10 @@ async def _handle_add_warning(request_data: dict):
         student_id   = request_data.get("student_id", 0)
         warning_type = request_data.get("warning_type")
         details      = request_data.get("details", {})
-        
+
         if not test_id:      raise ValueError("test_id is required")
         if not warning_type: raise ValueError("warning_type is required")
-        
+
         valid_types = [
             "face_not_detected", "face_multiple", "face_looking_away",
             "face_turned_left", "face_turned_right",
@@ -652,38 +679,56 @@ async def _handle_add_warning(request_data: dict):
         ]
         if warning_type not in valid_types:
             logger.warning(f"⚠️ Unknown warning type: {warning_type} — accepting anyway")
-        
+
         result = test_service.add_warning(test_id, student_id, warning_type, details)
-        
+
+        # ================================================================
+        # ✅ FIX 2: Wrap force_complete_test with timeout + full exception guard
+        # Previously this crashed silently → ERR_EMPTY_RESPONSE on /api/warnings
+        # ================================================================
+        terminated = False
         if result.get("should_terminate"):
-            logger.warning(f"🚨 Max warnings for {test_id[:8]} — terminating!")
-            await test_service.force_complete_test(
-                test_id,
-                f"Maximum warnings exceeded ({result['warning_count']} warnings)",
-                result['warning_count']
-            )
-        
+            logger.warning(f"🚨 Max warnings for {test_id[:8]} — force completing test!")
+            try:
+                await asyncio.wait_for(
+                    test_service.force_complete_test(
+                        test_id,
+                        f"Maximum warnings exceeded ({result['warning_count']} warnings)",
+                        result['warning_count']
+                    ),
+                    timeout=30.0
+                )
+                terminated = True
+                logger.info(f"✅ Force complete succeeded for {test_id[:8]}")
+            except asyncio.TimeoutError:
+                logger.error(f"⏱️ force_complete_test timed out for {test_id[:8]} — results may not be saved")
+            except Exception as e:
+                logger.error(f"❌ force_complete_test failed for {test_id[:8]}: {e}", exc_info=True)
+        # ================================================================
+
         return {
-            "success":          True,
-            "testId":           test_id,
-            "warningCount":     result.get("warning_count", 0),
-            "maxWarnings":      result.get("max_warnings", 3),
+            "success":           True,
+            "testId":            test_id,
+            "warningCount":      result.get("warning_count", 0),
+            "maxWarnings":       result.get("max_warnings", 3),
             "warningsRemaining": result.get("warnings_remaining", 0),
-            "shouldTerminate":  result.get("should_terminate", False),
-            "warningType":      warning_type,
-            "message":          result.get("message", "Warning recorded"),
+            "shouldTerminate":   result.get("should_terminate", False),
+            "terminated":        terminated,
+            "redirectToResults": terminated,
+            "warningType":       warning_type,
+            "message":           result.get("message", "Warning recorded"),
             # snake_case
-            "test_id":          test_id,
-            "warning_count":    result.get("warning_count", 0),
-            "max_warnings":     result.get("max_warnings", 3),
+            "test_id":           test_id,
+            "warning_count":     result.get("warning_count", 0),
+            "max_warnings":      result.get("max_warnings", 3),
             "warnings_remaining": result.get("warnings_remaining", 0),
-            "should_terminate": result.get("should_terminate", False),
-            "warning_type":     warning_type,
+            "should_terminate":  result.get("should_terminate", False),
+            "warning_type":      warning_type,
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"❌ Failed to add warning: {e}")
+        logger.error(f"❌ Failed to add warning: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -701,16 +746,16 @@ async def get_warnings(test_id: str):
     try:
         result = test_service.get_warning_status(test_id)
         return {
-            "testId":           test_id,
-            "warningCount":     result.get("warning_count", 0),
-            "maxWarnings":      result.get("max_warnings", 3),
+            "testId":            test_id,
+            "warningCount":      result.get("warning_count", 0),
+            "maxWarnings":       result.get("max_warnings", 3),
             "warningsRemaining": result.get("warnings_remaining", 0),
-            "isTerminated":     result.get("is_terminated", False),
+            "isTerminated":      result.get("is_terminated", False),
             "terminationReason": result.get("termination_reason"),
-            "warnings":         result.get("warnings", []),
-            "test_id":          test_id,
-            "warning_count":    result.get("warning_count", 0),
-            "is_terminated":    result.get("is_terminated", False),
+            "warnings":          result.get("warnings", []),
+            "test_id":           test_id,
+            "warning_count":     result.get("warning_count", 0),
+            "is_terminated":     result.get("is_terminated", False),
             "termination_reason": result.get("termination_reason"),
         }
     except Exception as e:
@@ -723,12 +768,12 @@ async def get_warning_status(test_id: str):
     try:
         result = test_service.get_warning_status(test_id)
         return {
-            "testId":           test_id,
-            "canContinue":      not result.get("is_terminated", False),
-            "isTerminated":     result.get("is_terminated", False),
+            "testId":            test_id,
+            "canContinue":       not result.get("is_terminated", False),
+            "isTerminated":      result.get("is_terminated", False),
             "terminationReason": result.get("termination_reason"),
-            "warningCount":     result.get("warning_count", 0),
-            "maxWarnings":      3,
+            "warningCount":      result.get("warning_count", 0),
+            "maxWarnings":       3,
             "warningsRemaining": result.get("warnings_remaining", 0),
         }
     except Exception as e:
@@ -804,11 +849,11 @@ async def get_student_dashboard(student_id: str):
         if not history:
             return {"studentId": student_id, "totalTests": 0, "recentTests": [],
                     "performanceTrend": [], "sectionAnalysis": {}, "averageScore": 0}
-        
+
         total_score     = sum(t.get("score", 0) for t in history)
         total_questions = sum(t.get("total_questions", 0) for t in history)
         avg_percentage  = round((total_score / total_questions) * 100, 1) if total_questions > 0 else 0
-        
+
         section_totals = {}
         for test in history:
             for section, data in test.get("section_scores", {}).items():
@@ -816,22 +861,22 @@ async def get_student_dashboard(student_id: str):
                     section_totals[section] = {"correct": 0, "total": 0}
                 section_totals[section]["correct"] += data.get("correct", 0)
                 section_totals[section]["total"]   += data.get("total", 0)
-        
+
         section_analysis = {
             s: {"correct": d["correct"], "total": d["total"],
                 "percentage": round((d["correct"]/d["total"])*100,1) if d["total"] > 0 else 0}
             for s, d in section_totals.items()
         }
-        
+
         trend = [{"testId": t.get("test_id"), "percentage": t.get("score_percentage", 0),
                   "date": t.get("completed_at") or t.get("timestamp")} for t in history[-10:]]
-        
+
         return {
-            "studentId": student_id,       "student_id": student_id,
-            "totalTests": len(history),    "total_tests": len(history),
-            "averageScore": avg_percentage, "average_score": avg_percentage,
-            "recentTests": history[-5:],   "recent_tests": history[-5:],
-            "performanceTrend": trend,     "performance_trend": trend,
+            "studentId": student_id,        "student_id": student_id,
+            "totalTests": len(history),     "total_tests": len(history),
+            "averageScore": avg_percentage,  "average_score": avg_percentage,
+            "recentTests": history[-5:],    "recent_tests": history[-5:],
+            "performanceTrend": trend,      "performance_trend": trend,
             "sectionAnalysis": section_analysis, "section_analysis": section_analysis,
         }
     except Exception as e:
@@ -850,36 +895,36 @@ async def get_specific_question(test_id: str, question_number: int):
         test_data = memory_manager.get_test(test_id)
         if not test_data:
             raise HTTPException(status_code=404, detail="Test not found")
-        
+
         user_type       = test_data.get("user_type", "dev")
         total_questions = test_data.get("total_questions", 25)
-        
+
         if question_number < 1 or question_number > total_questions:
             raise HTTPException(status_code=400, detail=f"Question number must be between 1 and {total_questions}")
-        
+
         questions = test_data.get("questions", [])
         if question_number > len(questions):
             raise HTTPException(status_code=404, detail="Question not found")
-        
+
         question      = questions[question_number - 1]
         question_type = question.get("question_type", "mcq")
         is_mcq        = question.get("is_mcq", True)
         options       = question.get("options")
         time_limit    = test_service._get_question_time_limit(question_type, user_type)
-        
+
         question_html = question.get("question", "")
         if question_html:
             question_html = markdown.markdown(question_html, extensions=['codehilite', 'fenced_code'])
-        
+
         section_info     = test_service._get_section_info(questions, user_type)
         current_section  = test_service._get_current_section(question_number, section_info)
         section_progress = test_service._get_section_progress(question_number, section_info)
-        
+
         answers      = memory_manager.get_test_answers(test_id)
         saved_answer = ""
         if answers and question_number <= len(answers):
             saved_answer = answers[question_number - 1].get("answer", "")
-        
+
         return {
             "success":         True,
             "questionNumber":  question_number,  "question_number": question_number,
@@ -908,31 +953,31 @@ async def get_test_status(test_id: str):
         test_data = memory_manager.get_test(test_id)
         if not test_data:
             raise HTTPException(status_code=404, detail="Test not found")
-        
-        user_type    = test_data.get("user_type", "dev")
-        questions    = test_data.get("questions", [])
-        current_q    = test_data.get("current_question", 1)
-        section_info = test_service._get_section_info(questions, user_type)
-        answers      = memory_manager.get_test_answers(test_id)
+
+        user_type      = test_data.get("user_type", "dev")
+        questions      = test_data.get("questions", [])
+        current_q      = test_data.get("current_question", 1)
+        section_info   = test_service._get_section_info(questions, user_type)
+        answers        = memory_manager.get_test_answers(test_id)
         warning_status = test_service.get_warning_status(test_id)
-        
+
         return {
-            "testId":         test_id,       "test_id":          test_id,
-            "userType":       user_type,     "user_type":        user_type,
-            "totalQuestions": test_data.get("total_questions", 25),
+            "testId":          test_id,       "test_id":          test_id,
+            "userType":        user_type,     "user_type":        user_type,
+            "totalQuestions":  test_data.get("total_questions", 25),
             "total_questions": test_data.get("total_questions", 25),
-            "currentQuestion": current_q,   "current_question": current_q,
-            "answeredCount":  len(answers) if answers else 0,
-            "answered_count": len(answers) if answers else 0,
-            "sectionInfo":    section_info,  "section_info": section_info,
-            "currentSection": test_service._get_current_section(current_q, section_info),
+            "currentQuestion": current_q,    "current_question": current_q,
+            "answeredCount":   len(answers) if answers else 0,
+            "answered_count":  len(answers) if answers else 0,
+            "sectionInfo":     section_info,  "section_info": section_info,
+            "currentSection":  test_service._get_current_section(current_q, section_info),
             "sectionProgress": test_service._get_section_progress(current_q, section_info),
-            "isComplete":     current_q > test_data.get("total_questions", 25),
-            "is_complete":    current_q > test_data.get("total_questions", 25),
-            "warningCount":   warning_status.get("warning_count", 0),
-            "warning_count":  warning_status.get("warning_count", 0),
-            "isTerminated":   warning_status.get("is_terminated", False),
-            "is_terminated":  warning_status.get("is_terminated", False),
+            "isComplete":      current_q > test_data.get("total_questions", 25),
+            "is_complete":     current_q > test_data.get("total_questions", 25),
+            "warningCount":    warning_status.get("warning_count", 0),
+            "warning_count":   warning_status.get("warning_count", 0),
+            "isTerminated":    warning_status.get("is_terminated", False),
+            "is_terminated":   warning_status.get("is_terminated", False),
         }
     except HTTPException:
         raise
@@ -1007,13 +1052,13 @@ async def get_exam_info():
         }
     }
 
+
 # ================================================================
 # NOTIFICATION ROUTES
 # ================================================================
 
 @router.get("/api/student/notifications/unread-count/{student_id}/{org_id}")
 async def get_student_unread_count(student_id: int, org_id: int):
-    """Return unread notification count for student"""
     try:
         return {"Unread_Count": 0}
     except Exception as e:
@@ -1023,7 +1068,6 @@ async def get_student_unread_count(student_id: int, org_id: int):
 
 @router.get("/api/student/notifications/{student_id}/{org_id}")
 async def get_student_notifications(student_id: int, org_id: int, page: int = 1, page_size: int = 15):
-    """Return notifications list for student"""
     try:
         return {"Notifications": [], "Total": 0}
     except Exception as e:
@@ -1033,7 +1077,6 @@ async def get_student_notifications(student_id: int, org_id: int, page: int = 1,
 
 @router.put("/api/student/notifications/read/{notif_id}")
 async def mark_student_notification_read(notif_id: str, request_data: dict):
-    """Mark a single notification as read"""
     try:
         return {"success": True}
     except Exception as e:
@@ -1043,7 +1086,6 @@ async def mark_student_notification_read(notif_id: str, request_data: dict):
 
 @router.put("/api/student/notifications/read-all/{student_id}/{org_id}")
 async def mark_all_student_notifications_read(student_id: int, org_id: int):
-    """Mark all notifications as read"""
     try:
         return {"success": True}
     except Exception as e:
@@ -1053,7 +1095,6 @@ async def mark_all_student_notifications_read(student_id: int, org_id: int):
 
 @router.delete("/api/student/notifications/delete/{notif_id}")
 async def delete_student_notification(notif_id: str, student_id: int, org_id: int):
-    """Delete a notification"""
     try:
         return {"success": True}
     except Exception as e:

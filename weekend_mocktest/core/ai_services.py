@@ -14,6 +14,8 @@
 #  11. generate_correct_code: question language takes priority over code
 #  12. Score shown in feedback: 📊 Score: X / 1
 #  13. Effort scores: 0.0 / 0.25 / 0.3 / 0.5 / 1.0
+#  14. PARALLELIZED: evaluate_by_section, explanations, coding evals
+#  15. SANDBOX: memory limit (256MB), CPU limit, file size limit per execution
 # ═══════════════════════════════════════════════════════════════════
 
 import json
@@ -26,7 +28,9 @@ import asyncio
 import subprocess
 import tempfile
 import shutil
+import resource
 from typing import Dict, List, Optional, Any
+from concurrent.futures import ThreadPoolExecutor
 
 from groq import Groq
 
@@ -80,16 +84,17 @@ class AIService:
 
     # ── Template/placeholder signals ────────────────────────────────
     TEMPLATE_SIGNALS = [
+        # Python
         '# write your solution here',
         '# your code here',
         '# write code here',
         '# your solution here',
-        '# add your code here',
-        '# type your code here',
+        # Go
         '// write your solution here',
+        '// write your go solution here',
+        # Java/JS/C++
         '// your code here',
         '// write code here',
-        '// your solution here',
         '/* write your solution here */',
     ]
 
@@ -102,6 +107,8 @@ class AIService:
     def __init__(self):
         self.client = Groq(api_key=config.GROQ_API_KEY)
         self.model = config.GROQ_MODEL
+        # Thread pool for running sync Groq calls in parallel
+        self._executor = ThreadPoolExecutor(max_workers=10)
         self._check_local_runtimes()
         logger.info(f"AIService initialized | Groq: {self.model} | Executor: LOCAL subprocess")
 
@@ -127,6 +134,15 @@ class AIService:
                 logger.warning(f"  ❌ {name}: NOT FOUND")
             except Exception as e:
                 logger.warning(f"  ⚠️ {name}: check failed — {e}")
+
+    # ══════════════════════════════════════════════════════════
+    #  PARALLEL HELPER — run sync Groq call in thread pool
+    # ══════════════════════════════════════════════════════════
+
+    async def _run_in_thread(self, fn, *args, **kwargs):
+        """Run a synchronous function in the thread pool so it doesn't block the event loop."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, lambda: fn(*args, **kwargs))
 
     # ══════════════════════════════════════════════════════════
     #  CODE EXECUTION (LOCAL SUBPROCESS)
@@ -183,7 +199,6 @@ class AIService:
             elif language == "java":
                 compile_cmd = ["javac", src_file]
                 run_cmd = ["java", "-cp", tmp_dir, class_name]
-            
 
             if compile_cmd:
                 try:
@@ -210,11 +225,23 @@ class AIService:
                         "is_timeout": True, "overall_result": "Compilation Error",
                     }
 
+            # ── SANDBOX: apply resource limits before running student code ──
+            def _set_limits():
+                # Max RAM: 256MB — prevents memory bomb attacks
+                resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+                # Max CPU time: matches wall-clock timeout — kills infinite loops at OS level
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout))
+                # Max file size: 10MB — prevents disk fill attacks
+                resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
+                # Max open files: 50 — prevents file descriptor exhaustion
+                resource.setrlimit(resource.RLIMIT_NOFILE, (50, 50))
+
             try:
                 run_result = await asyncio.to_thread(
                     subprocess.run, run_cmd,
                     input=stdin.encode('utf-8') if stdin else b'',
-                    capture_output=True, timeout=timeout, cwd=tmp_dir
+                    capture_output=True, timeout=timeout, cwd=tmp_dir,
+                    preexec_fn=_set_limits
                 )
                 stdout = run_result.stdout.decode('utf-8', errors='replace')
                 stderr = run_result.stderr.decode('utf-8', errors='replace')
@@ -773,19 +800,11 @@ class AIService:
     # ══════════════════════════════════════════════════════════
 
     def _is_skipped(self, code: str) -> bool:
-        """
-        Returns True if student clicked the Skip button.
-        Score = 0.0, display = 'Skipped', no feedback.
-        """
         if not code:
             return False
         return code.strip().lower() in self.SKIP_SENTINELS
 
     def _is_template_code(self, code: str) -> bool:
-        """
-        Returns True if student submitted only default placeholder/template.
-        Score = 0.0, display = 'Not Attempted', no feedback.
-        """
         if not code or not code.strip():
             return True
 
@@ -804,10 +823,16 @@ class AIService:
             real_lines.append(stripped.lower())
 
         boilerplate = {
+            # Python
             'pass', 'solution()', 'def solution():',
             'if __name__ == "__main__":', "if __name__ == '__main__':",
+            # Java
             'public static void main(string[] args) {',
-            'public class solution {', 'public class main {', '}', '{',
+            'public class solution {', 'public class main {',
+            # Go
+            'package main', 'func main() {', 'fmt.println()',
+            # Generic
+            '}', '{',
         }
         meaningful = [l for l in real_lines if l not in boilerplate]
         if not meaningful:
@@ -820,15 +845,7 @@ class AIService:
     # ══════════════════════════════════════════════════════════
 
     def _evaluate_code_effort(self, question: str, user_code: str) -> float:
-        """
-        When 0 test cases pass and code is NOT template/skipped,
-        ask AI to judge how related the code is to the question.
-
-        Returns:
-          0.3  → Code clearly attempts to solve this, logic is close but has bugs
-          0.25 → Code is related but approach is mostly wrong
-          0.0  → Totally unrelated or just print statements
-        """
+        """Sync version — used internally, called via thread pool when needed."""
         if not user_code or not user_code.strip():
             return 0.0
 
@@ -869,8 +886,203 @@ Nothing else. No explanation. No extra words."""
             logger.error(f"Effort score evaluation failed: {e}")
             return 0.0
 
-    def evaluate_code_with_test_results(self, question: str, user_code: str,
-                                        test_results: Dict) -> Dict:
+    def _generate_correct_code_sync(self, question: str, user_code: str = "") -> Dict[str, str]:
+        """Sync version of generate_correct_code — used by thread pool."""
+        try:
+            lang = self._detect_language_from_question(question)
+            if not lang:
+                lang = self._detect_language_from_code(user_code) if user_code else None
+            if not lang:
+                lang = "python"
+
+            lang_instructions = {
+                "python":     "Use input() for stdin, print() for stdout.",
+                "java":       "Use Scanner for stdin with nextInt()/nextDouble()/next()/nextLine(). NEVER use Integer.parseInt(scanner.nextLine()). Use System.out.println for stdout. Include a Main class. Call scanner.close() at the end.",
+                "javascript": "Use readline or process.stdin for input, console.log for output.",
+                "cpp":        "Use cin for stdin, cout for stdout. Include necessary headers.",
+                "c":          "Use scanf for stdin, printf for stdout. Include necessary headers.",
+                "typescript": "Use readline for input, console.log for output.",
+                "go":         "Use fmt.Scan or bufio.NewReader for stdin, fmt.Println for stdout. Always include package main and import necessary packages.",
+            }
+            instructions = lang_instructions.get(lang, "Read from stdin, write to stdout.")
+            prompt = f"""Write correct {lang} code for:
+{question}
+Requirements: {instructions} Simple and clean.
+Return ONLY code inside a ``` code block."""
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": f"Return only {lang} code in a ``` code block."},
+                          {"role": "user",   "content": prompt}],
+                temperature=0.3, max_tokens=800)
+            content    = response.choices[0].message.content.strip()
+            code_match = re.search(r'```(?:python|java|javascript|cpp|c|typescript|go)?\s*(.*?)\s*```', content, re.DOTALL)
+            code       = code_match.group(1).strip() if code_match else content
+            return {"code": code, "explanation": ""}
+        except Exception as e:
+            logger.error(f"Code generation failed: {e}")
+            return {"code": "# Unable to generate", "explanation": ""}
+
+    def _generate_explanation_sync(self, question: str, user_answer: str, correct_answer: str,
+                                   question_type: str, options: List[str] = None) -> str:
+        """Sync version of generate_explanation — used by thread pool."""
+        try:
+            options_text = ""
+            if options:
+                options_text = "\nOptions:\n" + "\n".join(
+                    [f"{chr(65+i)}) {opt}" for i, opt in enumerate(options)])
+            prompt = f"""Question: {question}{options_text}
+User's Answer: {user_answer}
+Correct Answer: {correct_answer}
+
+Give a brief explanation (2-3 sentences) of why the correct answer is right.
+If the user got it wrong, briefly explain their likely mistake.
+IMPORTANT: If this is a math question, show the key calculation step.
+Do NOT contradict yourself — if your calculation gives a different number than the stated correct answer, go with your calculation."""
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": "Brief, accurate educational explanations. For math questions, always verify the calculation."},
+                          {"role": "user",   "content": prompt}],
+                temperature=0.3, max_tokens=200)
+            return response.choices[0].message.content.strip()
+        except:
+            return f"The correct answer is: {correct_answer}"
+
+    def _generate_coding_explanation_sync(self, question: str, user_code: str,
+                                          correct_code: str, is_correct: bool,
+                                          test_results: Dict = None,
+                                          partial_score: float = None,
+                                          effort_score: float = None,
+                                          is_skipped: bool = False,
+                                          is_template: bool = False) -> str:
+        """Sync version of generate_coding_explanation — used by thread pool."""
+        try:
+            total_passed = test_results.get("total_passed", 0) if test_results else 0
+            total_cases  = test_results.get("total_cases", 0)  if test_results else 0
+
+            if is_skipped:
+                return "Skipped"
+            if is_template:
+                return "Not Attempted"
+
+            tc_context = ""
+            stderr_info = ""
+            if test_results:
+                p = test_results.get("total_passed", 0)
+                t = test_results.get("total_cases", 0)
+                tc_context = f"\nTest Results: {p}/{t} passed."
+                failed = [r for r in test_results.get("results", []) if not r["passed"] and not r.get("is_hidden")]
+                if failed:
+                    f = failed[0]
+                    tc_context += f"\nFailing test case:"
+                    tc_context += f"\n  Input:    '{f.get('input', '')}'"
+                    tc_context += f"\n  Expected: '{f.get('expected_output', '')}'"
+                    tc_context += f"\n  Got:      '{f.get('actual_output', '')}'"
+                    if f.get('stderr'):
+                        stderr_info = f.get('stderr', '')[:300]
+                        tc_context += f"\n  Error:    {stderr_info}"
+
+            score_label = f"\n\n📊 Score: {partial_score} / 1"
+
+            if is_correct:
+                prompt = f"""Student's code passed all {total_cases} test cases perfectly.
+Give 1-2 sentences of enthusiastic positive feedback. Congratulate them genuinely!
+Do NOT add any score numbers in your response."""
+
+            elif total_passed > 0:
+                prompt = f"""Student passed {total_passed} out of {total_cases} test cases.
+{tc_context}
+
+Question: {question[:300]}
+Student Code:
+{user_code[:600] if user_code else '(No answer submitted)'}
+
+Write 2-3 sentences of feedback following ALL these rules:
+1. Start positively — "Great effort!" or "You're almost there!"
+2. Say they passed {total_passed}/{total_cases} test cases — acknowledge the progress
+3. Look at the failing test case above — identify the EXACT issue
+4. Give one concrete hint to fix it
+5. End encouragingly — "You are very close to full marks!"
+6. NEVER say "your code is wrong" — always be constructive
+7. Do NOT add any score numbers in your response"""
+
+            elif effort_score is not None and effort_score >= 0.3:
+                prompt = f"""Student's code failed all test cases but their logic is close to correct.
+{tc_context}
+
+Question: {question[:300]}
+Student Code:
+{user_code[:600] if user_code else '(No answer submitted)'}
+
+Write 2-3 sentences of feedback following ALL these rules:
+1. Start with "You're on the right track!"
+2. Acknowledge their approach — what did they get right?
+3. Look at the failing test case — identify the EXACT bug
+4. Give a targeted hint to fix that specific bug
+5. End with "Don't give up, you are closer than you think!"
+6. Be specific — mention actual variable names or logic from their code if relevant
+7. Do NOT add any score numbers in your response"""
+
+            elif effort_score is not None and effort_score > 0:
+                prompt = f"""Student's code failed all test cases. Their approach needs rework but they made a genuine attempt.
+{tc_context}
+
+Question: {question[:300]}
+Student Code:
+{user_code[:600] if user_code else '(No answer submitted)'}
+
+Write 2-3 sentences of feedback following ALL these rules:
+1. Start with "Good attempt!"
+2. Point out what they tried to do — acknowledge the effort
+3. Explain what is fundamentally wrong with their approach based on the test case failure
+4. Give a helpful hint about the correct approach without giving away the full solution
+5. End with "Keep trying, you will get there!"
+6. Do NOT add any score numbers in your response"""
+
+            else:
+                prompt = f"""Student submitted code that did not pass any test cases.
+{tc_context}
+
+Question: {question[:300]}
+Student Code: {user_code[:300] if user_code else '(No code submitted)'}
+
+Write 2 sentences of gentle encouraging feedback:
+1. Be kind — never harsh or discouraging
+2. Give one helpful starting hint based on what the question is asking
+3. End with "Keep practicing, you will get there!"
+4. Do NOT add any score numbers in your response"""
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": (
+                        "You are a warm, encouraging programming tutor. "
+                        "Give specific, accurate feedback based on the actual test case results. "
+                        "Always identify the exact error from the test case output shown. "
+                        "Be encouraging but precise — tell the student exactly what went wrong and how to fix it. "
+                        "Never mention score numbers in your response."
+                    )},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.4,
+                max_tokens=150
+            )
+            feedback = response.choices[0].message.content.strip()
+            return f"{feedback}{score_label}"
+
+        except:
+            score_label = f"\n\n📊 Score: {partial_score} / 1" if partial_score is not None else ""
+            if is_skipped:   return "Skipped"
+            if is_template:  return "Not Attempted"
+            if is_correct:   return f"Excellent! All test cases passed. Great work!{score_label}"
+            elif total_passed > 0:
+                return f"You're almost there! {total_passed}/{total_cases} test cases passed. A small fix is all you need — keep going!{score_label}"
+            elif effort_score and effort_score > 0:
+                return f"Good effort! Your code is on the right track. Review the logic carefully and try again — you are closer than you think!{score_label}"
+            else:
+                return f"Give it another try! Read the question carefully and think about the input and output format. You can do it!{score_label}"
+
+    async def evaluate_code_with_test_results(self, question: str, user_code: str,
+                                              test_results: Dict) -> Dict:
         total_passed  = test_results.get("total_passed", 0)
         total_cases   = test_results.get("total_cases", 1)
         score_pct     = test_results.get("score_percentage", 0.0)
@@ -879,33 +1091,6 @@ Nothing else. No explanation. No extra words."""
         effort_score  = None
         is_skipped    = False
         is_template   = False
-
-        # ══════════════════════════════════════════════════════
-        #  SCORING RULES
-        # ══════════════════════════════════════════════════════
-        #
-        #  CASE 1 — Skip button clicked
-        #           score = 0.0 | display = "Skipped" | NO feedback
-        #
-        #  CASE 2 — Template/placeholder code only
-        #           score = 0.0 | display = "Not Attempted" | NO feedback
-        #
-        #  CASE 3 — All test cases passed (2/2)
-        #           score = 1.0 | display = "Accepted" | positive feedback
-        #
-        #  CASE 4 — Some test cases passed (1/2)
-        #           score = 0.5 | display = "Partial" | encouraging feedback
-        #
-        #  CASE 5 — 0 passed, real code, logic close
-        #           score = 0.3 | encouraging + specific feedback
-        #
-        #  CASE 6 — 0 passed, real code, wrong approach
-        #           score = 0.25 | encouraging + specific feedback
-        #
-        #  CASE 7 — 0 passed, unrelated code
-        #           score = 0.0 | gentle feedback
-        #
-        # ══════════════════════════════════════════════════════
 
         if self._is_skipped(user_code):
             is_skipped     = True
@@ -927,14 +1112,14 @@ Nothing else. No explanation. No extra words."""
             display_result = "Accepted"
 
         elif total_passed > 0:
-            partial_score  = round(total_passed / total_cases, 2)  # 1/2 = 0.5
+            partial_score  = round(total_passed / total_cases, 2)
             is_correct     = False
             display_result = f"Partial — {total_passed}/{total_cases} test cases passed"
 
         else:
-            # 0 test cases passed — AI judges effort
-            effort_score   = self._evaluate_code_effort(question, user_code)
-            partial_score  = effort_score  # 0.0, 0.25, or 0.3
+            # 0 passed — run effort scoring in thread pool (non-blocking)
+            effort_score   = await self._run_in_thread(self._evaluate_code_effort, question, user_code)
+            partial_score  = effort_score
             is_correct     = False
             display_result = (
                 f"Wrong Answer — good effort! ({total_passed}/{total_cases} passed)"
@@ -948,15 +1133,18 @@ Nothing else. No explanation. No extra words."""
             f"skipped={is_skipped} template={is_template}"
         )
 
-        correct_solution = self.generate_correct_code(question, user_code)
-        explanation      = self.generate_coding_explanation(
-            question, user_code, correct_solution["code"],
-            is_correct, test_results,
-            partial_score=partial_score,
-            effort_score=effort_score,
-            is_skipped=is_skipped,
-            is_template=is_template,
+        # ── Run correct code generation + explanation IN PARALLEL ──
+        correct_solution, explanation = await asyncio.gather(
+            self._run_in_thread(self._generate_correct_code_sync, question, user_code),
+            self._run_in_thread(
+                self._generate_coding_explanation_sync,
+                question, user_code, "",
+                is_correct, test_results,
+                partial_score, effort_score,
+                is_skipped, is_template,
+            )
         )
+
         return {
             "is_correct":        is_correct,
             "partial_score":     partial_score,
@@ -968,7 +1156,7 @@ Nothing else. No explanation. No extra words."""
 
     def evaluate_code_answer(self, question: str, user_code: str) -> Dict:
         try:
-            correct_solution = self.generate_correct_code(question, user_code)
+            correct_solution = self._generate_correct_code_sync(question, user_code)
             correct_code     = correct_solution["code"]
             prompt = f"""Compare the student's code with the correct solution.
 Question: {question}
@@ -986,7 +1174,7 @@ ISSUES: List issues or "None" """
                 temperature=0.2, max_tokens=300)
             content    = response.choices[0].message.content.strip()
             is_correct = "IS_CORRECT: YES" in content.upper()
-            explanation = self.generate_coding_explanation(question, user_code, correct_code, is_correct)
+            explanation = self._generate_coding_explanation_sync(question, user_code, correct_code, is_correct)
             return {
                 "is_correct": is_correct, "correct_code": correct_code,
                 "explanation": explanation, "test_case_results": None,
@@ -994,7 +1182,7 @@ ISSUES: List issues or "None" """
             }
         except Exception as e:
             logger.error(f"Code evaluation failed: {e}")
-            correct_solution = self.generate_correct_code(question)
+            correct_solution = self._generate_correct_code_sync(question)
             return {
                 "is_correct": False, "correct_code": correct_solution["code"],
                 "explanation": "Evaluation failed.", "test_case_results": None,
@@ -1002,7 +1190,7 @@ ISSUES: List issues or "None" """
             }
 
     # ══════════════════════════════════════════════════════════
-    #  EXPLANATION GENERATION
+    #  EXPLANATION GENERATION (kept for external compatibility)
     # ══════════════════════════════════════════════════════════
 
     def _detect_language_from_question(self, question: str) -> str:
@@ -1040,64 +1228,13 @@ ISSUES: List issues or "None" """
         return None
 
     def generate_correct_code(self, question: str, user_code: str = "") -> Dict[str, str]:
-        try:
-            # Always detect language from QUESTION first — most reliable
-            lang = self._detect_language_from_question(question)
-            if not lang:
-                lang = self._detect_language_from_code(user_code) if user_code else None
-            if not lang:
-                lang = "python"
-
-            lang_instructions = {
-                "python":     "Use input() for stdin, print() for stdout.",
-                "java":       "Use Scanner for stdin with nextInt()/nextDouble()/next()/nextLine(). NEVER use Integer.parseInt(scanner.nextLine()). Use System.out.println for stdout. Include a Main class. Call scanner.close() at the end.",
-                "javascript": "Use readline or process.stdin for input, console.log for output.",
-                "cpp":        "Use cin for stdin, cout for stdout. Include necessary headers.",
-                "c":          "Use scanf for stdin, printf for stdout. Include necessary headers.",
-                "typescript": "Use readline for input, console.log for output.",
-                "go":         "Use fmt.Scan or bufio.NewReader for stdin, fmt.Println for stdout. Always include package main and import necessary packages.",
-            }
-            instructions = lang_instructions.get(lang, "Read from stdin, write to stdout.")
-            prompt = f"""Write correct {lang} code for:
-{question}
-Requirements: {instructions} Simple and clean.
-Return ONLY code inside a ``` code block."""
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "system", "content": f"Return only {lang} code in a ``` code block."},
-                          {"role": "user",   "content": prompt}],
-                temperature=0.3, max_tokens=800)
-            content    = response.choices[0].message.content.strip()
-            code_match = re.search(r'```(?:python|java|javascript|cpp|c|typescript|go)?\s*(.*?)\s*```', content, re.DOTALL)
-            code       = code_match.group(1).strip() if code_match else content
-            return {"code": code, "explanation": ""}
-        except Exception as e:
-            logger.error(f"Code generation failed: {e}")
-            return {"code": "# Unable to generate", "explanation": ""}
+        """Kept for backward compatibility — calls sync version."""
+        return self._generate_correct_code_sync(question, user_code)
 
     def generate_explanation(self, question: str, user_answer: str, correct_answer: str,
                              question_type: str, options: List[str] = None) -> str:
-        try:
-            options_text = ""
-            if options:
-                options_text = "\nOptions:\n" + "\n".join(
-                    [f"{chr(65+i)}) {opt}" for i, opt in enumerate(options)])
-            prompt = f"""Question: {question}{options_text}
-User's Answer: {user_answer}
-Correct Answer: {correct_answer}
-
-Give a brief explanation (2-3 sentences) of why the correct answer is right.
-If the user got it wrong, briefly explain their likely mistake.
-IMPORTANT: If this is a math question, show the key calculation step.
-Do NOT contradict yourself — if your calculation gives a different number than the stated correct answer, go with your calculation."""
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "system", "content": "Brief, accurate educational explanations. For math questions, always verify the calculation."},
-                          {"role": "user",   "content": prompt}],
-                temperature=0.3, max_tokens=200)
-            return response.choices[0].message.content.strip()
-        except:
-            return f"The correct answer is: {correct_answer}"
+        """Kept for backward compatibility — calls sync version."""
+        return self._generate_explanation_sync(question, user_answer, correct_answer, question_type, options)
 
     def generate_coding_explanation(self, question: str, user_code: str,
                                     correct_code: str, is_correct: bool,
@@ -1106,154 +1243,14 @@ Do NOT contradict yourself — if your calculation gives a different number than
                                     effort_score: float = None,
                                     is_skipped: bool = False,
                                     is_template: bool = False) -> str:
-        try:
-            total_passed = test_results.get("total_passed", 0) if test_results else 0
-            total_cases  = test_results.get("total_cases", 0)  if test_results else 0
-
-            # ── CASE 1: Skip button clicked ───────────────────────────
-            if is_skipped:
-                return "Skipped"
-
-            # ── CASE 2: Template/placeholder code ─────────────────────
-            if is_template:
-                return "Not Attempted"
-
-            # ── Build test case context ───────────────────────────────
-            tc_context = ""
-            stderr_info = ""
-            if test_results:
-                p = test_results.get("total_passed", 0)
-                t = test_results.get("total_cases", 0)
-                tc_context = f"\nTest Results: {p}/{t} passed."
-                failed = [r for r in test_results.get("results", []) if not r["passed"] and not r.get("is_hidden")]
-                if failed:
-                    f = failed[0]
-                    tc_context += f"\nFailing test case:"
-                    tc_context += f"\n  Input:    '{f.get('input', '')}'"
-                    tc_context += f"\n  Expected: '{f.get('expected_output', '')}'"
-                    tc_context += f"\n  Got:      '{f.get('actual_output', '')}'"
-                    if f.get('stderr'):
-                        stderr_info = f.get('stderr', '')[:300]
-                        tc_context += f"\n  Error:    {stderr_info}"
-
-            # ── Score label for feedback ───────────────────────────────
-            score_label = f"\n\n📊 Score: {partial_score} / 1"
-
-            if is_correct:
-                # ── CASE 3: All passed ─────────────────────────────────
-                prompt = f"""Student's code passed all {total_cases} test cases perfectly.
-Give 1-2 sentences of enthusiastic positive feedback. Congratulate them genuinely!
-Do NOT add any score numbers in your response."""
-
-            elif total_passed > 0:
-                # ── CASE 4: 1/2 passed ────────────────────────────────
-                prompt = f"""Student passed {total_passed} out of {total_cases} test cases.
-{tc_context}
-
-Question: {question[:300]}
-Student Code:
-{user_code[:600] if user_code else '(No answer submitted)'}
-
-Write 2-3 sentences of feedback following ALL these rules:
-1. Start positively — "Great effort!" or "You're almost there!"
-2. Say they passed {total_passed}/{total_cases} test cases — acknowledge the progress
-3. Look at the failing test case above — identify the EXACT issue:
-   - What input caused it to fail?
-   - What did their code output vs what was expected?
-   - Which specific part of their logic caused this?
-4. Give one concrete hint to fix it
-5. End encouragingly — "You are very close to full marks!"
-6. NEVER say "your code is wrong" — always be constructive
-7. Do NOT add any score numbers in your response"""
-
-            elif effort_score is not None and effort_score >= 0.3:
-                # ── CASE 5: 0 passed, logic is close ──────────────────
-                prompt = f"""Student's code failed all test cases but their logic is close to correct.
-{tc_context}
-
-Question: {question[:300]}
-Student Code:
-{user_code[:600] if user_code else '(No answer submitted)'}
-
-Write 2-3 sentences of feedback following ALL these rules:
-1. Start with "You're on the right track!"
-2. Acknowledge their approach — what did they get right?
-3. Look at the failing test case — identify the EXACT bug:
-   - What specific line or logic is causing the wrong output?
-   - What is the difference between their output and expected?
-   - Is it an off-by-one error? Wrong loop condition? Input parsing issue?
-4. Give a targeted hint to fix that specific bug
-5. End with "Don't give up, you are closer than you think!"
-6. Be specific — mention actual variable names or logic from their code if relevant
-7. Do NOT add any score numbers in your response"""
-
-            elif effort_score is not None and effort_score > 0:
-                # ── CASE 6: 0 passed, wrong approach ──────────────────
-                prompt = f"""Student's code failed all test cases. Their approach needs rework but they made a genuine attempt.
-{tc_context}
-
-Question: {question[:300]}
-Student Code:
-{user_code[:600] if user_code else '(No answer submitted)'}
-
-Write 2-3 sentences of feedback following ALL these rules:
-1. Start with "Good attempt!"
-2. Point out what they tried to do — acknowledge the effort
-3. Explain what is fundamentally wrong with their approach based on the test case failure
-4. Give a helpful hint about the correct approach without giving away the full solution
-5. End with "Keep trying, you will get there!"
-6. Do NOT add any score numbers in your response"""
-
-            else:
-                # ── CASE 7: 0 passed, unrelated code ──────────────────
-                prompt = f"""Student submitted code that did not pass any test cases.
-{tc_context}
-
-Question: {question[:300]}
-Student Code: {user_code[:300] if user_code else '(No code submitted)'}
-
-Write 2 sentences of gentle encouraging feedback:
-1. Be kind — never harsh or discouraging
-2. Give one helpful starting hint based on what the question is asking
-3. End with "Keep practicing, you will get there!"
-4. Do NOT add any score numbers in your response"""
-
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": (
-                        "You are a warm, encouraging programming tutor. "
-                        "Give specific, accurate feedback based on the actual test case results. "
-                        "Always identify the exact error from the test case output shown. "
-                        "Be encouraging but precise — tell the student exactly what went wrong and how to fix it. "
-                        "Never mention score numbers in your response."
-                    )},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.4,
-                max_tokens=250
-            )
-            feedback = response.choices[0].message.content.strip()
-
-            # ── Append score at the end of feedback ───────────────────
-            return f"{feedback}{score_label}"
-
-        except:
-            score_label = f"\n\n📊 Score: {partial_score} / 1" if partial_score is not None else ""
-            if is_skipped:
-                return "Skipped"
-            if is_template:
-                return "Not Attempted"
-            if is_correct:
-                return f"Excellent! All test cases passed. Great work!{score_label}"
-            elif total_passed > 0:
-                return f"You're almost there! {total_passed}/{total_cases} test cases passed. A small fix is all you need — keep going!{score_label}"
-            elif effort_score and effort_score > 0:
-                return f"Good effort! Your code is on the right track. Review the logic carefully and try again — you are closer than you think!{score_label}"
-            else:
-                return f"Give it another try! Read the question carefully and think about the input and output format. You can do it!{score_label}"
+        """Kept for backward compatibility — calls sync version."""
+        return self._generate_coding_explanation_sync(
+            question, user_code, correct_code, is_correct,
+            test_results, partial_score, effort_score, is_skipped, is_template
+        )
 
     def generate_batch_explanations(self, qa_pairs: List[Dict], question_type: str) -> List[str]:
+        """Kept for backward compatibility — sync version."""
         explanations = []
         for qa in qa_pairs:
             question       = qa.get("question", "")
@@ -1262,23 +1259,23 @@ Write 2 sentences of gentle encouraging feedback:
             options        = qa.get("options", [])
             is_correct     = qa.get("is_correct", False)
             if question_type == "coding":
-                explanation = self.generate_coding_explanation(
+                explanation = self._generate_coding_explanation_sync(
                     question, user_answer, qa.get("generated_correct_code", ""),
                     is_correct, qa.get("test_case_results"))
             elif is_correct:
                 explanation = random.choice(["Correct! Well done.", "Excellent! Right answer.",
                                              "Correct! Good understanding.", "Well done!"])
             else:
-                explanation = self.generate_explanation(question, user_answer, correct_answer, question_type, options)
+                explanation = self._generate_explanation_sync(question, user_answer, correct_answer, question_type, options)
             explanations.append(explanation)
         return explanations
 
     # ══════════════════════════════════════════════════════════
-    #  SECTION-WISE EVALUATION
+    #  SECTION-WISE EVALUATION — FULLY PARALLELIZED
     # ══════════════════════════════════════════════════════════
 
-    def evaluate_by_section(self, user_type: str, sections: Dict,
-                            coding_test_results: Dict = None) -> Dict:
+    async def evaluate_by_section(self, user_type: str, sections: Dict,
+                                  coding_test_results: Dict = None) -> Dict:
         all_scores       = []
         all_feedbacks    = []
         section_scores   = {}
@@ -1294,96 +1291,146 @@ Write 2 sentences of gentle encouraging feedback:
             section_total   = len(qa_pairs)
             section_results = []
 
-            for idx, qa in enumerate(qa_pairs):
-              try:
-                raw_answer  = str(qa.get("answer", "")).strip()
-                user_answer = "" if raw_answer.lower() in SENTINELS else raw_answer
-                correct_letter = str(qa.get("correct_answer", "")).strip().upper()
-                correct_text   = str(qa.get("correct_option_text", "")).strip()
-                question_text  = qa.get("question", "")
-                options        = qa.get("options", [])
-                q_number       = qa.get("question_number", idx + 1)
+            if section_name == "coding":
+                # ── PARALLEL: evaluate all coding questions at once ────
+                async def _eval_one_coding(idx, qa):
+                    try:
+                        raw_answer   = str(qa.get("answer", "")).strip()
+                        user_answer  = "" if raw_answer.lower() in SENTINELS else raw_answer
+                        question_text = qa.get("question", "")
+                        q_number      = qa.get("question_number", idx + 1)
 
-                if section_name == "coding":
-                    tc_results = coding_test_results.get(str(q_number)) or coding_test_results.get(q_number)
-                    if tc_results:
-                        code_eval = self.evaluate_code_with_test_results(question_text, user_answer, tc_results)
-                    else:
-                        # No test results — student submitted without running tests
-                        # Use effort scoring instead of binary AI eval
-                        empty_results = {
-                            "total_passed": 0, "total_cases": 0,
-                            "all_passed": False, "score_percentage": 0.0,
-                            "overall_result": "Not Tested", "results": []
+                        tc_results = coding_test_results.get(str(q_number)) or coding_test_results.get(q_number)
+                        if not tc_results:
+                            tc_results = {
+                                "total_passed": 0, "total_cases": 0,
+                                "all_passed": False, "score_percentage": 0.0,
+                                "overall_result": "Not Tested", "results": []
+                            }
+
+                        code_eval = await self.evaluate_code_with_test_results(
+                            question_text, user_answer, tc_results
+                        )
+
+                        is_correct    = code_eval["is_correct"]
+                        partial_score = code_eval.get("partial_score", 1.0 if is_correct else 0.0)
+                        qa["generated_correct_code"] = code_eval["correct_code"]
+                        qa["is_correct"]             = is_correct
+                        qa["partial_score"]          = partial_score
+                        qa["test_case_results"]      = code_eval.get("test_case_results")
+
+                        display_answer = user_answer
+                        if not display_answer:
+                            tc = code_eval.get("test_case_results")
+                            if tc and tc.get("total_passed", 0) > 0:
+                                display_answer = f"[Code submitted — {tc.get('total_passed',0)}/{tc.get('total_cases',0)} test cases passed]"
+                            else:
+                                display_answer = "No answer (Skipped)"
+
+                        return idx, partial_score, is_correct, {
+                            "question_number":   idx + 1,
+                            "question":          question_text,
+                            "user_answer":       display_answer,
+                            "correct_answer":    code_eval["correct_code"],
+                            "is_correct":        is_correct,
+                            "explanation":       code_eval["explanation"],
+                            "test_case_results": code_eval.get("test_case_results"),
+                            "overall_result":    code_eval.get("overall_result", "Unknown"),
                         }
-                        code_eval = self.evaluate_code_with_test_results(question_text, user_answer, empty_results)
-                    is_correct    = code_eval["is_correct"]
-                    partial_score = code_eval.get("partial_score", 1.0 if is_correct else 0.0)
-                    qa["generated_correct_code"] = code_eval["correct_code"]
-                    qa["is_correct"]             = is_correct
-                    qa["partial_score"]          = partial_score
-                    qa["test_case_results"]      = code_eval.get("test_case_results")
+                    except Exception as e:
+                        logger.error(f"❌ Coding Q{idx+1} eval error: {e}")
+                        return idx, 0, False, {
+                            "question_number": idx + 1,
+                            "question":        qa.get("question", ""),
+                            "user_answer":     "Error during evaluation",
+                            "correct_answer":  "N/A",
+                            "is_correct":      False,
+                            "explanation":     "Question could not be evaluated.",
+                            "test_case_results": None,
+                            "overall_result":  "Error",
+                        }
+
+                coding_tasks = [_eval_one_coding(i, qa) for i, qa in enumerate(qa_pairs)]
+                coding_results = await asyncio.gather(*coding_tasks)
+
+                for idx, partial_score, is_correct, result in sorted(coding_results, key=lambda x: x[0]):
                     all_scores.append(partial_score)
                     section_correct += partial_score
+                    section_results.append(result)
+                    all_feedbacks.append(result.get("explanation", ""))
 
-                    display_answer = user_answer
-                    if not display_answer:
-                        tc = code_eval.get("test_case_results")
-                        if tc and tc.get("total_passed", 0) > 0:
-                            display_answer = f"[Code submitted — {tc.get('total_passed',0)}/{tc.get('total_cases',0)} test cases passed]"
-                        else:
-                            display_answer = "No answer (Skipped)"
-
-                    section_results.append({
-                        "question_number":   idx + 1,
-                        "question":          question_text[:200],
-                        "user_answer":       display_answer,
-                        "correct_answer":    code_eval["correct_code"],
-                        "is_correct":        is_correct,
-                        "explanation":       code_eval["explanation"],
-                        "test_case_results": code_eval.get("test_case_results"),
-                        "overall_result":    code_eval.get("overall_result", "Unknown"),
-                    })
-                else:
+            else:
+                # ── PARALLEL: check answers first (sync, fast), then explain in parallel ──
+                correct_flags = []
+                for idx, qa in enumerate(qa_pairs):
                     try:
-                        is_correct = self._check_answer_correct(user_answer, correct_letter, correct_text, options)
-                    except Exception as e:
-                        logger.warning(f"⚠️ Answer check failed for Q{q_number} (correct_answer={correct_letter!r}): {e} — marking wrong")
-                        is_correct = False
-                    qa["is_correct"] = is_correct
-                    all_scores.append(1 if is_correct else 0)
-                    if is_correct: section_correct += 1
-                    section_results.append({
-                        "question_number": idx + 1,
-                        "question":        question_text[:200],
-                        "user_answer":     user_answer if user_answer else "No answer (Skipped)",
-                        "correct_answer":  correct_text or correct_letter,
-                        "is_correct":      is_correct,
-                        "options":         options,
-                        "explanation":     "",
-                    })
-              except Exception as e:
-                logger.error(f"❌ Skipping Q{idx+1} due to error: {e} — marking wrong and continuing")
-                all_scores.append(0)
-                section_results.append({
-                    "question_number": idx + 1,
-                    "question":        qa.get("question", "")[:200],
-                    "user_answer":     "Error during evaluation",
-                    "correct_answer":  "N/A",
-                    "is_correct":      False,
-                    "options":         [],
-                    "explanation":     "Question could not be evaluated.",
-                })
+                        raw_answer     = str(qa.get("answer", "")).strip()
+                        user_answer    = "" if raw_answer.lower() in SENTINELS else raw_answer
+                        correct_letter = str(qa.get("correct_answer", "")).strip().upper()
+                        correct_text   = str(qa.get("correct_option_text", "")).strip()
+                        options        = qa.get("options", [])
+                        question_text  = qa.get("question", "")
 
-            if section_name != "coding":
-                explanations = self.generate_batch_explanations(qa_pairs, section_name)
+                        try:
+                            is_correct = self._check_answer_correct(user_answer, correct_letter, correct_text, options)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Answer check failed Q{idx+1}: {e}")
+                            is_correct = False
+
+                        qa["is_correct"] = is_correct
+                        correct_flags.append(is_correct)
+                        all_scores.append(1 if is_correct else 0)
+                        if is_correct:
+                            section_correct += 1
+
+                        section_results.append({
+                            "question_number": idx + 1,
+                            "question":        question_text,
+                            "user_answer":     user_answer if user_answer else "No answer (Skipped)",
+                            "correct_answer":  correct_text or correct_letter,
+                            "is_correct":      is_correct,
+                            "options":         options,
+                            "explanation":     "",  # filled below in parallel
+                        })
+                    except Exception as e:
+                        logger.error(f"❌ Skipping Q{idx+1}: {e}")
+                        correct_flags.append(False)
+                        all_scores.append(0)
+                        section_results.append({
+                            "question_number": idx + 1,
+                            "question":        qa.get("question", ""),
+                            "user_answer":     "Error during evaluation",
+                            "correct_answer":  "N/A",
+                            "is_correct":      False,
+                            "options":         [],
+                            "explanation":     "Question could not be evaluated.",
+                        })
+
+                # ── Generate all explanations IN PARALLEL ──────────────
+                explanation_tasks = []
+                for idx, (qa, is_correct) in enumerate(zip(qa_pairs, correct_flags)):
+                    if is_correct:
+                        async def _correct_msg():
+                            return random.choice(["Correct! Well done.", "Excellent! Right answer.",
+                                                  "Correct! Good understanding.", "Well done!"])
+                        explanation_tasks.append(_correct_msg())
+                    else:
+                        explanation_tasks.append(
+                            self._run_in_thread(
+                                self._generate_explanation_sync,
+                                qa.get("question", ""),
+                                qa.get("answer", "No answer"),
+                                qa.get("correct_option_text") or qa.get("correct_answer", "N/A"),
+                                section_name,
+                                qa.get("options", []),
+                            )
+                        )
+
+                explanations = await asyncio.gather(*explanation_tasks)
                 for i, exp in enumerate(explanations):
                     if i < len(section_results):
                         section_results[i]["explanation"] = exp
                     all_feedbacks.append(exp)
-            else:
-                for r in section_results:
-                    all_feedbacks.append(r.get("explanation", ""))
 
             pct = round((section_correct / section_total) * 100, 1) if section_total else 0
             section_scores[section_name]  = {"correct": round(section_correct, 1), "total": section_total, "percentage": pct}
@@ -1456,7 +1503,7 @@ Write 2 sentences of gentle encouraging feedback:
             return {"status": "unhealthy", "error": str(e)}
 
     async def close(self):
-        pass
+        self._executor.shutdown(wait=False)
 
 
 _ai_service = None
