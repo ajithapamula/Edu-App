@@ -931,13 +931,18 @@ Return ONLY code inside a ``` code block."""
                 options_text = "\nOptions:\n" + "\n".join(
                     [f"{chr(65+i)}) {opt}" for i, opt in enumerate(options)])
             prompt = f"""Question: {question}{options_text}
-User's Answer: {user_answer}
-Correct Answer: {correct_answer}
+        Student's Answer: {user_answer}
+        Correct Answer: {correct_answer}
 
-Give a brief explanation (2-3 sentences) of why the correct answer is right.
-If the user got it wrong, briefly explain their likely mistake.
-IMPORTANT: If this is a math question, show the key calculation step.
-Do NOT contradict yourself — if your calculation gives a different number than the stated correct answer, go with your calculation."""
+        Write a clear step-by-step explanation showing HOW to arrive at the correct answer.
+
+        RULES:
+        1. Show the actual calculation steps (e.g. "Step 1: ... Step 2: ...")
+        2. For math/aptitude: write out the formula, plug in the numbers, show the working
+        3. Point out WHERE the student went wrong if their answer differs
+        4. End with: "Therefore, the correct answer is {correct_answer}"
+        5. Keep it under 5 lines total — be concise but complete
+        6. NEVER just restate the answer — always show the WHY and HOW"""
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "system", "content": "Brief, accurate educational explanations. For math questions, always verify the calculation."},

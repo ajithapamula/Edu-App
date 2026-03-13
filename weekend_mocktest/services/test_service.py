@@ -14,6 +14,12 @@ REFRESH LOGIC:
 
 FIX: force_complete_test now uses _score_sections_fast() — instant MCQ scoring,
      no LLM call, no timeout, no ERR_EMPTY_RESPONSE on /api/warnings.
+FIX: force_complete_test CASE 1 & 2 use test_completed check instead of score > 0
+     so 0-score terminated results are never overwritten.
+FIX: _save_results detects boilerplate/skipped coding answers and stores None
+     so Question Review tab shows "Not answered" instead of template code.
+FIX: _save_results now calls Groq to generate real per-question explanations
+     for all wrong/skipped questions before saving to MongoDB.
 """
 
 import logging
@@ -57,6 +63,15 @@ class TestService:
         'mm', 'sd', 'fico', 'pp', 'wm', 'qm', 'pm',
         'general ledger', 'cost center', 'profit center',
         'business process', 'organizational'
+    ]
+
+    # Common boilerplate patterns injected by the code editor when student skips
+    _BOILERPLATE_PATTERNS = [
+        "# write your solution here\ndef solution():\n    # your code here\n    pass\n\n# test your solution\nif __name__ == \"__main__\":\n    solution()",
+        "# write your solution here\ndef solution():\n    # your code here\n    pass",
+        "// write your solution here\nfunction solution() {\n    // your code here\n}",
+        "public class solution {\n    public static void main(string[] args) {\n        // write your solution here\n    }\n}",
+        "// write your solution here\n// write your go solution here",
     ]
 
     def __init__(self):
@@ -249,6 +264,98 @@ class TestService:
         if s.isdigit():
             return int(s)
         return (int(hashlib.md5(s.encode()).hexdigest(), 16) % 90000) + 10000
+
+    def _is_boilerplate_code(self, code: str, question: Dict) -> bool:
+        """
+        Returns True if the submitted code is just the editor's default boilerplate
+        (meaning the student never typed anything — treat as skipped).
+        """
+        if not code:
+            return False
+        stripped = code.strip().lower()
+
+        # Check against question's own stored boilerplate first
+        stored_bp = (
+            question.get("boilerplate_code") or question.get("starter_code") or
+            question.get("template_code") or question.get("default_code") or ""
+        )
+        if stored_bp and stripped == stored_bp.strip().lower():
+            return True
+
+        # Check against known editor-injected default patterns
+        for bp in self._BOILERPLATE_PATTERNS:
+            if stripped == bp.strip().lower():
+                return True
+
+        return False
+
+    # ════════════════════════════════════════════════════════════
+    # GROQ EXPLANATION GENERATOR
+    # ════════════════════════════════════════════════════════════
+
+    async def _generate_explanations_batch(self, wrong_pairs: List[Dict]) -> Dict[int, str]:
+        """
+        Call Groq once to generate short, meaningful explanations for all
+        wrong/skipped questions. Returns {question_number: explanation_text}.
+
+        wrong_pairs: list of conversation_pair dicts where is_correct=False or skipped.
+        """
+        if not wrong_pairs:
+            return {}
+
+        explanations = {}
+        try:
+            # Build a compact prompt listing all wrong questions
+            lines = []
+            for item in wrong_pairs:
+                q_num    = item["question_number"]
+                question = item["question"] or ""
+                correct  = item["correct_answer"] or ""
+                user_ans = item.get("answer") or "No answer (skipped)"
+                lines.append(
+                    f"Q{q_num}:\n"
+                    f"Question: {question}\n"
+                    f"Student answered: {user_ans}\n"
+                    f"Correct answer: {correct}"
+                )
+
+            prompt = (
+                "You are a test feedback assistant. For each question below, write a single "
+                "clear explanation (1-2 sentences max) that tells the student WHY the correct "
+                "answer is right and where their thinking went wrong. Be specific and educational.\n\n"
+                "Respond in this exact format for each question:\n"
+                "Q<number>: <explanation>\n\n"
+                + "\n\n".join(lines)
+            )
+
+            # Use the Groq client from ai_service
+            client = getattr(self.ai_service, "client", None) or getattr(self.ai_service, "groq_client", None)
+
+            if client is None:
+                logger.warning("⚠️ No Groq client found on ai_service — skipping explanation generation")
+                return {}
+
+            response = client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=800,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            logger.info(f"💡 Groq explanations generated for {len(wrong_pairs)} questions")
+
+            # Parse "Q<n>: <text>" lines
+            import re
+            for match in re.finditer(r"Q(\d+):\s*(.+?)(?=\nQ\d+:|\Z)", raw, re.DOTALL):
+                q_num = int(match.group(1))
+                text  = match.group(2).strip().replace("\n", " ")
+                explanations[q_num] = text
+
+        except Exception as e:
+            logger.error(f"❌ Explanation batch generation failed: {e}")
+
+        return explanations
 
     # ════════════════════════════════════════════════════════════
     # START TEST
@@ -664,7 +771,8 @@ class TestService:
                 if is_correct:
                     correct += 1
                 scores.append(is_correct)
-                feedbacks.append("Correct" if is_correct else f"Correct answer: {correct_text or correct_idx}")
+                # Store empty feedback — Groq will fill these in _save_results
+                feedbacks.append("" if not is_correct else "Correct")
 
             total_in_section = len(qs)
             section_scores[section_name] = {
@@ -736,17 +844,21 @@ class TestService:
                         logger.warning(f"⚠️ Could not fetch student profile: {mysql_err}")
 
                 existing = self.db_manager.test_results_collection.find_one(
-                    {"test_id": test_id}, {"score": 1, "test_completed": 1}
+                    {"test_id": test_id}, {"score": 1, "test_completed": 1, "total_questions": 1,
+                                           "score_percentage": 1, "section_scores": 1, "section_details": 1}
                 )
+                # FIX: use test_completed flag instead of score > 0
+                # so 0-score terminated results are never overwritten
                 if existing and existing.get("test_completed"):
                     logger.info(f"✅ Result already exists score={existing.get('score', 0)} — skipping")
                     return {
-                        "status": "already_saved", "reason": reason,
-                        "score": existing.get("score", 0),
-                        "total_questions": existing.get("total_questions", 0),
+                        "status":           "already_saved",
+                        "reason":           reason,
+                        "score":            existing.get("score", 0),
+                        "total_questions":  existing.get("total_questions", 0),
                         "score_percentage": existing.get("score_percentage", 0),
-                        "section_scores": existing.get("section_scores", {}),
-                        "section_details": existing.get("section_details", {}),
+                        "section_scores":   existing.get("section_scores", {}),
+                        "section_details":  existing.get("section_details", {}),
                     }
 
                 self.db_manager.test_results_collection.update_one(
@@ -778,18 +890,21 @@ class TestService:
 
             # ── CASE 2: Session in memory — score instantly, no LLM ──────────
             existing = self.db_manager.test_results_collection.find_one(
-                {"test_id": test_id}, {"score": 1, "test_completed": 1}
+                {"test_id": test_id}, {"score": 1, "test_completed": 1, "total_questions": 1,
+                                       "score_percentage": 1, "section_scores": 1, "section_details": 1}
             )
-            if existing and existing.get("score", 0) > 0 and existing.get("test_completed"):
-                logger.info(f"✅ Result already exists score={existing['score']} — skipping")
+            # FIX: use test_completed flag instead of score > 0
+            if existing and existing.get("test_completed"):
+                logger.info(f"✅ Result already exists score={existing.get('score', 0)} — skipping")
                 return {
-                    "status": "already_saved", "reason": reason,
-                    "score": existing.get("score", 0),
-                    "total_questions": existing.get("total_questions", 0),
+                    "status":           "already_saved",
+                    "reason":           reason,
+                    "score":            existing.get("score", 0),
+                    "total_questions":  existing.get("total_questions", 0),
                     "score_percentage": existing.get("score_percentage", 0),
-                    "section_scores": existing.get("section_scores", {}),
-                    "section_details": existing.get("section_details", {}),
-                    "analytics": existing.get("evaluation_report", ""),
+                    "section_scores":   existing.get("section_scores", {}),
+                    "section_details":  existing.get("section_details", {}),
+                    "analytics":        existing.get("evaluation_report", ""),
                 }
 
             answers             = self.memory_manager.get_test_answers(test_id) or []
@@ -900,20 +1015,62 @@ class TestService:
         total_q         = test_data.get("total_questions", len(questions))
         pct             = round((total_correct / total_q) * 100, 1) if total_q else 0
 
+        # Build conversation_pairs — for coding questions, detect boilerplate/skipped
+        # answers and store None so the frontend shows "Not answered" instead of
+        # the editor's default template code.
         conversation_pairs = []
         for idx, ans in enumerate(answers):
-            q = questions[idx] if idx < len(questions) else {}
+            q      = questions[idx] if idx < len(questions) else {}
+            q_type = q.get("question_type", "")
+            raw_answer = ans.get("answer")
+
+            if q_type == "coding" and raw_answer:
+                if self._is_boilerplate_code(raw_answer, q):
+                    logger.info(f"🚫 Q{idx+1}: boilerplate detected — storing as skipped")
+                    raw_answer = None
+
             conversation_pairs.append({
                 "question_number": idx + 1,
                 "question_id":     q.get("question_id"),
                 "question":        q.get("question"),
-                "question_type":   q.get("question_type"),
-                "answer":          ans.get("answer"),
+                "question_type":   q_type,
+                "answer":          raw_answer,
                 "correct":         bool(scores[idx]) if idx < len(scores) else False,
                 "correct_answer":  q.get("correct_option_text") or q.get("correct_answer", "N/A"),
                 "feedback":        feedbacks[idx] if idx < len(feedbacks) else "",
                 "options":         q.get("options", []),
             })
+
+        # ════════════════════════════════════════════════════════════
+        # GROQ EXPLANATIONS — generate for all wrong / skipped questions
+        # ════════════════════════════════════════════════════════════
+        wrong_pairs = [
+            p for p in conversation_pairs
+            if not p["correct"] and p.get("question_type") != "coding"
+        ]
+
+        if wrong_pairs:
+            logger.info(f"💡 Generating Groq explanations for {len(wrong_pairs)} wrong/skipped questions...")
+            try:
+                explanation_map = await self._generate_explanations_batch(wrong_pairs)
+
+                # Inject explanations back into conversation_pairs
+                for pair in conversation_pairs:
+                    q_num = pair["question_number"]
+                    if q_num in explanation_map:
+                        pair["feedback"] = explanation_map[q_num]
+
+                # Also inject into section_details if present (normal test path)
+                for sec_name, sec_data in section_details.items():
+                    for q in sec_data.get("questions", []):
+                        q_num = q.get("question_number")
+                        if q_num in explanation_map:
+                            q["explanation"] = explanation_map[q_num]
+
+                logger.info(f"✅ Explanations injected for {len(explanation_map)} questions")
+            except Exception as exp_err:
+                logger.error(f"❌ Explanation injection failed (non-fatal): {exp_err}")
+        # ════════════════════════════════════════════════════════════
 
         if pct >= 80:   final_msg = "Excellent performance!"
         elif pct >= 50: final_msg = "Good attempt, room for improvement."

@@ -841,6 +841,22 @@ async def get_student_history(student_id: str):
         logger.error(f"❌ Get student history failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/test/user-type/{student_id}")
+async def get_user_type(student_id: str):
+    """Get user type (dev/non_dev) for a student from MySQL"""
+    try:
+        profile = _get_student_profile(int(student_id))
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"Student {student_id} not found")
+        user_type = profile.get("user_type")
+        if not user_type:
+            raise HTTPException(status_code=404, detail=f"Student {student_id} has no Role_Type set")
+        return {"user_type": user_type, "student_id": student_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ get_user_type failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/student/{student_id}/dashboard")
 async def get_student_dashboard(student_id: str):
@@ -1051,102 +1067,3 @@ async def get_exam_info():
             "total_questions": 30, "total_time_minutes": 45
         }
     }
-
-
-# ================================================================
-# NOTIFICATION ROUTES
-# ================================================================
-
-@router.get("/api/student/notifications/unread-count/{student_id}/{org_id}")
-async def get_student_unread_count(student_id: int, org_id: int):
-    try:
-        return {"Unread_Count": 0}
-    except Exception as e:
-        logger.error(f"❌ Get unread count failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/api/student/notifications/{student_id}/{org_id}")
-async def get_student_notifications(student_id: int, org_id: int, page: int = 1, page_size: int = 15):
-    try:
-        return {"Notifications": [], "Total": 0}
-    except Exception as e:
-        logger.error(f"❌ Get notifications failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.put("/api/student/notifications/read/{notif_id}")
-async def mark_student_notification_read(notif_id: str, request_data: dict):
-    try:
-        return {"success": True}
-    except Exception as e:
-        logger.error(f"❌ Mark read failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.put("/api/student/notifications/read-all/{student_id}/{org_id}")
-async def mark_all_student_notifications_read(student_id: int, org_id: int):
-    try:
-        return {"success": True}
-    except Exception as e:
-        logger.error(f"❌ Mark all read failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.delete("/api/student/notifications/delete/{notif_id}")
-async def delete_student_notification(notif_id: str, student_id: int, org_id: int):
-    try:
-        return {"success": True}
-    except Exception as e:
-        logger.error(f"❌ Delete notification failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/api/mentor/notifications/unread-count/{mentor_id}/{org_id}")
-async def get_mentor_unread_count(mentor_id: int, org_id: int):
-    return {"Unread_Count": 0}
-
-
-@router.get("/api/mentor/notifications/{mentor_id}/{org_id}")
-async def get_mentor_notifications(mentor_id: int, org_id: int, page: int = 1, page_size: int = 15):
-    return {"Notifications": [], "Total": 0}
-
-
-@router.put("/api/mentor/notifications/read/{notif_id}")
-async def mark_mentor_notification_read(notif_id: str, request_data: dict):
-    return {"success": True}
-
-
-@router.put("/api/mentor/notifications/read-all/{mentor_id}/{org_id}")
-async def mark_all_mentor_notifications_read(mentor_id: int, org_id: int):
-    return {"success": True}
-
-
-@router.delete("/api/mentor/notifications/delete/{notif_id}")
-async def delete_mentor_notification(notif_id: str, mentor_id: int, org_id: int):
-    return {"success": True}
-
-
-@router.get("/api/trainer/notifications/unread-count/{trainer_id}/{org_id}")
-async def get_trainer_unread_count(trainer_id: int, org_id: int):
-    return {"Unread_Count": 0}
-
-
-@router.get("/api/trainer/notifications/{trainer_id}/{org_id}")
-async def get_trainer_notifications(trainer_id: int, org_id: int, page: int = 1, page_size: int = 15):
-    return {"Notifications": [], "Total": 0}
-
-
-@router.put("/api/trainer/notifications/read/{notif_id}")
-async def mark_trainer_notification_read(notif_id: str, request_data: dict):
-    return {"success": True}
-
-
-@router.put("/api/trainer/notifications/read-all/{trainer_id}/{org_id}")
-async def mark_all_trainer_notifications_read(trainer_id: int, org_id: int):
-    return {"success": True}
-
-
-@router.delete("/api/trainer/notifications/delete/{notif_id}")
-async def delete_trainer_notification(notif_id: str, trainer_id: int, org_id: int):
-    return {"success": True}

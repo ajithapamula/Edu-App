@@ -7,7 +7,7 @@ Features:
 - Question-by-question analysis
 - User Answer vs Correct Answer with PROPER CODE FORMATTING
 - AI-generated explanations
-- ✅/❌ status indicators
+- ✅/❌/⏭ status indicators (skipped questions shown in amber)
 - Professional formatting
 - ☁️ AWS S3 Upload with URL stored in MongoDB
 - Student name, course, batch shown in PDF header
@@ -160,6 +160,10 @@ class PDFService:
             "raw_id":       student_id,
         }
 
+    def _is_skipped(self, user_answer) -> bool:
+        """Return True if the student skipped this question (no answer submitted)."""
+        return not user_answer or str(user_answer).strip() in ("", "No answer", "None")
+
     async def generate_test_results_pdf(self, test_id: str) -> bytes:
         """
         Generate comprehensive PDF report with AI explanations and proper code formatting.
@@ -309,6 +313,17 @@ class PDFService:
             leftIndent=20,
             textColor=colors.HexColor('#dc2626')
         )
+
+        # ── NEW: style for skipped questions ──────────────────────
+        skipped_style = ParagraphStyle(
+            'SkippedStyle',
+            parent=styles['Normal'],
+            fontSize=9,
+            leftIndent=20,
+            textColor=colors.HexColor('#d97706'),
+            fontName='Helvetica-Oblique'
+        )
+        # ──────────────────────────────────────────────────────────
         
         code_style = ParagraphStyle(
             'CodeStyle',
@@ -499,17 +514,29 @@ class PDFService:
                 ))
                 
                 for q in questions:
-                    q_num        = q.get("question_number", "?")
-                    is_correct   = q.get("is_correct", False)
-                    question_text = q.get("question", "")
-                    user_answer  = q.get("user_answer", "No answer")
+                    q_num          = q.get("question_number", "?")
+                    is_correct     = q.get("is_correct", False)
+                    question_text  = q.get("question", "")
+                    user_answer    = q.get("user_answer", "")
                     correct_answer = q.get("correct_answer", "N/A")
-                    explanation  = q.get("explanation", "")
-                    
+                    explanation    = q.get("explanation", "")
+
+                    # ── Skipped detection ─────────────────────────
+                    skipped = self._is_skipped(user_answer)
+                    # ─────────────────────────────────────────────
+
                     is_code_answer = is_coding_section or self._is_code_content(correct_answer) or self._is_code_content(user_answer)
                     
-                    status       = "✅" if is_correct else "❌"
-                    status_color = colors.HexColor('#059669') if is_correct else colors.HexColor('#dc2626')
+                    # Header icon: skipped gets ⏭, else ✅/❌
+                    if skipped:
+                        status       = "⏭"
+                        status_color = colors.HexColor('#d97706')
+                    elif is_correct:
+                        status       = "✅"
+                        status_color = colors.HexColor('#059669')
+                    else:
+                        status       = "❌"
+                        status_color = colors.HexColor('#dc2626')
                     
                     q_header_style = ParagraphStyle(
                         'QHeader',
@@ -532,29 +559,69 @@ class PDFService:
                             fontName='Helvetica-Bold', leftIndent=20, spaceBefore=5,
                             spaceAfter=2, textColor=colors.HexColor('#dc2626')
                         )
-                        elements.append(Paragraph(
-                            "Your Answer:",
-                            code_label_style if is_correct else wrong_label_style
-                        ))
-                        user_code_formatted = self._format_code_for_pdf(user_answer)
-                        elements.append(Paragraph(user_code_formatted, code_style if is_correct else user_code_style))
-                        
+                        if skipped:
+                            elements.append(Paragraph(
+                                "⏭ <b>Skipped</b> — no answer submitted", skipped_style
+                            ))
+                        else:
+                            elements.append(Paragraph(
+                                "Your Answer:",
+                                code_label_style if is_correct else wrong_label_style
+                            ))
+                            user_code_formatted = self._format_code_for_pdf(user_answer)
+                            elements.append(Paragraph(
+                                user_code_formatted,
+                                code_style if is_correct else user_code_style
+                            ))
+
                         if not is_correct:
                             elements.append(Paragraph("Correct Answer:", code_label_style))
                             elements.append(Paragraph(self._format_code_for_pdf(correct_answer), code_style))
                     else:
-                        user_answer_safe   = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
                         correct_answer_safe = str(correct_answer).replace('<', '&lt;').replace('>', '&gt;')
-                        
-                        if is_correct:
-                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", correct_style))
+
+                        if skipped:
+                            elements.append(Paragraph(
+                                "⏭ <b>Skipped</b> — no answer submitted", skipped_style
+                            ))
+                            elements.append(Paragraph(
+                                f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style
+                            ))
+                        elif is_correct:
+                            user_answer_safe = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
+                            elements.append(Paragraph(
+                                f"<b>Your Answer:</b> {user_answer_safe}", correct_style
+                            ))
                         else:
-                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", wrong_style))
-                            elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style))
-                    
-                    if explanation:
-                        explanation_safe = str(explanation).replace('<', '&lt;').replace('>', '&gt;')
+                            user_answer_safe = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
+                            elements.append(Paragraph(
+                                f"<b>Your Answer:</b> {user_answer_safe}", wrong_style
+                            ))
+                            elements.append(Paragraph(
+                                f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style
+                            ))
+
+                    # ── Always show feedback ───────────────────────
+                    # Use stored explanation if it's meaningful (not just an echo of the answer).
+                    # Otherwise show a fallback hint for wrong/skipped questions.
+                    redundant_echoes = (
+                        f"Correct answer: {correct_answer}",
+                        f"Correct answer: {str(correct_answer).strip()}",
+                        "",
+                    )
+                    explanation_clean = str(explanation).strip() if explanation else ""
+
+                    if explanation_clean and explanation_clean not in redundant_echoes:
+                        explanation_safe = explanation_clean.replace('<', '&lt;').replace('>', '&gt;')
                         elements.append(Paragraph(f"💡 <i>{explanation_safe}</i>", explanation_style))
+                    elif skipped or not is_correct:
+                        ca_safe = str(correct_answer).replace('<', '&lt;').replace('>', '&gt;')
+                        elements.append(Paragraph(
+                            f"💡 <i>Review this concept — the correct answer is "
+                            f"<b>{ca_safe}</b>. Make sure to understand the reasoning behind it.</i>",
+                            explanation_style
+                        ))
+                    # ─────────────────────────────────────────────
                     
                     elements.append(Spacer(1, 8))
                 
@@ -582,16 +649,27 @@ class PDFService:
                 ))
                 
                 for qa in questions:
-                    q_num        = qa.get("question_number", "?")
-                    is_correct   = qa.get("correct", False)
-                    question_text = qa.get("question", "")[:150]
-                    user_answer  = qa.get("answer", "No answer")
+                    q_num          = qa.get("question_number", "?")
+                    is_correct     = qa.get("correct", False)
+                    question_text  = qa.get("question", "")[:150]
+                    user_answer    = qa.get("answer", "")
                     correct_answer = qa.get("correct_answer", "N/A")
-                    feedback     = qa.get("feedback", "")
+                    feedback       = qa.get("feedback", "")
                     is_code_answer = is_coding_section or self._is_code_content(correct_answer)
-                    
-                    status       = "✅" if is_correct else "❌"
-                    status_color = colors.HexColor('#059669') if is_correct else colors.HexColor('#dc2626')
+
+                    # ── Skipped detection ─────────────────────────
+                    skipped = self._is_skipped(user_answer)
+                    # ─────────────────────────────────────────────
+
+                    if skipped:
+                        status       = "⏭"
+                        status_color = colors.HexColor('#d97706')
+                    elif is_correct:
+                        status       = "✅"
+                        status_color = colors.HexColor('#059669')
+                    else:
+                        status       = "❌"
+                        status_color = colors.HexColor('#dc2626')
                     
                     q_header_style = ParagraphStyle(
                         'QHeader', parent=styles['Normal'], fontSize=10,
@@ -611,29 +689,64 @@ class PDFService:
                             fontName='Helvetica-Bold', leftIndent=20, spaceBefore=5,
                             spaceAfter=2, textColor=colors.HexColor('#dc2626')
                         )
-                        elements.append(Paragraph(
-                            "Your Answer:",
-                            code_label_style if is_correct else wrong_label_style
-                        ))
-                        elements.append(Paragraph(
-                            self._format_code_for_pdf(user_answer),
-                            code_style if is_correct else user_code_style
-                        ))
+                        if skipped:
+                            elements.append(Paragraph(
+                                "⏭ <b>Skipped</b> — no answer submitted", skipped_style
+                            ))
+                        else:
+                            elements.append(Paragraph(
+                                "Your Answer:",
+                                code_label_style if is_correct else wrong_label_style
+                            ))
+                            elements.append(Paragraph(
+                                self._format_code_for_pdf(user_answer),
+                                code_style if is_correct else user_code_style
+                            ))
                         if not is_correct:
                             elements.append(Paragraph("Correct Answer:", code_label_style))
                             elements.append(Paragraph(self._format_code_for_pdf(correct_answer), code_style))
                     else:
-                        user_answer_safe    = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
                         correct_answer_safe = str(correct_answer).replace('<', '&lt;').replace('>', '&gt;')
-                        if is_correct:
-                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", correct_style))
+                        if skipped:
+                            elements.append(Paragraph(
+                                "⏭ <b>Skipped</b> — no answer submitted", skipped_style
+                            ))
+                            elements.append(Paragraph(
+                                f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style
+                            ))
+                        elif is_correct:
+                            user_answer_safe = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
+                            elements.append(Paragraph(
+                                f"<b>Your Answer:</b> {user_answer_safe}", correct_style
+                            ))
                         else:
-                            elements.append(Paragraph(f"<b>Your Answer:</b> {user_answer_safe}", wrong_style))
-                            elements.append(Paragraph(f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style))
-                    
-                    if feedback:
-                        feedback_safe = str(feedback).replace('<', '&lt;').replace('>', '&gt;')
+                            user_answer_safe = str(user_answer).replace('<', '&lt;').replace('>', '&gt;')
+                            elements.append(Paragraph(
+                                f"<b>Your Answer:</b> {user_answer_safe}", wrong_style
+                            ))
+                            elements.append(Paragraph(
+                                f"<b>Correct Answer:</b> {correct_answer_safe}", correct_style
+                            ))
+
+                    # ── Always show feedback ───────────────────────
+                    redundant_echoes = (
+                        f"Correct answer: {correct_answer}",
+                        f"Correct answer: {str(correct_answer).strip()}",
+                        "",
+                    )
+                    feedback_clean = str(feedback).strip() if feedback else ""
+
+                    if feedback_clean and feedback_clean not in redundant_echoes:
+                        feedback_safe = feedback_clean.replace('<', '&lt;').replace('>', '&gt;')
                         elements.append(Paragraph(f"💡 <i>{feedback_safe}</i>", explanation_style))
+                    elif skipped or not is_correct:
+                        ca_safe = str(correct_answer).replace('<', '&lt;').replace('>', '&gt;')
+                        elements.append(Paragraph(
+                            f"💡 <i>Review this concept — the correct answer is "
+                            f"<b>{ca_safe}</b>. Make sure to understand the reasoning behind it.</i>",
+                            explanation_style
+                        ))
+                    # ─────────────────────────────────────────────
                     
                     elements.append(Spacer(1, 8))
                 

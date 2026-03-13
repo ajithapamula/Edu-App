@@ -8,6 +8,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import socket
+from fastapi import APIRouter
+student_router = APIRouter()
 
 # ——— Configuration ———
 logger = logging.getLogger("uvicorn.error")
@@ -50,9 +52,6 @@ async def home():
         return {"error": "Index file not found"}
     return FileResponse(str(index_file))
 
-@app.get("/test", tags=["diagnostics"])
-async def test():
-    return {"message": "Main app working", "mounted_apps": list(sub_apps.keys())}
 
 # ——— Sub-app mounting ———
 # Add entries here as "prefix": "module.path:app_variable"
