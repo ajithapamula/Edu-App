@@ -7,15 +7,16 @@
 #   4. _check_answer_correct: guard against ord() crash on bad data
 #   5. evaluate_code_with_test_results: fractional + effort scoring
 #   6. evaluate_by_section: uses partial_score not binary 0/1
-#   7. _evaluate_code_effort: AI judges code relevance when 0 pass
-#   8. generate_coding_explanation: encouraging + specific feedback
+#   7. _evaluate_code_effort: GRANULAR 0.0/0.1/0.2/0.3 scoring
+#   8. generate_coding_explanation: encouraging + specific feedback per score tier
 #   9. _is_template_code: detect placeholder/template code → score 0
 #  10. _is_skipped: skip button → "Skipped" only, score 0, no feedback
 #  11. generate_correct_code: question language takes priority over code
 #  12. Score shown in feedback: 📊 Score: X / 1
-#  13. Effort scores: 0.0 / 0.25 / 0.3 / 0.5 / 1.0
+#  13. Effort scores: 0.0 / 0.1 / 0.2 / 0.3
 #  14. PARALLELIZED: evaluate_by_section, explanations, coding evals
 #  15. SANDBOX: memory limit (256MB), CPU limit, file size limit per execution
+#  16. MCQ/Aptitude wrong answers: step-by-step HOW explanation with options
 # ═══════════════════════════════════════════════════════════════════
 
 import json
@@ -96,6 +97,9 @@ class AIService:
         '// your code here',
         '// write code here',
         '/* write your solution here */',
+        # Hello World in solution() wrapper — classic editor-injected default
+        'hello, world!',
+        'hello world',
     ]
 
     # ── Frontend sentinel values when student clicks Skip ───────────
@@ -227,13 +231,9 @@ class AIService:
 
             # ── SANDBOX: apply resource limits before running student code ──
             def _set_limits():
-                # Max RAM: 256MB — prevents memory bomb attacks
                 resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-                # Max CPU time: matches wall-clock timeout — kills infinite loops at OS level
                 resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout))
-                # Max file size: 10MB — prevents disk fill attacks
                 resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
-                # Max open files: 50 — prevents file descriptor exhaustion
                 resource.setrlimit(resource.RLIMIT_NOFILE, (50, 50))
 
             try:
@@ -805,39 +805,71 @@ class AIService:
         return code.strip().lower() in self.SKIP_SENTINELS
 
     def _is_template_code(self, code: str) -> bool:
+        """
+        Returns True if code is just editor-injected boilerplate — student never typed anything.
+        Uses pattern-based detection so whitespace/indentation differences don't matter.
+        """
         if not code or not code.strip():
             return True
 
-        code_lower = code.lower().strip()
-        has_signal = any(s in code_lower for s in self.TEMPLATE_SIGNALS)
-        if not has_signal:
-            return False
+        code_lower = code.lower()
+        normalized = ' '.join(code.strip().lower().split())
 
-        real_lines = []
-        for line in code.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith('#') or stripped.startswith('//') or stripped.startswith('/*'):
-                continue
-            real_lines.append(stripped.lower())
-
-        boilerplate = {
-            # Python
-            'pass', 'solution()', 'def solution():',
-            'if __name__ == "__main__":', "if __name__ == '__main__':",
-            # Java
-            'public static void main(string[] args) {',
-            'public class solution {', 'public class main {',
-            # Go
-            'package main', 'func main() {', 'fmt.println()',
-            # Generic
-            '}', '{',
-        }
-        meaningful = [l for l in real_lines if l not in boilerplate]
-        if not meaningful:
-            logger.info(f"  🚫 Detected template/placeholder code — treating as Not Attempted")
+        # ── Signal 1: template comment present → always boilerplate ─────
+        TEMPLATE_COMMENT_SIGNALS = [
+            '// write your solution here',
+            '// your code here',
+            '// write code here',
+            '# write your solution here',
+            '# your code here',
+            '# write code here',
+            '/* write your solution here */',
+            '// your go solution here',
+        ]
+        if any(sig in code_lower for sig in TEMPLATE_COMMENT_SIGNALS):
+            logger.info(f"  🚫 Template comment detected — treating as Not Attempted")
             return True
+
+        # ── Signal 2: Hello World only (no real logic) ───────────────────
+        HELLO_WORLD_SIGNALS = [
+            'hello, world!', 'hello world',
+        ]
+        if any(sig in code_lower for sig in HELLO_WORLD_SIGNALS):
+            import re as _re
+            # Strip comments and boilerplate structure, check if real logic remains
+            no_comments = _re.sub(r'//.*|#.*|/\*.*?\*/', '', code_lower, flags=_re.DOTALL)
+            for kw in [
+                'package main', 'import "fmt"', "import 'fmt'",
+                'func main()', 'func solution()', 'def solution():',
+                'public static void main', 'public class solution', 'public class main',
+                'function solution()', 'fmt.println', 'system.out.println',
+                'console.log', 'print(', 'println(',
+                'hello, world!', 'hello world',
+                '{', '}', '(', ')', ';',
+            ]:
+                no_comments = no_comments.replace(kw, ' ')
+            remaining = no_comments.strip()
+            if not remaining or len(remaining.replace(' ', '').replace('\n', '').replace('\t', '')) < 10:
+                logger.info(f"  🚫 Hello World only — treating as Not Attempted")
+                return True
+
+        # ── Signal 3: completely empty logic after stripping structure ───
+        import re as _re
+        no_comments = _re.sub(r'//.*|#.*|/\*.*?\*/', '', code_lower, flags=_re.DOTALL)
+        STRUCTURE_KEYWORDS = [
+            'package main', 'import', 'func main()', 'func solution()',
+            'def solution():', 'public static void main', 'public class',
+            'function solution()', 'if __name__', 'pass',
+            '{', '}', '(', ')', ';',
+        ]
+        leftover = no_comments
+        for kw in STRUCTURE_KEYWORDS:
+            leftover = leftover.replace(kw, ' ')
+        leftover = leftover.strip()
+        if not leftover or len(leftover.replace(' ', '').replace('\n', '').replace('\t', '')) < 5:
+            logger.info(f"  🚫 No real logic detected — treating as Not Attempted")
+            return True
+
         return False
 
     # ══════════════════════════════════════════════════════════
@@ -845,13 +877,20 @@ class AIService:
     # ══════════════════════════════════════════════════════════
 
     def _evaluate_code_effort(self, question: str, user_code: str) -> float:
-        """Sync version — used internally, called via thread pool when needed."""
+        """
+        Granular effort scoring when 0 test cases pass.
+        Returns: 0.0 / 0.1 / 0.2 / 0.3
+          0.3 → Logic is very close, just a small bug (off-by-one, wrong condition)
+          0.2 → Right approach but significant logic flaw
+          0.1 → Related to question but fundamentally wrong approach
+          0.0 → Completely unrelated or empty logic
+        """
         if not user_code or not user_code.strip():
             return 0.0
 
         try:
             prompt = f"""A student wrote code for this question but failed all test cases.
-Judge if their code is related to the question and give an effort score.
+Judge how related and correct their approach is, and give an effort score.
 
 QUESTION:
 {question}
@@ -860,17 +899,18 @@ STUDENT CODE:
 {user_code}
 
 SCORING RULES:
-- 0.3  → Code is clearly attempting to solve this question, logic is close but has small bugs
-- 0.25 → Code is related to the question but approach is mostly wrong
-- 0.0  → Code is totally unrelated, or just print statements with no real logic
+- 0.3  → Logic is clearly correct or very close — small bug like off-by-one, wrong variable, minor syntax issue
+- 0.2  → Approach is in the right direction but has a significant logic flaw — partially solves the problem
+- 0.1  → Code is related to the question but the overall approach is fundamentally wrong
+- 0.0  → Code is completely unrelated to the question, or just a print statement, or no real logic at all
 
-Respond with ONLY one of these three values: 0.0 or 0.25 or 0.3
+Respond with ONLY one of these four values: 0.0 or 0.1 or 0.2 or 0.3
 Nothing else. No explanation. No extra words."""
 
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a strict code evaluator. Respond with ONLY 0.0 or 0.25 or 0.3"},
+                    {"role": "system", "content": "You are a strict code evaluator. Respond with ONLY 0.0 or 0.1 or 0.2 or 0.3"},
                     {"role": "user",   "content": prompt}
                 ],
                 temperature=0.1,
@@ -878,7 +918,7 @@ Nothing else. No explanation. No extra words."""
             )
             content = response.choices[0].message.content.strip()
             score   = float(content)
-            if score in [0.0, 0.25, 0.3]:
+            if score in [0.0, 0.1, 0.2, 0.3]:
                 logger.info(f"  💡 Effort score for 0-pass code: {score}")
                 return score
             return 0.0
@@ -924,30 +964,49 @@ Return ONLY code inside a ``` code block."""
 
     def _generate_explanation_sync(self, question: str, user_answer: str, correct_answer: str,
                                    question_type: str, options: List[str] = None) -> str:
-        """Sync version of generate_explanation — used by thread pool."""
+        """
+        Generate step-by-step explanation for wrong MCQ/Aptitude answers.
+        Shows HOW to reach the correct answer, not just what the correct answer is.
+        Works for both Developer and Non-Developer tracks.
+        """
         try:
             options_text = ""
             if options:
                 options_text = "\nOptions:\n" + "\n".join(
                     [f"{chr(65+i)}) {opt}" for i, opt in enumerate(options)])
-            prompt = f"""Question: {question}{options_text}
-        Student's Answer: {user_answer}
-        Correct Answer: {correct_answer}
 
-        Write a clear step-by-step explanation showing HOW to arrive at the correct answer.
+            prompt = (
+                f"Question: {question}{options_text}\n"
+                f"Student's Answer: {user_answer if user_answer else 'No answer (skipped)'}\n"
+                f"Correct Answer: {correct_answer}\n\n"
+                "Write a clear step-by-step explanation showing HOW to arrive at the correct answer.\n\n"
+                "RULES:\n"
+                "1. Show the actual calculation or reasoning steps (e.g. Step 1: ... Step 2: ... Step 3: ...)\n"
+                "2. For math/aptitude: write out the formula, plug in the numbers, show the full working\n"
+                "3. For MCQ/theory: explain WHY the correct option is right and what the wrong option actually means\n"
+                "4. Point out exactly WHERE the student went wrong if their answer differs\n"
+                f"5. End with: Therefore, the correct answer is {correct_answer}\n"
+                "6. Keep it under 5 lines total — be concise but complete\n"
+                "7. NEVER just restate the answer — always show the WHY and HOW"
+            )
 
-        RULES:
-        1. Show the actual calculation steps (e.g. "Step 1: ... Step 2: ...")
-        2. For math/aptitude: write out the formula, plug in the numbers, show the working
-        3. Point out WHERE the student went wrong if their answer differs
-        4. End with: "Therefore, the correct answer is {correct_answer}"
-        5. Keep it under 5 lines total — be concise but complete
-        6. NEVER just restate the answer — always show the WHY and HOW"""
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "system", "content": "Brief, accurate educational explanations. For math questions, always verify the calculation."},
-                          {"role": "user",   "content": prompt}],
-                temperature=0.3, max_tokens=200)
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert tutor giving step-by-step explanations. "
+                            "For math questions, always verify your calculation before writing. "
+                            "For theory/MCQ questions, explain the concept clearly. "
+                            "Be concise, accurate, and educational."
+                        )
+                    },
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=250
+            )
             return response.choices[0].message.content.strip()
         except:
             return f"The correct answer is: {correct_answer}"
@@ -959,132 +1018,196 @@ Return ONLY code inside a ``` code block."""
                                           effort_score: float = None,
                                           is_skipped: bool = False,
                                           is_template: bool = False) -> str:
-        """Sync version of generate_coding_explanation — used by thread pool."""
+        """
+        Generate encouraging, specific feedback for coding answers.
+        Tier-based feedback based on how many test cases passed and effort score.
+        """
+        score_label = f"\n\n📊 Score: {partial_score} / 1" if partial_score is not None else ""
+
         try:
             total_passed = test_results.get("total_passed", 0) if test_results else 0
-            total_cases  = test_results.get("total_cases", 0)  if test_results else 0
+            total_cases  = test_results.get("total_cases",  0) if test_results else 0
 
-            if is_skipped:
-                return "Skipped"
-            if is_template:
-                return "Not Attempted"
-
+            # Build test case context (used by most tiers)
             tc_context = ""
-            stderr_info = ""
             if test_results:
                 p = test_results.get("total_passed", 0)
-                t = test_results.get("total_cases", 0)
-                tc_context = f"\nTest Results: {p}/{t} passed."
+                t = test_results.get("total_cases",  0)
+                tc_context = f"\nTest Results: {p}/{t} test cases passed."
                 failed = [r for r in test_results.get("results", []) if not r["passed"] and not r.get("is_hidden")]
                 if failed:
-                    f = failed[0]
-                    tc_context += f"\nFailing test case:"
-                    tc_context += f"\n  Input:    '{f.get('input', '')}'"
-                    tc_context += f"\n  Expected: '{f.get('expected_output', '')}'"
-                    tc_context += f"\n  Got:      '{f.get('actual_output', '')}'"
-                    if f.get('stderr'):
-                        stderr_info = f.get('stderr', '')[:300]
-                        tc_context += f"\n  Error:    {stderr_info}"
+                    f0 = failed[0]
+                    tc_context += (
+                        f"\nFirst failing test case:"
+                        f"\n  Input:    '{f0.get('input', '')}'"
+                        f"\n  Expected: '{f0.get('expected_output', '')}'"
+                        f"\n  Got:      '{f0.get('actual_output', '')}'"
+                    )
+                    if f0.get('stderr'):
+                        tc_context += f"\n  Error:    {f0.get('stderr','')[:300]}"
 
-            score_label = f"\n\n📊 Score: {partial_score} / 1"
+            # ══════════════════════════════════════════════════════
+            # TIER 0a — Student clicked Skip (no code at all)
+            # ══════════════════════════════════════════════════════
+            if is_skipped:
+                prompt = (
+                    f"A student skipped this coding question entirely.\n"
+                    f"Question: {question[:400]}\n\n"
+                    f"In 2-3 sentences:\n"
+                    f"1. Explain what the question is asking them to do\n"
+                    f"2. Describe the key approach or algorithm to use\n"
+                    f"3. Give one concrete starting hint (which function/data structure)\n"
+                    f"End with: 'Give it a try next time — you can do it!'\n"
+                    f"Do NOT write any code. Do NOT mention scores."
+                )
 
-            if is_correct:
-                prompt = f"""Student's code passed all {total_cases} test cases perfectly.
-Give 1-2 sentences of enthusiastic positive feedback. Congratulate them genuinely!
-Do NOT add any score numbers in your response."""
+            # ══════════════════════════════════════════════════════
+            # TIER 0b — Student submitted only boilerplate (never typed)
+            # ══════════════════════════════════════════════════════
+            elif is_template:
+                prompt = (
+                    f"A student submitted the default starter template without writing any actual solution.\n"
+                    f"Question: {question[:400]}\n\n"
+                    f"In 2-3 sentences:\n"
+                    f"1. Explain what the question is actually asking for\n"
+                    f"2. Describe the correct approach to solve it\n"
+                    f"3. Give one concrete starting hint to get them going\n"
+                    f"End with: 'Read the question carefully and write your own solution — you can do it!'\n"
+                    f"Do NOT write any code. Do NOT mention scores."
+                )
 
+            # ══════════════════════════════════════════════════════
+            # TIER 1 — All test cases passed
+            # ══════════════════════════════════════════════════════
+            elif is_correct:
+                prompt = (
+                    f"Student's code passed all {total_cases} test cases perfectly.\n"
+                    f"Give 1-2 sentences of enthusiastic positive feedback. Congratulate them genuinely!\n"
+                    f"Do NOT mention scores."
+                )
+
+            # ══════════════════════════════════════════════════════
+            # TIER 2 — Partial pass
+            # ══════════════════════════════════════════════════════
             elif total_passed > 0:
-                prompt = f"""Student passed {total_passed} out of {total_cases} test cases.
-{tc_context}
+                prompt = (
+                    f"Student passed {total_passed} out of {total_cases} test cases.\n"
+                    f"{tc_context}\n\n"
+                    f"Question: {question[:300]}\n"
+                    f"Student Code:\n{user_code[:600] if user_code else '(No code)'}\n\n"
+                    f"Write 2-3 sentences:\n"
+                    f"1. Start: 'Great effort! You passed {total_passed}/{total_cases} test cases!'\n"
+                    f"2. Identify the EXACT issue causing the failing test case\n"
+                    f"3. Give one concrete fix hint\n"
+                    f"End with: 'You are very close — just one small fix needed!'\n"
+                    f"Do NOT mention scores."
+                )
 
-Question: {question[:300]}
-Student Code:
-{user_code[:600] if user_code else '(No answer submitted)'}
-
-Write 2-3 sentences of feedback following ALL these rules:
-1. Start positively — "Great effort!" or "You're almost there!"
-2. Say they passed {total_passed}/{total_cases} test cases — acknowledge the progress
-3. Look at the failing test case above — identify the EXACT issue
-4. Give one concrete hint to fix it
-5. End encouragingly — "You are very close to full marks!"
-6. NEVER say "your code is wrong" — always be constructive
-7. Do NOT add any score numbers in your response"""
-
+            # ══════════════════════════════════════════════════════
+            # TIER 3 — 0 passes, logic very close (0.3)
+            # ══════════════════════════════════════════════════════
             elif effort_score is not None and effort_score >= 0.3:
-                prompt = f"""Student's code failed all test cases but their logic is close to correct.
-{tc_context}
+                prompt = (
+                    f"Student's code failed all test cases but the logic is very close — just a tiny bug.\n"
+                    f"{tc_context}\n\n"
+                    f"Question: {question[:300]}\n"
+                    f"Student Code:\n{user_code[:600] if user_code else '(No code)'}\n\n"
+                    f"Write 2-3 sentences:\n"
+                    f"1. Start: 'You're almost there! Your logic is correct but there's a small bug.'\n"
+                    f"2. Identify the EXACT line/variable/condition that's wrong\n"
+                    f"3. Give a precise fix hint\n"
+                    f"End with: 'Fix that one thing and all test cases will pass!'\n"
+                    f"Do NOT mention scores."
+                )
 
-Question: {question[:300]}
-Student Code:
-{user_code[:600] if user_code else '(No answer submitted)'}
+            # ══════════════════════════════════════════════════════
+            # TIER 4 — 0 passes, right approach wrong logic (0.2)
+            # ══════════════════════════════════════════════════════
+            elif effort_score is not None and effort_score >= 0.2:
+                prompt = (
+                    f"Student's code failed all test cases. Approach is right but logic has a significant flaw.\n"
+                    f"{tc_context}\n\n"
+                    f"Question: {question[:300]}\n"
+                    f"Student Code:\n{user_code[:600] if user_code else '(No code)'}\n\n"
+                    f"Write 2-3 sentences:\n"
+                    f"1. Start: 'Good thinking — your approach is on the right track!'\n"
+                    f"2. Explain WHERE the logic breaks (which function/loop/condition)\n"
+                    f"3. Give one concrete hint\n"
+                    f"End with: 'You're closer than you think — keep going!'\n"
+                    f"Do NOT mention scores."
+                )
 
-Write 2-3 sentences of feedback following ALL these rules:
-1. Start with "You're on the right track!"
-2. Acknowledge their approach — what did they get right?
-3. Look at the failing test case — identify the EXACT bug
-4. Give a targeted hint to fix that specific bug
-5. End with "Don't give up, you are closer than you think!"
-6. Be specific — mention actual variable names or logic from their code if relevant
-7. Do NOT add any score numbers in your response"""
-
+            # ══════════════════════════════════════════════════════
+            # TIER 5 — 0 passes, related but wrong approach (0.1)
+            # ══════════════════════════════════════════════════════
             elif effort_score is not None and effort_score > 0:
-                prompt = f"""Student's code failed all test cases. Their approach needs rework but they made a genuine attempt.
-{tc_context}
+                prompt = (
+                    f"Student made a genuine attempt but approach needs rethinking.\n"
+                    f"{tc_context}\n\n"
+                    f"Question: {question[:300]}\n"
+                    f"Student Code:\n{user_code[:600] if user_code else '(No code)'}\n\n"
+                    f"Write 2-3 sentences:\n"
+                    f"1. Start: 'Good attempt!'\n"
+                    f"2. Explain what the code actually does vs what was expected\n"
+                    f"3. Hint at the correct approach without giving the full solution\n"
+                    f"End with: 'Try restructuring your logic — you can do this!'\n"
+                    f"Do NOT mention scores."
+                )
 
-Question: {question[:300]}
-Student Code:
-{user_code[:600] if user_code else '(No answer submitted)'}
-
-Write 2-3 sentences of feedback following ALL these rules:
-1. Start with "Good attempt!"
-2. Point out what they tried to do — acknowledge the effort
-3. Explain what is fundamentally wrong with their approach based on the test case failure
-4. Give a helpful hint about the correct approach without giving away the full solution
-5. End with "Keep trying, you will get there!"
-6. Do NOT add any score numbers in your response"""
-
+            # ══════════════════════════════════════════════════════
+            # TIER 6 — Unrelated code / 0.0 effort
+            # ══════════════════════════════════════════════════════
             else:
-                prompt = f"""Student submitted code that did not pass any test cases.
-{tc_context}
-
-Question: {question[:300]}
-Student Code: {user_code[:300] if user_code else '(No code submitted)'}
-
-Write 2 sentences of gentle encouraging feedback:
-1. Be kind — never harsh or discouraging
-2. Give one helpful starting hint based on what the question is asking
-3. End with "Keep practicing, you will get there!"
-4. Do NOT add any score numbers in your response"""
+                prompt = (
+                    f"Student submitted code unrelated to the question.\n"
+                    f"Question: {question[:300]}\n"
+                    f"Student Code: {user_code[:300] if user_code else '(No code)'}\n\n"
+                    f"Write 2 sentences:\n"
+                    f"1. Kindly describe what the question is actually asking for\n"
+                    f"2. Give one helpful starting hint\n"
+                    f"End with: 'Read the question carefully and try again — you can do it!'\n"
+                    f"Do NOT mention scores."
+                )
 
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": (
-                        "You are a warm, encouraging programming tutor. "
-                        "Give specific, accurate feedback based on the actual test case results. "
-                        "Always identify the exact error from the test case output shown. "
-                        "Be encouraging but precise — tell the student exactly what went wrong and how to fix it. "
-                        "Never mention score numbers in your response."
-                    )},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a warm, encouraging programming tutor. "
+                            "Be specific and accurate. Never mention score numbers. "
+                            "Keep responses concise — 2 to 3 sentences maximum."
+                        )
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.4,
-                max_tokens=150
+                max_tokens=150,
             )
             feedback = response.choices[0].message.content.strip()
             return f"{feedback}{score_label}"
 
-        except:
-            score_label = f"\n\n📊 Score: {partial_score} / 1" if partial_score is not None else ""
-            if is_skipped:   return "Skipped"
-            if is_template:  return "Not Attempted"
-            if is_correct:   return f"Excellent! All test cases passed. Great work!{score_label}"
-            elif total_passed > 0:
-                return f"You're almost there! {total_passed}/{total_cases} test cases passed. A small fix is all you need — keep going!{score_label}"
-            elif effort_score and effort_score > 0:
-                return f"Good effort! Your code is on the right track. Review the logic carefully and try again — you are closer than you think!{score_label}"
-            else:
-                return f"Give it another try! Read the question carefully and think about the input and output format. You can do it!{score_label}"
+        except Exception as e:
+            logger.error(f"Coding explanation failed: {e}")
+            # ── Fallback strings (Groq unavailable) ──────────────
+            if is_skipped:
+                return f"This question asked you to write a program. Think about the input/output format and the key algorithm needed. Give it a try next time — you can do it!{score_label}"
+            if is_template:
+                return f"You submitted the default template without writing a solution. Read the question carefully and write your own logic — you can do it!{score_label}"
+            if is_correct:
+                return f"Excellent! All test cases passed. Great work!{score_label}"
+            total_passed = test_results.get("total_passed", 0) if test_results else 0
+            total_cases  = test_results.get("total_cases",  0) if test_results else 0
+            if total_passed > 0:
+                return f"Great effort! You passed {total_passed}/{total_cases} test cases. Review the failing test case and check your logic — you're almost there!{score_label}"
+            if effort_score and effort_score >= 0.3:
+                return f"You're almost there! Your logic is very close — just a tiny bug to fix.{score_label}"
+            if effort_score and effort_score >= 0.2:
+                return f"Good thinking — your approach is on the right track! Review the failing test case.{score_label}"
+            if effort_score and effort_score > 0:
+                return f"Good attempt! Your code is related but needs a different approach. Try again!{score_label}"
+            return f"Read the question carefully and try again — you can do it!{score_label}"
 
     async def evaluate_code_with_test_results(self, question: str, user_code: str,
                                               test_results: Dict) -> Dict:
@@ -1117,20 +1240,25 @@ Write 2 sentences of gentle encouraging feedback:
             display_result = "Accepted"
 
         elif total_passed > 0:
+            # Proportional score based on test cases passed
+            # e.g. 1/5 = 0.2, 2/5 = 0.4, 3/5 = 0.6, 4/5 = 0.8
             partial_score  = round(total_passed / total_cases, 2)
             is_correct     = False
             display_result = f"Partial — {total_passed}/{total_cases} test cases passed"
 
         else:
-            # 0 passed — run effort scoring in thread pool (non-blocking)
+            # 0 passed — run granular effort scoring (0.0 / 0.1 / 0.2 / 0.3)
             effort_score   = await self._run_in_thread(self._evaluate_code_effort, question, user_code)
             partial_score  = effort_score
             is_correct     = False
-            display_result = (
-                f"Wrong Answer — good effort! ({total_passed}/{total_cases} passed)"
-                if effort_score > 0
-                else test_results.get("overall_result", "Wrong Answer")
-            )
+            if effort_score >= 0.3:
+                display_result = f"Wrong Answer — logic very close, small bug ({total_passed}/{total_cases} passed)"
+            elif effort_score >= 0.2:
+                display_result = f"Wrong Answer — right approach, logic flaw ({total_passed}/{total_cases} passed)"
+            elif effort_score > 0:
+                display_result = f"Wrong Answer — related attempt ({total_passed}/{total_cases} passed)"
+            else:
+                display_result = test_results.get("overall_result", "Wrong Answer")
 
         logger.info(
             f"  📊 Code eval: {total_passed}/{total_cases} passed ({score_pct}%) "
@@ -1365,7 +1493,7 @@ ISSUES: List issues or "None" """
                     all_feedbacks.append(result.get("explanation", ""))
 
             else:
-                # ── PARALLEL: check answers first (sync, fast), then explain in parallel ──
+                # ── PARALLEL: check answers (sync, fast), then explain in parallel ──
                 correct_flags = []
                 for idx, qa in enumerate(qa_pairs):
                     try:
@@ -1420,6 +1548,7 @@ ISSUES: List issues or "None" """
                                                   "Correct! Good understanding.", "Well done!"])
                         explanation_tasks.append(_correct_msg())
                     else:
+                        # Step-by-step explanation for wrong answers (dev + non-dev)
                         explanation_tasks.append(
                             self._run_in_thread(
                                 self._generate_explanation_sync,
