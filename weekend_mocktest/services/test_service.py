@@ -18,8 +18,17 @@ FIX: force_complete_test CASE 1 & 2 use test_completed check instead of score > 
      so 0-score terminated results are never overwritten.
 FIX: _save_results detects boilerplate/skipped coding answers and stores None
      so Question Review tab shows "Not answered" instead of template code.
-FIX: _save_results now calls Groq to generate real per-question explanations
-     for all wrong/skipped questions before saving to MongoDB.
+FIX: _save_results now calls Groq to generate real per-question step-by-step
+     explanations for all wrong/skipped questions before saving to MongoDB.
+     Options are included in the prompt for MCQ questions.
+FIX: _sanitize_result() strips all known bad/hardcoded feedback strings before
+     every MongoDB write — "No code submitted before termination" etc. are
+     replaced with "" so Groq generates proper explanations on next PDF load.
+
+STARTUP: Call test_service.run_startup_migrations() in your FastAPI startup event:
+    @app.on_event("startup")
+    async def startup():
+        test_service.run_startup_migrations()
 """
 
 import logging
@@ -67,11 +76,18 @@ class TestService:
 
     # Common boilerplate patterns injected by the code editor when student skips
     _BOILERPLATE_PATTERNS = [
+        # Python
         "# write your solution here\ndef solution():\n    # your code here\n    pass\n\n# test your solution\nif __name__ == \"__main__\":\n    solution()",
         "# write your solution here\ndef solution():\n    # your code here\n    pass",
+        # JavaScript
         "// write your solution here\nfunction solution() {\n    // your code here\n}",
+        # Java
         "public class solution {\n    public static void main(string[] args) {\n        // write your solution here\n    }\n}",
+        # Go variants
         "// write your solution here\n// write your go solution here",
+        # The exact Go boilerplate the editor injects with Hello World
+        "package main\nimport \"fmt\"\n// write your solution here\nfunc solution() {\n// your code here\nfmt.println(\"hello, world!\")\n}\nfunc main() {\nsolution()\n}",
+        "package main\nimport \"fmt\"\nfunc solution() {\nfmt.println(\"hello, world!\")\n}\nfunc main() {\nsolution()\n}",
     ]
 
     def __init__(self):
@@ -269,34 +285,191 @@ class TestService:
         """
         Returns True if the submitted code is just the editor's default boilerplate
         (meaning the student never typed anything — treat as skipped).
+
+        Uses pattern-based detection instead of exact match so whitespace/
+        indentation differences don't matter.
         """
         if not code:
             return False
-        stripped = code.strip().lower()
+
+        # Normalize: lowercase + collapse all whitespace to single spaces
+        normalized = ' '.join(code.strip().lower().split())
 
         # Check against question's own stored boilerplate first
         stored_bp = (
             question.get("boilerplate_code") or question.get("starter_code") or
             question.get("template_code") or question.get("default_code") or ""
         )
-        if stored_bp and stripped == stored_bp.strip().lower():
+        if stored_bp:
+            stored_normalized = ' '.join(stored_bp.strip().lower().split())
+            if normalized == stored_normalized:
+                return True
+
+        # ── Pattern-based detection (language agnostic) ──────────────────
+        # A submission is boilerplate if it contains a template comment
+        # AND the only real output is Hello World or nothing
+
+        TEMPLATE_COMMENT_SIGNALS = [
+            '// write your solution here',
+            '// your code here',
+            '// write code here',
+            '# write your solution here',
+            '# your code here',
+            '# write code here',
+            '/* write your solution here */',
+        ]
+
+        HELLO_WORLD_SIGNALS = [
+            'hello, world!',
+            'hello world',
+            '"hello, world!"',
+            '"hello world"',
+            "'hello, world!'",
+            "'hello world'",
+        ]
+
+        has_template_comment = any(sig in normalized for sig in TEMPLATE_COMMENT_SIGNALS)
+        has_hello_world      = any(sig in normalized for sig in HELLO_WORLD_SIGNALS)
+
+        if has_template_comment:
+            logger.info(f"🚫 Boilerplate detected (template comment found)")
             return True
 
-        # Check against known editor-injected default patterns
-        for bp in self._BOILERPLATE_PATTERNS:
-            if stripped == bp.strip().lower():
+        if has_hello_world:
+            # Hello World with no real logic = boilerplate
+            # Strip all comments and boilerplate structure, check if anything real remains
+            import re
+            code_lower = code.lower()
+            # Remove all comment lines
+            no_comments = re.sub(r'//.*|#.*|/\*.*?\*/', '', code_lower, flags=re.DOTALL)
+            # Remove known boilerplate structure keywords
+            for kw in [
+                'package main', 'import "fmt"', "import 'fmt'",
+                'func main()', 'func solution()', 'def solution():',
+                'public static void main', 'public class solution', 'public class main',
+                'function solution()', 'fmt.println', 'system.out.println',
+                'console.log', 'print(', 'println(',
+                'hello, world!', 'hello world',
+                '{', '}', '(', ')', ';', '\n', '\t',
+            ]:
+                no_comments = no_comments.replace(kw, ' ')
+            remaining = no_comments.strip()
+            if not remaining or len(remaining.replace(' ', '')) < 10:
+                logger.info(f"🚫 Boilerplate detected (Hello World only, no real logic)")
+                return True
+
+        # ── Exact normalized match against known patterns ────────────────
+        KNOWN_BOILERPLATE_NORMALIZED = [
+            # Python
+            '# write your solution here def solution(): # your code here pass # test your solution if __name__ == "__main__": solution()',
+            '# write your solution here def solution(): # your code here pass',
+            # JavaScript
+            '// write your solution here function solution() { // your code here }',
+            # Java
+            'public class solution { public static void main(string[] args) { // write your solution here } }',
+            # Go
+            '// write your solution here // write your go solution here',
+        ]
+        for bp in KNOWN_BOILERPLATE_NORMALIZED:
+            bp_norm = ' '.join(bp.strip().lower().split())
+            if normalized == bp_norm:
                 return True
 
         return False
 
     # ════════════════════════════════════════════════════════════
-    # GROQ EXPLANATION GENERATOR
+    # STARTUP MIGRATION — auto-clean bad data on server start
     # ════════════════════════════════════════════════════════════
+
+    def run_startup_migrations(self):
+        """
+        Auto-clean known bad/hardcoded strings from existing MongoDB records.
+        Call this once on server startup — idempotent and fast.
+        """
+        try:
+            # 1. Clean bad feedback strings from conversation_pairs
+            result = self.db_manager.test_results_collection.update_many(
+                {"conversation_pairs.feedback": {"$in": [
+                    "No code submitted before termination",
+                    "Not Attempted", "Skipped",
+                    "No answer submitted", "N/A",
+                ]}},
+                {"$set": {"conversation_pairs.$[elem].feedback": ""}},
+                array_filters=[{"elem.feedback": {"$in": [
+                    "No code submitted before termination",
+                    "Not Attempted", "Skipped",
+                    "No answer submitted", "N/A",
+                ]}}]
+            )
+            if result.modified_count:
+                logger.info(f"🧹 Startup migration: cleaned {result.modified_count} bad feedback strings")
+
+            # 2. Unset cached PDF paths so stale PDFs regenerate with correct data
+            self.db_manager.test_results_collection.update_many(
+                {"$or": [
+                    {"conversation_pairs.feedback": ""},
+                    {"conversation_pairs": {"$elemMatch": {
+                        "question_type": "coding",
+                        "correct_answer": {"$in": ["N/A", "", None]}
+                    }}}
+                ]},
+                {"$unset": {"pdf_path": "", "pdf_url": ""}}
+            )
+            logger.info("✅ Startup migrations complete")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Startup migration failed (non-fatal): {e}")
+
+
+
+    # Known stale/hardcoded strings that should never reach MongoDB
+    _BAD_FEEDBACK_STRINGS = {
+        "no code submitted before termination",
+        "not attempted",
+        "skipped",
+        "no answer submitted",
+        "test terminated",
+        "n/a",
+        "na",
+    }
+
+    def _sanitize_result(self, data: dict) -> dict:
+        """
+        Strip known bad/hardcoded feedback strings from conversation_pairs
+        and section_details before saving to MongoDB.
+        Any bad string is replaced with "" so Groq fills it on next PDF load.
+        """
+        def _clean(text) -> str:
+            if not text:
+                return ""
+            if str(text).strip().lower() in self._BAD_FEEDBACK_STRINGS:
+                return ""
+            return text
+
+        # Clean conversation_pairs feedbacks
+        for cp in data.get("conversation_pairs", []):
+            cp["feedback"] = _clean(cp.get("feedback"))
+
+        # Clean section_details explanations
+        for sec in data.get("section_details", {}).values():
+            for q in sec.get("questions", []):
+                q["explanation"] = _clean(q.get("explanation"))
+
+        # Clean top-level feedbacks list
+        if "feedbacks" in data:
+            data["feedbacks"] = [_clean(f) for f in data["feedbacks"]]
+
+        return data
+
+
 
     async def _generate_explanations_batch(self, wrong_pairs: List[Dict]) -> Dict[int, str]:
         """
-        Call Groq once to generate short, meaningful explanations for all
+        Call Groq once to generate step-by-step explanations for all
         wrong/skipped questions. Returns {question_number: explanation_text}.
+
+        Works for both Developer and Non-Developer tracks.
+        Includes options in the prompt for MCQ questions.
 
         wrong_pairs: list of conversation_pair dicts where is_correct=False or skipped.
         """
@@ -305,25 +478,40 @@ class TestService:
 
         explanations = {}
         try:
-            # Build a compact prompt listing all wrong questions
+            # Build a compact prompt listing all wrong questions with options
             lines = []
             for item in wrong_pairs:
                 q_num    = item["question_number"]
                 question = item["question"] or ""
                 correct  = item["correct_answer"] or ""
                 user_ans = item.get("answer") or "No answer (skipped)"
+                options  = item.get("options", [])
+
+                # Include options for MCQ context
+                opts_text = ""
+                if options:
+                    opts_text = "\nOptions: " + " / ".join(
+                        f"{chr(65+i)}) {o}" for i, o in enumerate(options)
+                    )
+
                 lines.append(
                     f"Q{q_num}:\n"
-                    f"Question: {question}\n"
+                    f"Question: {question}{opts_text}\n"
                     f"Student answered: {user_ans}\n"
                     f"Correct answer: {correct}"
                 )
 
             prompt = (
-                "You are a test feedback assistant. For each question below, write a single "
-                "clear explanation (1-2 sentences max) that tells the student WHY the correct "
-                "answer is right and where their thinking went wrong. Be specific and educational.\n\n"
-                "Respond in this exact format for each question:\n"
+                "You are an expert tutor reviewing a student's test. "
+                "For each question below, write a step-by-step explanation showing HOW to reach the correct answer.\n\n"
+                "RULES:\n"
+                "- Show calculation steps for math/aptitude (Step 1: ... Step 2: ... Step 3: ...)\n"
+                "- For MCQ/theory: explain WHY the correct option is right and what the wrong option actually means\n"
+                "- Point out exactly where the student's answer went wrong\n"
+                "- End each explanation with: Therefore, the correct answer is [answer]\n"
+                "- Keep each explanation under 5 lines — concise but complete\n"
+                "- NEVER just restate the answer — always show the WHY and HOW\n\n"
+                "Respond in this EXACT format for each question:\n"
                 "Q<number>: <explanation>\n\n"
                 + "\n\n".join(lines)
             )
@@ -336,10 +524,20 @@ class TestService:
                 return {}
 
             response = client.chat.completions.create(
-                model="llama3-8b-8192",
-                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an expert tutor. Give step-by-step explanations. "
+                            "For math questions show calculations. For theory questions explain why. "
+                            "Be concise and educational. Respond only with Q<n>: <explanation> lines."
+                        )
+                    },
+                    {"role": "user", "content": prompt}
+                ],
                 temperature=0.3,
-                max_tokens=800,
+                max_tokens=1200,
             )
 
             raw = response.choices[0].message.content.strip()
@@ -351,6 +549,8 @@ class TestService:
                 q_num = int(match.group(1))
                 text  = match.group(2).strip().replace("\n", " ")
                 explanations[q_num] = text
+
+            logger.info(f"✅ Groq returned {len(explanations)} explanations")
 
         except Exception as e:
             logger.error(f"❌ Explanation batch generation failed: {e}")
@@ -742,13 +942,13 @@ class TestService:
                         total_tc   = tc.get("total_cases", 1)
                         score      = round((passed / total_tc), 2) if total_tc else 0
                         if score > 0:
-                            score = max(score, 0.4)
+                            score = max(score, 0.1)
                         correct += score
-                        scores.append(score >= 0.4)
+                        scores.append(score >= 0.1)
                         feedbacks.append(f"Coding: {passed}/{total_tc} test cases passed")
                     else:
                         scores.append(False)
-                        feedbacks.append("No code submitted before termination")
+                        feedbacks.append("")  # Groq will generate "here's how to solve it" explanation
                     continue
 
                 # MCQ / Aptitude — instant comparison
@@ -844,11 +1044,8 @@ class TestService:
                         logger.warning(f"⚠️ Could not fetch student profile: {mysql_err}")
 
                 existing = self.db_manager.test_results_collection.find_one(
-                    {"test_id": test_id}, {"score": 1, "test_completed": 1, "total_questions": 1,
-                                           "score_percentage": 1, "section_scores": 1, "section_details": 1}
+                    {"test_id": test_id}, {"_id": 0}
                 )
-                # FIX: use test_completed flag instead of score > 0
-                # so 0-score terminated results are never overwritten
                 if existing and existing.get("test_completed"):
                     logger.info(f"✅ Result already exists score={existing.get('score', 0)} — skipping")
                     return {
@@ -861,6 +1058,96 @@ class TestService:
                         "section_details":  existing.get("section_details", {}),
                     }
 
+                # ── Try to rescue question data from any existing partial record ──
+                # When session expires from memory but MongoDB has a partial record
+                # (e.g. auto-saved during test), use that to build proper results.
+                rescued_pairs    = existing.get("conversation_pairs", []) if existing else []
+                rescued_sections = existing.get("section_details", {})    if existing else {}
+
+                if rescued_pairs:
+                    logger.info(f"♻️ Rescued {len(rescued_pairs)} questions from existing partial record")
+
+                    # Re-score rescued pairs quickly
+                    rescued_correct  = sum(1 for p in rescued_pairs if p.get("correct"))
+                    rescued_total    = len(rescued_pairs)
+                    rescued_pct      = round((rescued_correct / rescued_total) * 100, 1) if rescued_total else 0
+
+                    # Build section_scores from rescued pairs
+                    sec_counts: dict = {}
+                    for p in rescued_pairs:
+                        qt = p.get("question_type", "mcq")
+                        if qt not in sec_counts:
+                            sec_counts[qt] = {"correct": 0, "total": 0}
+                        sec_counts[qt]["total"]   += 1
+                        sec_counts[qt]["correct"] += 1 if p.get("correct") else 0
+                    rescued_section_scores = {
+                        k: {
+                            "correct":    v["correct"],
+                            "total":      v["total"],
+                            "percentage": round((v["correct"] / v["total"]) * 100, 1) if v["total"] else 0,
+                        }
+                        for k, v in sec_counts.items()
+                    }
+
+                    # Generate Groq explanations for all wrong questions in rescued pairs
+                    needs_exp = [
+                        p for p in rescued_pairs
+                        if not p.get("correct")
+                        and p.get("question_type") != "coding"
+                        and not (p.get("feedback") and len(str(p.get("feedback", ""))) > 30)
+                    ]
+                    if needs_exp:
+                        logger.info(f"💡 Generating explanations for {len(needs_exp)} rescued wrong questions...")
+                        try:
+                            exp_map = await self._generate_explanations_batch(needs_exp)
+                            for p in rescued_pairs:
+                                if p.get("question_number") in exp_map:
+                                    p["feedback"] = exp_map[p["question_number"]]
+                        except Exception as exp_err:
+                            logger.warning(f"⚠️ Explanation gen failed: {exp_err}")
+
+                    clean = self._sanitize_result({
+                        "conversation_pairs": rescued_pairs,
+                        "section_details":    rescued_sections,
+                        "feedbacks":          [],
+                    })
+
+                    self.db_manager.test_results_collection.update_one(
+                        {"test_id": test_id},
+                        {"$set": {
+                            "test_id": test_id, "user_type": existing.get("user_type", "dev"),
+                            "student_id": student_id or existing.get("student_id"),
+                            "student_name": student_name or existing.get("student_name", ""),
+                            "email": email or existing.get("email", ""),
+                            "course": course or existing.get("course", ""),
+                            "batch":  batch  or existing.get("batch", ""),
+                            "role_type": role_type or existing.get("role_type", ""),
+                            "score":            rescued_correct,
+                            "total_questions":  rescued_total,
+                            "score_percentage": rescued_pct,
+                            "section_scores":   rescued_section_scores,
+                            "section_details":  clean["section_details"],
+                            "conversation_pairs": clean["conversation_pairs"],
+                            "final_message":    "Test terminated due to proctoring violations.",
+                            "evaluation_report": "Test terminated — scores based on answered questions.",
+                            "test_completed": True, "terminated": True,
+                            "terminated_by_warnings": True, "termination_reason": reason,
+                            "warning_count": warnings or wd.get("warning_count", 0),
+                            "warnings": wd.get("warnings", []),
+                            "timestamp": time.time(),
+                        }},
+                        upsert=True
+                    )
+                    logger.info(f"✅ Saved rescued terminated record: {rescued_correct}/{rescued_total} for {test_id[:8]}")
+                    return {
+                        "status": "terminated", "reason": reason,
+                        "score": rescued_correct, "total_questions": rescued_total,
+                        "score_percentage": rescued_pct,
+                        "section_scores": rescued_section_scores,
+                        "section_details": rescued_sections,
+                    }
+
+                # ── No existing data at all — save blank terminated record ────
                 self.db_manager.test_results_collection.update_one(
                     {"test_id": test_id},
                     {"$set": {
@@ -893,7 +1180,6 @@ class TestService:
                 {"test_id": test_id}, {"score": 1, "test_completed": 1, "total_questions": 1,
                                        "score_percentage": 1, "section_scores": 1, "section_details": 1}
             )
-            # FIX: use test_completed flag instead of score > 0
             if existing and existing.get("test_completed"):
                 logger.info(f"✅ Result already exists score={existing.get('score', 0)} — skipping")
                 return {
@@ -1042,7 +1328,8 @@ class TestService:
             })
 
         # ════════════════════════════════════════════════════════════
-        # GROQ EXPLANATIONS — generate for all wrong / skipped questions
+        # GROQ EXPLANATIONS — generate step-by-step for all wrong/skipped
+        # questions (aptitude + MCQ only; coding has its own explanation system)
         # ════════════════════════════════════════════════════════════
         wrong_pairs = [
             p for p in conversation_pairs
@@ -1050,7 +1337,7 @@ class TestService:
         ]
 
         if wrong_pairs:
-            logger.info(f"💡 Generating Groq explanations for {len(wrong_pairs)} wrong/skipped questions...")
+            logger.info(f"💡 Generating step-by-step Groq explanations for {len(wrong_pairs)} wrong/skipped questions...")
             try:
                 explanation_map = await self._generate_explanations_batch(wrong_pairs)
 
@@ -1067,9 +1354,42 @@ class TestService:
                         if q_num in explanation_map:
                             q["explanation"] = explanation_map[q_num]
 
-                logger.info(f"✅ Explanations injected for {len(explanation_map)} questions")
+                logger.info(f"✅ Step-by-step explanations injected for {len(explanation_map)} questions")
             except Exception as exp_err:
                 logger.error(f"❌ Explanation injection failed (non-fatal): {exp_err}")
+
+        # ════════════════════════════════════════════════════════════
+        # CODING CORRECT ANSWERS — generate solution code for wrong/skipped
+        # coding questions so "Correct Answer" is never "N/A" in the UI/PDF
+        # ════════════════════════════════════════════════════════════
+        wrong_coding_pairs = [
+            p for p in conversation_pairs
+            if p.get("question_type") == "coding"
+            and not p["correct"]
+            and (not p.get("correct_answer") or str(p.get("correct_answer", "")).strip() in ("", "N/A", "None"))
+        ]
+
+        if wrong_coding_pairs:
+            logger.info(f"💡 Generating correct solution code for {len(wrong_coding_pairs)} coding questions...")
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop()
+            for pair in wrong_coding_pairs:
+                try:
+                    question_text = pair.get("question", "")
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda qt=question_text: self.ai_service._generate_correct_code_sync(qt)
+                    )
+                    correct_code = result.get("code", "")
+                    if correct_code and correct_code.strip() and correct_code != "# Unable to generate":
+                        pair["correct_answer"] = correct_code
+                        logger.info(f"  ✅ Correct code generated for coding Q{pair['question_number']}")
+                    else:
+                        pair["correct_answer"] = "# See the approach hint in the explanation above"
+                except Exception as ce:
+                    logger.warning(f"  ⚠️ Correct code gen failed for Q{pair['question_number']}: {ce}")
+                    pair["correct_answer"] = "# See the approach hint in the explanation above"
+        # ════════════════════════════════════════════════════════════
         # ════════════════════════════════════════════════════════════
 
         if pct >= 80:   final_msg = "Excellent performance!"
@@ -1078,6 +1398,17 @@ class TestService:
 
         wd              = self.db_manager.get_warnings(test_id)
         student_profile = test_data.get("student_profile", {})
+
+        # ── Sanitize before writing — strip all known bad feedback strings ──
+        clean_pairs = self._sanitize_result({
+            "conversation_pairs": conversation_pairs,
+            "section_details": section_details,
+            "feedbacks": feedbacks,
+        })
+        conversation_pairs = clean_pairs["conversation_pairs"]
+        section_details    = clean_pairs["section_details"]
+        feedbacks          = clean_pairs["feedbacks"]
+        # ────────────────────────────────────────────────────────────────────
 
         self.db_manager.test_results_collection.update_one(
             {"test_id": test_id},
@@ -1231,35 +1562,120 @@ class TestService:
 
     async def get_test_results(self, test_id: str) -> Optional[Dict]:
         doc = self.db_manager.test_results_collection.find_one({"test_id": test_id}, {"_id": 0})
-        if doc:
-            return {
-                "test_id":                doc.get("test_id"),
-                "student_id":             doc.get("student_id"),
-                "student_name":           doc.get("student_name", ""),
-                "email":                  doc.get("email", ""),
-                "course":                 doc.get("course", ""),
-                "batch":                  doc.get("batch", ""),
-                "role_type":              doc.get("role_type", ""),
-                "user_type":              doc.get("user_type", "dev"),
-                "score":                  doc.get("score", 0),
-                "total_questions":        doc.get("total_questions", 0),
-                "score_percentage":       doc.get("score_percentage", 0),
-                "analytics":              doc.get("evaluation_report", ""),
-                "evaluation_report":      doc.get("evaluation_report", ""),
-                "section_scores":         doc.get("section_scores", {}),
-                "section_details":        doc.get("section_details", {}),
-                "conversation_pairs":     doc.get("conversation_pairs", []),
-                "timestamp":              doc.get("timestamp", 0),
-                "completed_at":           doc.get("timestamp", 0),
-                "warning_count":          doc.get("warning_count", 0),
-                "warnings":               doc.get("warnings", []),
-                "terminated_by_warnings": doc.get("terminated_by_warnings", False),
-                "termination_reason":     doc.get("termination_reason"),
-                "terminated":             doc.get("terminated", False),
-                "final_message":          doc.get("final_message", ""),
-                "pdf_path":               doc.get("pdf_path", ""),
-            }
-        return None
+        if not doc:
+            return None
+
+        # ── Heal missing/bad explanations on the fly ─────────────────────
+        # Covers old terminated records that were saved before Groq fixes.
+        conversation_pairs = doc.get("conversation_pairs", [])
+        section_details    = doc.get("section_details", {})
+
+        BAD = {"", "n/a", "na", "skipped", "not attempted",
+               "no answer submitted", "no code submitted before termination",
+               "review this concept"}
+
+        def _is_bad(text) -> bool:
+            if not text:
+                return True
+            t = str(text).strip().lower()
+            if t in BAD:
+                return True
+            # Old hardcoded fallback pattern
+            if t.startswith("review this concept") or t.startswith("the correct answer is"):
+                return True
+            return False
+
+        # Collect wrong non-coding questions that need explanations
+        needs_explanation = []
+        for cp in conversation_pairs:
+            if cp.get("question_type") == "coding":
+                continue
+            if not cp.get("correct") and _is_bad(cp.get("feedback")):
+                needs_explanation.append({
+                    "question_number": cp.get("question_number"),
+                    "question":        cp.get("question", ""),
+                    "answer":          cp.get("answer") or "No answer (skipped)",
+                    "correct_answer":  cp.get("correct_answer", ""),
+                    "options":         cp.get("options", []),
+                })
+
+        # Also from section_details
+        for sec_name, sec_data in section_details.items():
+            if sec_name == "coding":
+                continue
+            for q in sec_data.get("questions", []):
+                if not q.get("is_correct") and _is_bad(q.get("explanation")):
+                    needs_explanation.append({
+                        "question_number": q.get("question_number"),
+                        "question":        q.get("question", ""),
+                        "answer":          q.get("user_answer") or "No answer (skipped)",
+                        "correct_answer":  q.get("correct_answer", ""),
+                        "options":         q.get("options", []),
+                    })
+
+        if needs_explanation:
+            logger.info(f"🔧 Healing {len(needs_explanation)} missing explanations for {test_id[:8]}...")
+            try:
+                explanation_map = await self._generate_explanations_batch(needs_explanation)
+
+                updated = False
+                # Patch conversation_pairs
+                for cp in conversation_pairs:
+                    q_num = cp.get("question_number")
+                    if q_num in explanation_map and _is_bad(cp.get("feedback")):
+                        cp["feedback"] = explanation_map[q_num]
+                        updated = True
+
+                # Patch section_details
+                for sec_name, sec_data in section_details.items():
+                    for q in sec_data.get("questions", []):
+                        q_num = q.get("question_number")
+                        if q_num in explanation_map and _is_bad(q.get("explanation")):
+                            q["explanation"] = explanation_map[q_num]
+                            updated = True
+
+                if updated:
+                    # Persist healed data back to MongoDB + clear stale PDF
+                    self.db_manager.test_results_collection.update_one(
+                        {"test_id": test_id},
+                        {"$set": {
+                            "conversation_pairs": conversation_pairs,
+                            "section_details":    section_details,
+                        },
+                        "$unset": {"pdf_path": "", "pdf_url": ""}}
+                    )
+                    logger.info(f"✅ Healed + saved explanations for {test_id[:8]}")
+            except Exception as heal_err:
+                logger.warning(f"⚠️ Explanation healing failed (non-fatal): {heal_err}")
+        # ─────────────────────────────────────────────────────────────────
+
+        return {
+            "test_id":                doc.get("test_id"),
+            "student_id":             doc.get("student_id"),
+            "student_name":           doc.get("student_name", ""),
+            "email":                  doc.get("email", ""),
+            "course":                 doc.get("course", ""),
+            "batch":                  doc.get("batch", ""),
+            "role_type":              doc.get("role_type", ""),
+            "user_type":              doc.get("user_type", "dev"),
+            "score":                  doc.get("score", 0),
+            "total_questions":        doc.get("total_questions", 0),
+            "score_percentage":       doc.get("score_percentage", 0),
+            "analytics":              doc.get("evaluation_report", ""),
+            "evaluation_report":      doc.get("evaluation_report", ""),
+            "section_scores":         doc.get("section_scores", {}),
+            "section_details":        section_details,
+            "conversation_pairs":     conversation_pairs,
+            "timestamp":              doc.get("timestamp", 0),
+            "completed_at":           doc.get("timestamp", 0),
+            "warning_count":          doc.get("warning_count", 0),
+            "warnings":               doc.get("warnings", []),
+            "terminated_by_warnings": doc.get("terminated_by_warnings", False),
+            "termination_reason":     doc.get("termination_reason"),
+            "terminated":             doc.get("terminated", False),
+            "final_message":          doc.get("final_message", ""),
+            "pdf_path":               doc.get("pdf_path", ""),
+        }
 
     async def get_all_tests(self) -> List[Dict]:
         return list(self.db_manager.test_results_collection.find({}, {"_id": 0}).sort("timestamp", -1).limit(100))
