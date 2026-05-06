@@ -1,25 +1,25 @@
 
-# ?? FastAPI Multi-Module Interview & Testing System
+#  FastAPI Multi-Module Interview & Testing System
 
 A comprehensive AI-powered platform featuring voice-based interviews, mock tests, and daily standups. Built with FastAPI, MongoDB, LangChain, and OpenAI/Groq APIs, this system provides a complete solution for technical assessments, adaptive testing, and real-time evaluation.
 
 ---
 
-## ?? Features
+##  Features
 
-### ?? Daily Standup Module
+###  Daily Standup Module
 - Voice-based adaptive questioning
 - Whisper transcription (via Groq API)
 - Text-to-speech feedback (Edge TTS)
 - Real-time evaluation, silence detection
 - PDF summary export
 
-### ?? Weekend Mock Test Module
+###  Weekend Mock Test Module
 - Developer & Non-developer test modes
 - Code questions, MCQs, adaptive logic
 - PDF export and scoring analytics
 
-### ?? Weekly Interview Module
+###  Weekly Interview Module
 - 3-round AI interview (Tech, Comm, HR)
 - Realistic voice interaction
 - Progressive difficulty & evaluation
@@ -27,7 +27,7 @@ A comprehensive AI-powered platform featuring voice-based interviews, mock tests
 
 ---
 
-## ??? Project Structure
+##  Project Structure
 
 ```
 
@@ -53,7 +53,7 @@ A comprehensive AI-powered platform featuring voice-based interviews, mock tests
 
 ---
 
-## ?? Tech Stack
+##  Tech Stack
 
 **Backend**
 - FastAPI, MongoDB, LangChain
@@ -70,7 +70,7 @@ A comprehensive AI-powered platform featuring voice-based interviews, mock tests
 
 ---
 
-## ?? Prerequisites
+##  Prerequisites
 
 - Python 3.8+ (Windows/Linux)
 - MongoDB (local/cloud)
@@ -80,9 +80,9 @@ A comprehensive AI-powered platform featuring voice-based interviews, mock tests
 
 ---
 
-## ??? Setup (Linux)
+##  Setup (Linux)
 
-### ? One-Step Script-Based Setup (Recommended)
+###  One-Step Script-Based Setup (Recommended)
 
 ```bash
 git clone https://github.com/ajithapamula/Edu-app.git
@@ -114,7 +114,7 @@ Open browser: [http://localhost:8090](http://localhost:8090)
 
 ---
 
-### ??? Docker Setup (No Python Needed)
+###  Docker Setup (No Python Needed)
 
 **Steps:**
 
@@ -136,7 +136,7 @@ Open: [http://localhost:8090](http://localhost:8090)
 
 ---
 
-## ?? Docker Files
+##  Docker Files
 
 **Dockerfile**
 
@@ -178,7 +178,7 @@ volumes:
 
 ---
 
-## ??? APIs (Selected)
+##  APIs (Selected)
 
 **Daily Standup**
 
@@ -199,7 +199,7 @@ volumes:
 
 ---
 
-## ?? Usage Flow
+##  Usage Flow
 
 ### Daily Standup
 
@@ -221,7 +221,7 @@ volumes:
 
 ---
 
-## ?? Troubleshooting
+##  Troubleshooting
 
 | Issue              | Solution                                        |                                             |
 | ------------------ | ----------------------------------------------- | ------------------------------------------- |
@@ -232,7 +232,7 @@ volumes:
 
 ---
 
-## ?? Performance & Security
+##  Performance & Security
 
 * Audio auto-deletes after 1 hour
 * Sessions expire after 2 hrs
@@ -241,11 +241,11 @@ volumes:
 
 ---
 
-## ?? Future Add-ons
+##  Future Add-ons
 
-* ? JWT Authentication
-* ? Admin dashboard with results
-* ? AI candidate scoring with LLM memory
-* ? Leaderboard & job alerts integration
+*  JWT Authentication
+*  Admin dashboard with results
+*  AI candidate scoring with LLM memory
+*  Leaderboard & job alerts integration
 
 ---
