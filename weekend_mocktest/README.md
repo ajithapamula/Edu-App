@@ -1,12 +1,12 @@
 # TMPS Development Guide - Production Architecture & Design Decisions
 
-## ?? System Understanding for Production Development
+##  System Understanding for Production Development
 
 This document explains the **WHY** behind every architectural decision, design pattern, and implementation choice in the TMPS (Test Management and Practice System). This is a **production-ready system** with real AI integration and live database connections.
 
 ---
 
-## ?? Project Genesis & Core Requirements
+##  Project Genesis & Core Requirements
 
 ### **Production Problem Statement**
 - Build a **scalable AI-powered mock testing system** supporting both technical (developer) and non-technical assessments
@@ -24,7 +24,7 @@ This document explains the **WHY** behind every architectural decision, design p
 
 ---
 
-## ??? Production Architecture Philosophy
+##  Production Architecture Philosophy
 
 ### **Why AI-First Architecture?**
 
@@ -62,7 +62,7 @@ def generate_questions(user_type: str, context: str):
 
 ---
 
-## ?? Production Data Flow Architecture
+##  Production Data Flow Architecture
 
 ### **Real-Time Test Lifecycle**
 
@@ -119,7 +119,7 @@ sequenceDiagram
 
 ---
 
-## ?? AI Integration Production Architecture
+##  AI Integration Production Architecture
 
 ### **Content Intelligence Pipeline**
 
@@ -181,7 +181,7 @@ def generate_questions_batch(user_type: str, context: str) -> List[Dict]:
 
 ---
 
-## ??? Production Database Architecture
+##  Production Database Architecture
 
 ### **MongoDB + MySQL Hybrid**
 
@@ -246,7 +246,7 @@ class MemoryManager:
 
 ---
 
-## ?? AI Evaluation Production System
+##  AI Evaluation Production System
 
 ### **Intelligent Answer Assessment**
 
@@ -286,7 +286,7 @@ def evaluate_test_batch(user_type: str, qa_pairs: List[Dict]) -> Dict:
 
 ---
 
-## ? Production Performance Optimizations
+##  Production Performance Optimizations
 
 ### **Question Generation Performance**
 
@@ -327,7 +327,7 @@ def optimize_question_generation():
 
 ---
 
-## ??? Production Security & Monitoring
+##  Production Security & Monitoring
 
 ### **Input Validation & Security**
 
@@ -381,7 +381,7 @@ class ProductionLogger:
 
 ---
 
-## ?? Production Configuration Management
+##  Production Configuration Management
 
 ### **Environment-Driven Configuration**
 
@@ -418,7 +418,7 @@ SUMMARY_SLICE_FRACTION=0.4
 
 ---
 
-## ?? Production Deployment Strategy
+##  Production Deployment Strategy
 
 ### **Docker Production Deployment**
 
